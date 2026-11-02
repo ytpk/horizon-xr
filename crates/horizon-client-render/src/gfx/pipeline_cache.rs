@@ -151,17 +151,8 @@ fn create(device: &wgpu::Device, data: Option<&[u8]>) -> Option<wgpu::PipelineCa
     let validation = device.push_error_scope(wgpu::ErrorFilter::Validation);
     let memory = device.push_error_scope(wgpu::ErrorFilter::OutOfMemory);
     let internal = device.push_error_scope(wgpu::ErrorFilter::Internal);
-    // SAFETY: `data` is what `get_data` gave for this adapter's cache in an
-    // earlier run, behind a checksum ([`read`]); wgpu checks its header against
-    // this device and driver, and with `fallback` it makes an empty cache from
-    // data it cannot use.
-    let cache = unsafe {
-        device.create_pipeline_cache(&wgpu::PipelineCacheDescriptor {
-            label: Some("Horizon pipeline cache"),
-            data,
-            fallback: true,
-        })
-    };
+    // `data` is what `get_data` gave in an earlier run, behind a checksum ([`read`]).
+    let cache = horizon_hdr::pipeline_cache(device, data);
     let error = [internal, memory, validation]
         .into_iter()
         .find_map(|scope| pollster::block_on(scope.pop()));
@@ -279,11 +270,9 @@ mod tests {
             name: "GPU".into(),
             vendor,
             device,
-            device_type: wgpu::DeviceType::DiscreteGpu,
             driver: "NVIDIA".into(),
             driver_info: driver_info.into(),
-            backend: wgpu::Backend::Vulkan,
-            ..wgpu::AdapterInfo::new(Default::default(), wgpu::Backend::Vulkan)
+            ..wgpu::AdapterInfo::new(wgpu::DeviceType::DiscreteGpu, wgpu::Backend::Vulkan)
         }
     }
 

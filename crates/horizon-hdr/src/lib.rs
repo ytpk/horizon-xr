@@ -1,7 +1,27 @@
 //! HDR metadata for the swapchain: the Vulkan calls the game crate, which
 //! forbids unsafe code, can't make itself. wgpu sets no HDR metadata, and
 //! without it a compositor may clip or tone-map everything above 1.0 (80 nits)
-//! of an scRGB swapchain.
+//! of an scRGB swapchain. Also the pipeline cache made from an earlier run's
+//! bytes ([`pipeline_cache`]).
+
+/// A pipeline cache from `data`, the bytes `PipelineCache::get_data` gave for
+/// this adapter in an earlier run (None: an empty cache). wgpu checks their
+/// header (adapter, driver's cache UUID, wgpu's version) and makes an empty
+/// cache from bytes that are outdated or cut short; bytes of another adapter
+/// are a validation error on `device`.
+pub fn pipeline_cache(device: &wgpu::Device, data: Option<&[u8]>) -> wgpu::PipelineCache {
+    // SAFETY: wgpu asks for bytes `get_data` returned for a compatible adapter;
+    // the caller keeps them unchanged on disk behind a checksum, wgpu rejects a
+    // header of another adapter or driver, and `fallback` turns outdated ones
+    // into an empty cache.
+    unsafe {
+        device.create_pipeline_cache(&wgpu::PipelineCacheDescriptor {
+            label: Some("Horizon pipeline cache"),
+            data,
+            fallback: true,
+        })
+    }
+}
 
 #[cfg(target_os = "linux")]
 pub mod wayland;

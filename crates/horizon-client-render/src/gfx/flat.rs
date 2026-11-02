@@ -1337,7 +1337,7 @@ mod tests {
                 module: &module,
                 entry_point: Some(entry),
                 compilation_options: Default::default(),
-                cache: crate::gfx::pipeline_cache::get(device),
+                cache: crate::gfx::pipeline_cache::get(&device),
             })
         };
         let (flatten, flatten_seen) = (pipeline("flatten"), pipeline("flatten_seen"));
