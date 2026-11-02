@@ -77,7 +77,7 @@ impl ObjectMotion {
                 targets: &[Some(FORMAT.into())],
             }),
             multiview_mask: None,
-            cache: None,
+            cache: crate::gfx::pipeline_cache::get(device),
         });
         Self {
             pipeline,

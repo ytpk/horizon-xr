@@ -244,6 +244,7 @@ pub mod pack_uniforms;
 mod pack_weather;
 mod page_runs;
 pub mod panorama;
+pub(crate) mod pipeline_cache;
 mod readback;
 mod resident;
 mod reuse;
@@ -2625,7 +2626,8 @@ fn device_features(adapter: &wgpu::Adapter) -> wgpu::Features {
                 | wgpu::Features::VERTEX_WRITABLE_STORAGE
                 | wgpu::Features::CLEAR_TEXTURE
                 | wgpu::Features::TEXTURE_ATOMIC
-                | wgpu::Features::FLOAT32_FILTERABLE))
+                | wgpu::Features::FLOAT32_FILTERABLE
+                | wgpu::Features::PIPELINE_CACHE))
 }
 /// The device the installed headset's runtime asks for, with the features and
 /// limits `open_backend` asks for; no window surface.
@@ -2995,6 +2997,8 @@ impl Renderer {
                 open_device(&window, offscreen, api, layers).await?
             }
         };
+        // Before the first pipeline: Vulkan reads back what it compiled last run.
+        pipeline_cache::open(&adapter, &device, &crate::logging::game_home());
         // Computed once: the sprite arrays, the shaders' constants and the
         // shader pack atlas all cut the sprites by it.
         let split = check_layers(&adapter, layers)?;
@@ -3292,7 +3296,7 @@ impl Renderer {
                     })],
                 }),
                 multiview_mask: None,
-                cache: None,
+                cache: crate::gfx::pipeline_cache::get(&device),
             };
             if hud == Some(true) {
                 hud_coverage::pipeline(
@@ -3535,7 +3539,7 @@ impl Renderer {
                 })],
             }),
             multiview_mask: None,
-            cache: None,
+            cache: crate::gfx::pipeline_cache::get(device),
         });
         let lines = pipeline(
             "Block outline",
@@ -4286,7 +4290,7 @@ impl Renderer {
                     })],
                 }),
                 multiview_mask: None,
-                cache: None,
+                cache: crate::gfx::pipeline_cache::get(device),
             })
         };
         #[allow(clippy::too_many_arguments)]
@@ -4504,7 +4508,7 @@ impl Renderer {
                 })],
             }),
             multiview_mask: None,
-            cache: None,
+            cache: crate::gfx::pipeline_cache::get(&device),
         });
         // RenderPipelines.ENERGY_SWIRL: BlendFunction.ADDITIVE (one, one), no culling; no depth
         // writes either: vanilla sorts the quads far to near, so every face passes the test.
@@ -4624,7 +4628,7 @@ impl Renderer {
                 })],
             }),
             multiview_mask: None,
-            cache: None,
+            cache: crate::gfx::pipeline_cache::get(device),
         };
         let additive_pipeline = kept.create_render_pipeline(&additive_descriptor);
         // `RenderPipelines.DRAGON_RAYS` uses DepthStencilState.DEFAULT:
@@ -4726,7 +4730,7 @@ impl Renderer {
                 })],
             }),
             multiview_mask: None,
-            cache: None,
+            cache: crate::gfx::pipeline_cache::get(device),
         });
         drop(entity_step);
         // WorldBorderRenderer: misc/forcefield.png as a MipmappedTexture
@@ -4896,7 +4900,7 @@ impl Renderer {
                 })],
             }),
             multiview_mask: None,
-            cache: None,
+            cache: crate::gfx::pipeline_cache::get(device),
         });
         let screen_shader = kept.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Horizon screen effects"),
@@ -4968,7 +4972,7 @@ impl Renderer {
                     })],
                 }),
                 multiview_mask: None,
-                cache: None,
+                cache: crate::gfx::pipeline_cache::get(device),
             })
         });
         let screen_capacity = 64;

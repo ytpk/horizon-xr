@@ -306,7 +306,7 @@ impl Oit {
                     targets,
                 }),
                 multiview_mask: None,
-                cache: None,
+                cache: crate::gfx::pipeline_cache::get(device),
             })
         };
         let terrain_pipeline = |label, fragment, stage| {
@@ -478,7 +478,7 @@ impl Oit {
                     targets: &stage_targets(stage),
                 }),
                 multiview_mask: None,
-                cache: None,
+                cache: crate::gfx::pipeline_cache::get(device),
             })
         };
         let cloud_pipelines = [

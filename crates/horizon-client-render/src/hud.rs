@@ -2765,7 +2765,7 @@ impl HudRenderer {
                     })],
                 }),
                 multiview_mask: None,
-                cache: None,
+                cache: crate::gfx::pipeline_cache::get(&device),
             };
             let source = wgpu::ShaderSource::Wgsl(include_str!("hud.wgsl").into());
             Pipeline::new(device, &desc, source, coverage).expect("the HUD's coverage")

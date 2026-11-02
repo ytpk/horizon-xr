@@ -455,7 +455,7 @@ impl Flat {
                 module: &module,
                 entry_point: Some(entry),
                 compilation_options: Default::default(),
-                cache: None,
+                cache: crate::gfx::pipeline_cache::get(device),
             })
         };
         let flatten = compute_pipeline(&compute_layout, "flatten");
@@ -1337,7 +1337,7 @@ mod tests {
                 module: &module,
                 entry_point: Some(entry),
                 compilation_options: Default::default(),
-                cache: None,
+                cache: crate::gfx::pipeline_cache::get(device),
             })
         };
         let (flatten, flatten_seen) = (pipeline("flatten"), pipeline("flatten_seen"));

@@ -448,7 +448,7 @@ fn entity_pipeline(
             targets: &[],
         }),
         multiview_mask: None,
-        cache: None,
+        cache: crate::gfx::pipeline_cache::get(device),
     })
 }
 
@@ -669,7 +669,7 @@ impl NativeShadow {
                     targets: if translucent { &color_target } else { &[] },
                 }),
                 multiview_mask: None,
-                cache: None,
+                cache: crate::gfx::pipeline_cache::get(device),
             })
         };
         let pipeline = |layout: &wgpu::PipelineLayout,

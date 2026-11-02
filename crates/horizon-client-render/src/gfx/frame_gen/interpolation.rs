@@ -312,7 +312,7 @@ impl Interpolation {
                 module: &module,
                 entry_point: Some(entry),
                 compilation_options: Default::default(),
-                cache: None,
+                cache: crate::gfx::pipeline_cache::get(device),
             })
         };
         let view = |t: wgpu::Texture| t.create_view(&Default::default());

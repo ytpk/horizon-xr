@@ -102,7 +102,7 @@ impl CenterDepth {
                 targets: &[Some(format.into())],
             }),
             multiview_mask: None,
-            cache: None,
+            cache: crate::gfx::pipeline_cache::get(device),
         });
         let texel = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("Shader pack centre depth"),

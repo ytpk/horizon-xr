@@ -241,7 +241,7 @@ impl Post {
                     })],
                 }),
                 multiview_mask: None,
-                cache: None,
+                cache: crate::gfx::pipeline_cache::get(device),
             })
         };
         let taa_resources = {
@@ -302,7 +302,7 @@ impl Post {
                     })],
                 }),
                 multiview_mask: None,
-                cache: None,
+                cache: crate::gfx::pipeline_cache::get(device),
             });
             let internal = pollster::block_on(internal.pop());
             match internal.or(pollster::block_on(validation.pop())) {

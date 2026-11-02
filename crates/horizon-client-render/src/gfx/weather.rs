@@ -71,7 +71,7 @@ impl Weather {
                 })],
             }),
             multiview_mask: None,
-            cache: None,
+            cache: crate::gfx::pipeline_cache::get(device),
         });
         let uniform = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Weather time"),
@@ -309,7 +309,7 @@ pub(super) fn native_pipeline(
             })],
         }),
         multiview_mask: None,
-        cache: None,
+        cache: crate::gfx::pipeline_cache::get(device),
     });
     if let Some(e) = pollster::block_on(scope.pop()) {
         return Err(format!("{}: {e}", stage.file));
@@ -479,7 +479,7 @@ struct Case { animation: vec4<f32>, bases: vec4<u32>, time: vec4<f32>, uv: vec2<
             module: &shader,
             entry_point: Some("main"),
             compilation_options: Default::default(),
-            cache: None,
+            cache: crate::gfx::pipeline_cache::get(device),
         });
         let input = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: None,

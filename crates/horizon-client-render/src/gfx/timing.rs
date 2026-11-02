@@ -123,7 +123,7 @@ impl GpuTimer {
                         module: &module,
                         entry_point: Some("mark"),
                         compilation_options: Default::default(),
-                        cache: None,
+                        cache: crate::gfx::pipeline_cache::get(device),
                     }),
                     module,
                     end: None,
@@ -300,7 +300,7 @@ pub(super) fn end_pipeline(
             })],
         }),
         multiview_mask: None,
-        cache: None,
+        cache: crate::gfx::pipeline_cache::get(device),
     })
 }
 
