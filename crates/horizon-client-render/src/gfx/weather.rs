@@ -479,7 +479,7 @@ struct Case { animation: vec4<f32>, bases: vec4<u32>, time: vec4<f32>, uv: vec2<
             module: &shader,
             entry_point: Some("main"),
             compilation_options: Default::default(),
-            cache: crate::gfx::pipeline_cache::get(device),
+            cache: crate::gfx::pipeline_cache::get(&device),
         });
         let input = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: None,
