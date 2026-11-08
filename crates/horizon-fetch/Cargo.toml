@@ -1,0 +1,14 @@
+[package]
+name = "horizon-fetch"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Downloads the pinned Minecraft version from Mojang for the player who owns it: Range resume, sha1 and size checks, a disk-space check, progress, cancel, chosen languages; shared by the launcher and the Quest"
+
+[dependencies]
+serde_json = "1"
+sha1 = "0.10"
+ureq = { version = "2", default-features = false, features = ["tls"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"

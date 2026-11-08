@@ -1,0 +1,15 @@
+[package]
+name = "horizon-jvm"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "A java-compatible launcher that loads libjvm itself: Android cannot start the JDK's own launcher from an app, because it finds its runtime beside its own file"
+
+[[bin]]
+name = "horizon-jvm"
+path = "src/main.rs"
+
+[dependencies]
+jni-sys = "0.3"
+libc = "0.2"
+zip = { version = "9.1.3", default-features = false, features = ["deflate"] }

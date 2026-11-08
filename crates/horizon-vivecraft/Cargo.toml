@@ -1,0 +1,15 @@
+[package]
+name = "horizon-vivecraft"
+version = "0.1.0"
+edition.workspace = true
+# Derived from Vivecraft (LGPL-3.0-or-later); see LICENSE-LGPL-3.0 and THIRD_PARTY_NOTICES.md.
+license = "LGPL-3.0-or-later"
+rust-version.workspace = true
+description = "A port of Vivecraft's network protocol, VR settings, VR math and server logic to Horizon"
+
+[dependencies]
+glam = "0.30"
+log = "0.4"
+
+[lints]
+workspace = true
