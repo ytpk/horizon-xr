@@ -760,11 +760,23 @@ impl Canvas<'_, '_> {
             80.0,
             Look::Primary,
         );
+        let mut x = MARGIN + w + 20.0;
+        if model.sounds_stage {
+            x += 20.0
+                + self.fit(
+                    Event::Action(RoomAction::SetSounds(false)),
+                    &t("download.skip"),
+                    x,
+                    top,
+                    80.0,
+                    Look::Secondary,
+                );
+        }
         if model.account.is_some() {
             self.fit(
                 Event::Action(RoomAction::SignOut),
                 &t("sign_out"),
-                MARGIN + w + 20.0,
+                x,
                 top,
                 80.0,
                 Look::Secondary,
@@ -1325,12 +1337,21 @@ mod tests {
     #[test]
     fn each_button_answers_a_press_where_it_is_drawn_and_only_there() {
         lang::scoped(Language::load(&[], "en_us"), || {
+            let sounds_failed = RoomModel {
+                sounds_stage: true,
+                ..failed()
+            };
             let cases: Vec<(RoomModel, Event)> = vec![
                 (RoomModel::default(), Event::Action(RoomAction::SignIn)),
                 (signing_in(), Event::Action(RoomAction::CancelSignIn)),
                 (downloading(), Event::Action(RoomAction::CancelDownload)),
                 (failed(), Event::Action(RoomAction::Retry)),
                 (failed(), Event::Action(RoomAction::SignOut)),
+                (
+                    sounds_failed.clone(),
+                    Event::Action(RoomAction::SetSounds(false)),
+                ),
+                (sounds_failed.clone(), Event::Action(RoomAction::SignOut)),
                 (idle(), Event::Action(RoomAction::Play)),
                 (idle(), Event::Action(RoomAction::SignOut)),
                 (idle(), Event::Settings(true)),

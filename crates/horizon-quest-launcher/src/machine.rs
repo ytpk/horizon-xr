@@ -187,6 +187,9 @@ pub trait Provisioner: Send + Sync {
     ) -> Result<(), Failure>;
     /// After a good prepare of the game: deletes the preparer's scratch (about 409 MB).
     fn cleanup(&self);
+    /// Forgets that the sounds were downloaded, so the next step checks them and fetches what
+    /// is missing.
+    fn forget_sounds_download(&self);
 }
 
 /// The Microsoft account flow, behind a trait (`real::QuestAccounts`).
@@ -787,6 +790,11 @@ impl Shared {
                     Step::CheckOwnership if core.p.account.is_none() && !self.gate_skipped() => {
                         self.advance(&mut core, Step::LoginCode, Stage::Core)
                     }
+                    // Adding the sounds found one missing: copying again cannot bring it back.
+                    Step::Prepare if stage == Stage::Sounds => {
+                        self.prov.forget_sounds_download();
+                        self.advance_planned(&mut core);
+                    }
                     other => self.advance(&mut core, other, stage),
                 }
             }
@@ -813,7 +821,12 @@ impl Shared {
             Press::SetSounds(on) => {
                 core.p.settings.sounds = on;
                 self.save(&core);
-                if step == Step::RoomIdle && core.p.error.is_none() {
+                // The game is ready without the sounds, so turning them off leaves their error.
+                let leaves_sounds_error = !on
+                    && core.p.error.is_some()
+                    && core.p.stage == Stage::Sounds
+                    && matches!(step, Step::Download | Step::Prepare);
+                if (step == Step::RoomIdle && core.p.error.is_none()) || leaves_sounds_error {
                     self.advance_planned(&mut core);
                 }
             }

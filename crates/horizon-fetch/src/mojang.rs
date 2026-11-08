@@ -20,9 +20,8 @@ pub struct Selection<'a> {
     /// Language codes (`en_us`, `ru_ru`) of the `lang` assets to fetch; `None` for all of them.
     pub languages: Option<Vec<String>>,
     pub stage: Stage,
-    /// Whether an asset that cannot be fetched fails the download (the Quest, whose game cannot
-    /// start without its textures) or is a line in the log (the launcher). Sounds are never
-    /// required.
+    /// Whether an asset that cannot be fetched fails the download (the Quest, whose next step
+    /// copies them all or none) or is a line in the log (the launcher).
     pub strict_assets: bool,
     /// The pinned server jar's sha1: also fetch the server jar (the preparer's data generator
     /// runs it) as `versions/<v>/<v>-server.jar`.
@@ -274,7 +273,7 @@ pub fn download(
             .join("assets/indexes")
             .join(relative(&format!("{}.json", field("id")?)).map_err(Error::Other)?),
     };
-    let required = sel.strict_assets && sel.stage != Stage::Sounds;
+    let required = sel.strict_assets;
     let assets = fetch_all(
         std::slice::from_ref(&index),
         options,

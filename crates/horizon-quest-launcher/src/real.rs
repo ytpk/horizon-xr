@@ -295,6 +295,15 @@ impl Provisioner for QuestProvisioner {
             log::warn!("Horizon room: {}: {e}", scratch.display());
         }
     }
+
+    fn forget_sounds_download(&self) {
+        let stamp = self.stamp(".sounds-complete");
+        if let Err(e) = fs::remove_file(&stamp)
+            && e.kind() != std::io::ErrorKind::NotFound
+        {
+            log::warn!("Horizon room: {}: {e}", stamp.display());
+        }
+    }
 }
 
 #[cfg(test)]
@@ -378,6 +387,11 @@ mod tests {
         assert!(!p.readiness(&both).sounds);
         fs::write(p.resources.join("assets/minecraft/sounds.json"), "{}").unwrap();
         assert!(p.readiness(&both).sounds);
+        fs::write(p.downloads.join(".sounds-complete"), "1").unwrap();
+        assert!(p.readiness(&both).sounds_downloaded);
+        p.forget_sounds_download();
+        assert!(!p.readiness(&both).sounds_downloaded);
+        p.forget_sounds_download(); // Already gone: nothing to do.
         fs::remove_dir_all(dir).unwrap();
     }
 

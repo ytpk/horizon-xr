@@ -154,6 +154,8 @@ struct MockProvisioner {
     sounds: AtomicBool,
     /// The next downloads fail with this (once each).
     fail_download: Mutex<Option<Failure>>,
+    /// The next prepare fails with this (once).
+    fail_prepare: Mutex<Option<Failure>>,
     /// A download of this stage stops here until released (cancel or release).
     block_download: Mutex<Option<Stage>>,
     release: AtomicBool,
@@ -169,6 +171,7 @@ impl MockProvisioner {
             sounds_downloaded: AtomicBool::new(false),
             sounds: AtomicBool::new(false),
             fail_download: Mutex::new(None),
+            fail_prepare: Mutex::new(None),
             block_download: Mutex::new(None),
             release: AtomicBool::new(false),
             cleaned: AtomicUsize::new(0),
@@ -229,6 +232,9 @@ impl Provisioner for MockProvisioner {
         progress: &dyn Fn(f32),
     ) -> Result<(), Failure> {
         self.note(&format!("prepare {stage:?}"));
+        if let Some(f) = self.fail_prepare.lock().unwrap().take() {
+            return Err(f);
+        }
         log("Exporting server data");
         progress(0.5);
         match stage {
@@ -240,6 +246,9 @@ impl Provisioner for MockProvisioner {
     fn cleanup(&self) {
         self.note("cleanup");
         self.cleaned.fetch_add(1, SeqCst);
+    }
+    fn forget_sounds_download(&self) {
+        self.sounds_downloaded.store(false, SeqCst);
     }
 }
 
@@ -547,6 +556,60 @@ fn a_failed_download_shows_its_error_with_retry_and_retry_goes_on() {
         rig.calls().iter().filter(|c| *c == "download Core").count(),
         2
     );
+}
+
+/// Signed in with the game ready and the sounds downloaded, stopped on a missing sound object.
+fn stuck_adding_the_sounds(name: &str) -> Rig {
+    let rig = Rig::new(name);
+    rig.prov.game.store(true, SeqCst);
+    rig.prov.sounds_downloaded.store(true, SeqCst);
+    *rig.prov.fail_prepare.lock().unwrap() =
+        Some(Failure::new(FailureKind::Other, "Missing asset object"));
+    rig.signed_in(Step::RoomIdle);
+    rig
+}
+
+#[test]
+fn retry_after_a_missing_sound_downloads_the_sounds_again() {
+    let rig = stuck_adding_the_sounds("sounds-retry");
+    let launcher = rig.launcher();
+    let view = launcher.wait(|v| v.error.is_some(), SLOW);
+    assert_eq!((view.step, view.stage), (Step::Prepare, Stage::Sounds));
+
+    launcher.press(Press::Retry);
+    let view = launcher.wait(|v| v.step == Step::RoomIdle, SLOW);
+    assert!(view.can_play && view.error.is_none());
+    let calls = rig.calls();
+    let download = calls.iter().position(|c| c == "download Sounds");
+    let last_prepare = calls.iter().rposition(|c| c == "prepare Sounds");
+    assert!(download.is_some() && download < last_prepare, "{calls:?}");
+    assert!(rig.prov.sounds.load(SeqCst));
+}
+
+#[test]
+fn turning_the_sounds_off_leaves_their_error_for_the_room() {
+    let rig = stuck_adding_the_sounds("sounds-off");
+    let launcher = rig.launcher();
+    launcher.wait(|v| v.error.is_some(), SLOW);
+
+    launcher.press(Press::SetSounds(false));
+    let view = launcher.wait(|v| v.step == Step::RoomIdle, SLOW);
+    assert!(view.can_play && view.error.is_none());
+    assert!(!rig.state().settings.sounds);
+    assert!(!rig.calls().iter().any(|c| c == "download Sounds"));
+}
+
+#[test]
+fn turning_the_sounds_off_does_not_leave_an_error_of_the_game_files() {
+    let rig = Rig::new("core-error-stays");
+    *rig.prov.fail_download.lock().unwrap() = Some(Failure::new(FailureKind::Network, "down"));
+    let launcher = rig.launcher();
+    launcher.press(Press::SignIn);
+    launcher.wait(|v| v.error.is_some(), SLOW);
+    launcher.press(Press::SetSounds(false));
+    let view = launcher.view();
+    assert_eq!(view.step, Step::Download);
+    assert!(view.error.is_some());
 }
 
 #[test]

@@ -505,6 +505,36 @@ fn only_the_chosen_languages_come_first_and_the_sounds_after() {
 }
 
 #[test]
+fn a_sound_that_cannot_be_fetched_fails_a_strict_download_only() {
+    let dir = scratch("strict-sounds");
+    let (mock, pins, _) = mojang_mock(&dir);
+    let hash = sha1_hex(b"ogg-a");
+    mock.state
+        .lock()
+        .unwrap()
+        .routes
+        .remove(&format!("/objects/{}/{hash}", &hash[..2]));
+    let go = |sel: &Selection| {
+        download(
+            &pins,
+            &dir,
+            sel,
+            &Options::default(),
+            &Ureq::new("t"),
+            &Progress::new(),
+            &NEVER,
+            &|_| {},
+        )
+    };
+    let error = go(&selection(&mock, &["en_us"], Stage::Sounds)).unwrap_err();
+    assert!(error.to_string().contains("answered 404"), "{error}");
+    let mut lenient = selection(&mock, &["en_us"], Stage::Sounds);
+    lenient.strict_assets = false;
+    go(&lenient).unwrap();
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
 fn a_missing_core_asset_fails_a_strict_download_but_not_a_sounds_one() {
     let dir = scratch("strict");
     let (mock, pins, _) = mojang_mock(&dir);
