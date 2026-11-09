@@ -145,6 +145,16 @@ pub struct BlockHit {
     pub inside: bool,
 }
 
+/// VoxelShape.clip tests a point 0.001 of the segment beyond its start, not
+/// the face normal. A ray starting on a face and pointing inward is inside too.
+pub fn starts_inside_outline(from: DVec3, to: DVec3, boxes: &[[f64; 6]]) -> bool {
+    let probe = from + (to - from) * 0.001;
+    boxes.iter().any(|b| {
+        probe.cmpge(DVec3::new(b[0], b[1], b[2])).all()
+            && probe.cmplt(DVec3::new(b[3], b[4], b[5])).all()
+    })
+}
+
 /// An entity in the damage area.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct EntityRef {
@@ -208,7 +218,7 @@ pub enum SwingAction {
 #[derive(Clone, Debug, Default)]
 struct HandState {
     history: TipHistory,
-    /// The last swing hit a block: not again until the hand slows (`lastSwingBlock`).
+    /// Suppress the next task tick after a block hit (`lastSwingBlock`).
     last_swing_block: bool,
     last_hit_entities: Vec<u32>,
     last_hand: Option<(DVec3, DQuat)>,
@@ -232,11 +242,22 @@ impl HandState {
 #[derive(Clone, Debug, Default)]
 pub struct SwingTask {
     hands: [HandState; 2],
+    last_tick: Option<u64>,
     /// `swingInactiveTicks`: ticks to wait after a start, a teleport or a screen.
     pub inactive_ticks: i32,
 }
 
 impl SwingTask {
+    /// Visor schedules TaskSwing as VR_PLAYER_TICK, not once per rendered frame.
+    /// Keep history, cooldowns and damage independent of 72/90/120 Hz headset refresh.
+    pub fn begin_tick(&mut self, tick: u64) -> bool {
+        if self.last_tick == Some(tick) {
+            return false;
+        }
+        self.last_tick = Some(tick);
+        true
+    }
+
     /// `isActive`'s counter: false while the task waits; the game checks the rest (alive, not
     /// asleep, not a spectator, no vehicle, no screen, not climbing, the creative setting, shield).
     pub fn waiting(&mut self) -> bool {
@@ -456,6 +477,71 @@ fn find_block_hit(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn buried_tips_and_inward_face_starts_are_inside_for_every_block_face() {
+        let boxes = [[0.0, 0.0, 0.0, 1.0, 1.0, 1.0]];
+        for axis in 0..3 {
+            for side in [0.0, 1.0] {
+                let mut from = DVec3::splat(0.5);
+                from[axis] = side;
+                assert!(starts_inside_outline(from, DVec3::splat(0.5), &boxes));
+                let mut outside = from;
+                outside[axis] = if side == 0.0 { -0.1 } else { 1.1 };
+                assert!(!starts_inside_outline(outside, DVec3::splat(0.5), &boxes));
+            }
+        }
+        assert!(starts_inside_outline(
+            DVec3::splat(0.5),
+            DVec3::new(1.5, 0.5, 0.5),
+            &boxes
+        ));
+        let slab = [[0.0, 0.0, 0.0, 1.0, 0.5, 1.0]];
+        assert!(!starts_inside_outline(
+            DVec3::new(0.5, 0.75, 0.5),
+            DVec3::new(0.5, 0.0, 0.5),
+            &slab
+        ));
+    }
+
+    #[test]
+    fn mining_damage_is_identical_at_20_72_90_and_120_render_fps() {
+        fn damage(fps: u64) -> Vec<([i32; 3], u32)> {
+            let mut world = Stub {
+                solid: Some(([1.0, 0.5, -1.0], [2.0, 1.5, 1.0])),
+                ..Default::default()
+            };
+            let mut task = SwingTask::default();
+            let mut out = Vec::new();
+            for frame in 0..fps * 2 {
+                let tick = frame * 20 / fps;
+                if !task.begin_tick(tick) {
+                    continue;
+                }
+                // One repeated swing across a block, including time spent buried inside it.
+                let phase = tick % 16;
+                let x = if phase < 8 {
+                    phase as f64 * 0.3
+                } else {
+                    (16 - phase) as f64 * 0.3
+                };
+                let input = hand(tick * 50, DVec3::new(x, 1.0, 0.0), ItemKind::Tool);
+                task.track(0, &input);
+                for action in task.tick(0, &input, 3.0, false, &mut world) {
+                    if let SwingAction::Mine { hit, hits, .. } = action {
+                        out.push((hit.pos, hits));
+                    }
+                }
+            }
+            out
+        }
+        let expected = damage(20);
+        assert!(!expected.is_empty());
+        assert!(expected.iter().all(|(_, hits)| (3..=7).contains(hits)));
+        for fps in [72, 90, 120] {
+            assert_eq!(damage(fps), expected, "at {fps} FPS");
+        }
+    }
 
     #[test]
     fn creative_swings_follow_visor_and_busy_bodies_do_not_swing() {

@@ -105,7 +105,20 @@ impl Game<'_> {
         state.room_at = at;
         state.rotation = rotation;
         state.hover = [None; 2];
-        state.down = [false; 2];
+        state.down = headset::hand_buttons().map(|b| b.trigger > 0.5);
+    }
+
+    /// The binding and the VR menu use the same keyboard. In gameplay open chat so
+    /// typed text has an explicit destination; mandatory server dialogs stay in place.
+    pub(super) fn visor_keyboard_toggle(&mut self) {
+        if self.pad.headset.keyboard.shown {
+            self.visor_keyboard_close(true);
+        } else {
+            if !self.pad_in_menu() {
+                self.open_chat("");
+            }
+            self.visor_keyboard_open();
+        }
     }
 
     /// `setVisible(false)`: the keyboard goes; `dismissed` keeps it away for this screen.
@@ -350,11 +363,17 @@ impl Game<'_> {
                     let before = (state.keyboard.layout, state.keyboard.shift);
                     let action = state.keyboard.press(&buttons, k);
                     state.repeat_hand = state.keyboard.held().map(|_| i);
-                    if before != (state.keyboard.layout, state.keyboard.shift) {
+                    let changed = before != (state.keyboard.layout, state.keyboard.shift);
+                    if changed {
                         state.buttons = state.keyboard.buttons().into();
+                        state.hover = [None; 2];
+                        state.down = triggers;
                     }
                     if let Some(action) = action {
                         self.visor_keyboard_act(action);
+                    }
+                    if changed {
+                        return;
                     }
                 }
             } else if !down && was && self.pad.headset.keyboard.repeat_hand == Some(i) {
@@ -390,6 +409,8 @@ impl Game<'_> {
                         | KeyCode::ArrowRight
                         | KeyCode::ArrowUp
                         | KeyCode::ArrowDown
+                        | KeyCode::Home
+                        | KeyCode::End
                 )
             {
                 game.pad_with_modifier(KeyCode::ShiftLeft, |g| g.visor_keyboard_key(code));
@@ -404,6 +425,12 @@ impl Game<'_> {
             Action::Enter => self.pad_osk_output(osk::Output::Enter),
             Action::Escape => key(self, KeyCode::Escape),
             Action::Tab => key(self, KeyCode::Tab),
+            Action::Delete => key(self, KeyCode::Delete),
+            Action::Home => key(self, KeyCode::Home),
+            Action::End => key(self, KeyCode::End),
+            Action::SelectAll => {
+                self.visor_keyboard_clipboard(horizon_client::clipboard::EditShortcut::SelectAll)
+            }
             Action::Up => key(self, KeyCode::ArrowUp),
             Action::Down => key(self, KeyCode::ArrowDown),
             Action::Left => key(self, KeyCode::ArrowLeft),

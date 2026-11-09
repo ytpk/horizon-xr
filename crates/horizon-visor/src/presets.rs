@@ -44,7 +44,30 @@ pub const HAND_HUD: Preset = Preset {
     values: &[("vrHudLockMode", "WRIST")],
 };
 
-pub const ALL: [Preset; 2] = [DEFAULTS, HAND_HUD];
+pub const QUEST_CONTROLS: Preset = Preset {
+    id: "quest_controls",
+    name_key: "horizon.vr.bindings.reset",
+    values: &[
+        ("questBindOffAttack", "OFF_TRIGGER"),
+        ("questBindJump", "MAIN_SECONDARY"),
+        ("questBindAttack", "MAIN_TRIGGER"),
+        ("questBindUse", "MAIN_PRIMARY"),
+        ("questBindOffUse", "OFF_PRIMARY"),
+        ("questBindInventory", "NONE"),
+        ("questBindDrop", "NONE"),
+        ("questBindSwap", "NONE"),
+        ("questBindChat", "NONE"),
+        ("questBindKeyboard", "NONE"),
+        ("questBindSneak", "MAIN_STICK"),
+        ("questBindSprint", "NONE"),
+        ("questBindMainHotbar", "MAIN_GRIP"),
+        ("questBindOffHotbar", "OFF_GRIP"),
+        ("questBindMenu", "OFF_SECONDARY"),
+        ("questMoveStick", "OFF"),
+        ("questTurnStick", "MAIN"),
+    ],
+};
+pub const ALL: [Preset; 3] = [DEFAULTS, HAND_HUD, QUEST_CONTROLS];
 
 pub fn by_id(id: &str) -> Option<&'static Preset> {
     ALL.iter().find(|p| p.id == id)
@@ -67,6 +90,22 @@ pub fn apply(id: &str, settings: &mut VrSettings) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn restoring_quest_controls_preserves_height_world_scale_and_handedness() {
+        let mut s = VrSettings::default();
+        s.set_float("manualCalibration", 1.8);
+        s.set_float("worldScale", 2.0);
+        s.set_bool("reverseHands", true);
+        s.set("questBindJump", "OFF_PRIMARY");
+        s.set("questMoveStick", "MAIN");
+        assert!(apply("quest_controls", &mut s));
+        assert_eq!(s.enum_name("questBindJump"), "MAIN_SECONDARY");
+        assert_eq!(s.enum_name("questMoveStick"), "OFF");
+        assert_eq!(s.float("manualCalibration"), 1.8);
+        assert_eq!(s.float("worldScale"), 2.0);
+        assert!(s.left_handed());
+    }
 
     #[test]
     fn every_key_of_every_preset_is_a_setting_with_an_accepted_value() {

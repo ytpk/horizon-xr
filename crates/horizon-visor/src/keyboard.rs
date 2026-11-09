@@ -247,6 +247,10 @@ pub enum Action {
     Type(String),
     Space,
     Backspace,
+    Delete,
+    Home,
+    End,
+    SelectAll,
     Enter,
     Tab,
     Escape,
@@ -458,6 +462,28 @@ pub fn buttons(layout: Layout, shifted: bool, several_layouts: bool) -> Vec<Butt
             false,
         );
     }
+    // Editing controls occupy the unused lower-left strip beside the arrows.
+    for (i, (label, action, repeats)) in [
+        ("DEL", Action::Delete, true),
+        ("HOME", Action::Home, false),
+        ("END", Action::End, false),
+        ("ALL", Action::SelectAll, false),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        add(
+            [
+                GRID_START + i as i32 * (SIDE_WIDTH + KEY_GAP),
+                below,
+                SIDE_WIDTH,
+                KEY_HEIGHT,
+            ],
+            label,
+            action,
+            repeats,
+        );
+    }
     // The language button is dead with one layout (`languageButton.active`).
     for button in out.iter_mut().filter(|b| b.action == Action::Language) {
         button.active = several_layouts;
@@ -589,6 +615,32 @@ mod tests {
 
     fn find<'a>(buttons: &'a [Button], label: &str) -> &'a Button {
         buttons.iter().find(|b| b.label == label).expect(label)
+    }
+
+    #[test]
+    fn editing_keys_are_reachable_and_do_not_overlap_in_any_layout() {
+        for layout in Layout::ALL {
+            let keys = buttons(layout, false, true);
+            for action in [Action::Delete, Action::Home, Action::End, Action::SelectAll] {
+                let key = keys.iter().find(|b| b.action == action).unwrap();
+                let [x, y, w, h] = key.rect;
+                let selected = button_at(&keys, (x + w / 2) as f32, (y + h / 2) as f32).unwrap();
+                assert_eq!(keys[selected].action, action);
+            }
+            for (i, a) in keys.iter().enumerate() {
+                for b in &keys[i + 1..] {
+                    assert!(
+                        !(a.rect[0] < b.rect[0] + b.rect[2]
+                            && b.rect[0] < a.rect[0] + a.rect[2]
+                            && a.rect[1] < b.rect[1] + b.rect[3]
+                            && b.rect[1] < a.rect[1] + a.rect[3]),
+                        "overlap: {:?} {:?}",
+                        a.label,
+                        b.label
+                    );
+                }
+            }
+        }
     }
 
     #[test]

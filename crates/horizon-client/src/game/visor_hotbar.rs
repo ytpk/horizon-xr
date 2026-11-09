@@ -89,10 +89,12 @@ impl Game<'_> {
     /// X, the main hand's the right trigger and A.
     pub(super) fn visor_active_hand_click(&mut self) {
         let two = self.visor_two_handed();
-        let [main, off] = headset::hand_buttons();
+        let hands = headset::hand_buttons();
+        let settings = headset::settings();
+        let held = |key| horizon_client_input::vr_bindings::held(&settings, key, hands, false);
         let down = [
-            main.trigger > 0.5 || main.primary,
-            off.trigger > 0.5 || off.primary,
+            held("questBindAttack") || held("questBindUse"),
+            (two && held("questBindOffAttack")) || held("questBindOffUse"),
         ];
         let before = std::mem::replace(&mut self.pad.headset.clicks, down);
         if !two || self.screen != super::Screen::Playing {
@@ -113,10 +115,11 @@ impl Game<'_> {
         let in_world = self.screen == super::Screen::Playing && !self.spectator();
         let hands = [headset::main_hand(), headset::off_hand()];
         let grips = headset::hand_buttons();
-        let pressed = [
-            grips[0].grip > 0.6 && in_world && hands[0].is_some(),
-            grips[1].grip > 0.6 && in_world && hands[1].is_some(),
-        ];
+        let settings = headset::settings();
+        let pressed = ["questBindMainHotbar", "questBindOffHotbar"].map(|key| {
+            horizon_client_input::vr_bindings::held(&settings, key, grips, false) && in_world
+        });
+        let pressed: [bool; 2] = std::array::from_fn(|h| pressed[h] && hands[h].is_some());
         if !in_world {
             self.visor.hotbar.clear();
         }

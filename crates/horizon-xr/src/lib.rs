@@ -142,6 +142,7 @@ struct Session {
     cursor_triggers: [bool; 2],
     /// Y (or Menu) was down last frame: it opens Visor's game menu once per press.
     menu_button: bool,
+    keyboard_button: bool,
     pending: Option<Pending>,
 }
 
@@ -461,6 +462,7 @@ impl Quest {
             handles_at: None,
             cursor_triggers: [false; 2],
             menu_button: false,
+            keyboard_button: false,
             pending: None,
         });
         Ok(())
@@ -1089,6 +1091,8 @@ impl Session {
             input::set_hands([None; 2]);
             input::set_room(None);
             input::set_buttons(Default::default());
+            input::set_off_use(false);
+            self.keyboard_button = false;
             input::set_hud_slot(None);
             input::set_aim(head_pose.map(|(q, _)| input::angles(q)));
             self.hud_at = None;
@@ -1153,10 +1157,22 @@ impl Session {
             _ => None,
         };
         input::set_hud_slot(hud_slot);
-        let (move_stick, turn_stick) = if settings.left_handed() {
-            (controls.turn_stick, controls.move_stick)
+        let sticks = [controls.move_stick, controls.turn_stick];
+        let move_hand = if settings.enum_name("questMoveStick") == "MAIN" {
+            main
         } else {
-            (controls.move_stick, controls.turn_stick)
+            off
+        };
+        let turn_hand = if settings.enum_name("questTurnStick") == "OFF" {
+            off
+        } else {
+            main
+        };
+        // Menus keep the fixed layout, so an accidental unbind can always be repaired.
+        let (move_stick, turn_stick) = if menu {
+            (sticks[off], sticks[main])
+        } else {
+            (sticks[move_hand], sticks[turn_hand])
         };
         // The game walks along the player's yaw, which follows the aim: the stick's
         // forward is turned onto the off hand's or the head's direction instead.
@@ -1203,8 +1219,17 @@ impl Session {
             stick_click: controls.stick_clicks[i],
         });
         input::set_buttons(buttons);
-        let (main_primary, main_secondary) = faces[main];
-        let (off_primary, off_secondary) = faces[off];
+        let logical = [buttons[main], buttons[off]];
+        let value =
+            |key| horizon_client_input::vr_bindings::value(&settings, key, logical, controls.menu);
+        let held = |key| value(key) > 0.5;
+        let off_primary = held("questBindOffUse");
+        input::set_off_use(!menu && off_primary);
+        let keyboard_button = held("questBindKeyboard");
+        if keyboard_button && !self.keyboard_button {
+            input::request_keyboard_toggle();
+        }
+        self.keyboard_button = keyboard_button;
         // Visor's Touch layout (`ActionLeftMouse`, `ActionRightMouse`, ...): the main trigger
         // attacks (left click), A uses with the main hand (right click) and X with the off hand,
         // B jumps, the main stick's click sneaks (`ActionShift`), Y opens the game menu
@@ -1213,31 +1238,58 @@ impl Session {
             // The game may take a trigger for a gesture (touching a button,
             // drawing a bow); on the HUD the main one picks a slot instead.
             let [main_taken, off_taken] = input::triggers_captured();
+            let attack_main = horizon_client_input::vr_bindings::uncaptured_value(
+                &settings,
+                "questBindAttack",
+                logical,
+                [main_taken, off_taken],
+            );
+            let attack_off = if input::two_handed() {
+                horizon_client_input::vr_bindings::uncaptured_value(
+                    &settings,
+                    "questBindOffAttack",
+                    logical,
+                    [main_taken, off_taken],
+                )
+            } else {
+                0.0
+            };
             pad.triggers = [
-                if off_taken || !(main_primary || off_primary) {
+                horizon_client_input::vr_bindings::uncaptured_value(
+                    &settings,
+                    "questBindUse",
+                    logical,
+                    [main_taken, off_taken],
+                )
+                .max(horizon_client_input::vr_bindings::uncaptured_value(
+                    &settings,
+                    "questBindOffUse",
+                    logical,
+                    [main_taken, off_taken],
+                )),
+                if hud_slot.is_some() {
                     0.0
                 } else {
-                    1.0
-                },
-                if hud_slot.is_some() || main_taken {
-                    0.0
-                } else if input::two_handed() {
-                    // Visor's `ActionLeftMouse` of the off hand: with two-handed play the left
-                    // trigger attacks and mines too, with the off hand's item.
-                    controls.triggers[main].max(controls.triggers[off])
-                } else {
-                    controls.triggers[main]
+                    attack_main.max(attack_off)
                 },
             ];
         }
         let tilt = (move_stick[0].powi(2) + move_stick[1].powi(2)).sqrt();
         // A fresh press of Y or Menu: it opens the game menu in play and closes a screen, and
         // the press that opened a menu does not close it again.
-        let menu_button = off_secondary || controls.menu;
+        let menu_button = if menu {
+            faces[off].1 || controls.menu
+        } else {
+            held("questBindMenu") || controls.menu
+        };
         let menu_pressed = menu_button && !self.menu_button;
         for (held, button) in [
             // B jumps in play (`GameActionJump`); the room's own jump joins through the trackers.
-            (!menu && main_secondary, Button::South),
+            (!menu && held("questBindJump"), Button::South),
+            (!menu && held("questBindInventory"), Button::North),
+            (!menu && held("questBindDrop"), Button::East),
+            (!menu && held("questBindSwap"), Button::West),
+            (!menu && held("questBindChat"), Button::DPadRight),
             // Y or Menu closes a screen; in play they open the game menu (below).
             (menu && menu_pressed, Button::Start),
             // The grips page the hotbar in menus; in play they are the hotbar wheels.
@@ -1245,11 +1297,12 @@ impl Session {
             (menu && controls.grips[main] > 0.6, Button::RightBumper),
             (
                 !menu
-                    && settings.bool("autoSprint")
-                    && tilt > settings.float("autoSprintThreshold"),
+                    && (held("questBindSprint")
+                        || (settings.bool("autoSprint")
+                            && tilt > settings.float("autoSprintThreshold"))),
                 Button::LeftStick,
             ),
-            (controls.stick_clicks[main], Button::RightStick),
+            (!menu && held("questBindSneak"), Button::RightStick),
         ] {
             pad.set(button, held);
         }
@@ -1365,11 +1418,7 @@ impl Session {
             input::set_pointer(at.map(|(at, _)| at));
             input::set_pointer_distance(at.map(|(_, d)| d));
             // The trigger is the left click; A (main hand) and X (off hand) the right.
-            let right = if self.cursor_off {
-                off_primary
-            } else {
-                main_primary
-            };
+            let right = faces[hand].0;
             input::set_pointer_buttons([
                 triggers[usize::from(self.cursor_off)] && !holding && at.is_some(),
                 right,

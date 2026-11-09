@@ -176,6 +176,8 @@ struct State {
     quit: bool,
     /// Y (or Menu) was pressed in play: Visor's game menu opens (`ActionMenu`).
     game_menu: bool,
+    keyboard_toggle: bool,
+    off_use: bool,
     /// The off-hand controller points the menu's cursor (the hand that clicked last).
     pointer_off: bool,
     /// Movement is by teleporting: the move stick aims the arc and does not walk.
@@ -261,6 +263,8 @@ static STATE: Mutex<State> = Mutex::new(State {
     menu_kind: MenuKind::Normal,
     quit: false,
     game_menu: false,
+    keyboard_toggle: false,
+    off_use: false,
     pointer_off: false,
     stick_teleports: false,
     move_stick: [0.0; 2],
@@ -718,6 +722,21 @@ pub fn turn_toward_head(body_yaw: f32, head: [f32; 2], yaw: f32, pitch: f32) -> 
     let target = body_yaw + head[0];
     let delta = (target - yaw + 180.0).rem_euclid(360.0) - 180.0;
     (delta, head[1].clamp(-90.0, 90.0) - pitch)
+}
+
+/// A gameplay binding asks for the same keyboard as the game's VR menu.
+pub fn request_keyboard_toggle() {
+    with(|s| s.keyboard_toggle = true);
+}
+pub fn take_keyboard_toggle() -> bool {
+    with(|s| std::mem::take(&mut s.keyboard_toggle))
+}
+/// The rebound off-hand use input; physical button state remains available for UI and gestures.
+pub fn set_off_use(on: bool) {
+    with(|s| s.off_use = on);
+}
+pub fn off_use() -> bool {
+    with(|s| s.active && s.off_use)
 }
 
 #[cfg(test)]

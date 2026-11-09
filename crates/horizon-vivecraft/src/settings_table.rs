@@ -53,7 +53,124 @@ pub const SHADER_GUI_RENDER: &[&str] = &[
 pub const UPDATE_TYPE: &[&str] = &["RELEASE", "BETA", "ALPHA"];
 pub const WEAPON_COLLISION: &[&str] = &["OFF", "ON", "AUTO"];
 
+pub const QUEST_BUTTON: &[&str] = &[
+    "NONE",
+    "MAIN_TRIGGER",
+    "OFF_TRIGGER",
+    "MAIN_PRIMARY",
+    "MAIN_SECONDARY",
+    "OFF_PRIMARY",
+    "OFF_SECONDARY",
+    "MAIN_GRIP",
+    "OFF_GRIP",
+    "MAIN_STICK",
+    "OFF_STICK",
+];
+pub const QUEST_STICK: &[&str] = &["MAIN", "OFF"];
+
 pub const DEFS: &[Def] = &[
+    Def {
+        key: "questBindOffAttack",
+        kind: Kind::Enum(QUEST_BUTTON),
+        default: "OFF_TRIGGER",
+        range: None,
+    },
+    Def {
+        key: "questBindJump",
+        kind: Kind::Enum(QUEST_BUTTON),
+        default: "MAIN_SECONDARY",
+        range: None,
+    },
+    Def {
+        key: "questBindAttack",
+        kind: Kind::Enum(QUEST_BUTTON),
+        default: "MAIN_TRIGGER",
+        range: None,
+    },
+    Def {
+        key: "questBindUse",
+        kind: Kind::Enum(QUEST_BUTTON),
+        default: "MAIN_PRIMARY",
+        range: None,
+    },
+    Def {
+        key: "questBindOffUse",
+        kind: Kind::Enum(QUEST_BUTTON),
+        default: "OFF_PRIMARY",
+        range: None,
+    },
+    Def {
+        key: "questBindInventory",
+        kind: Kind::Enum(QUEST_BUTTON),
+        default: "NONE",
+        range: None,
+    },
+    Def {
+        key: "questBindDrop",
+        kind: Kind::Enum(QUEST_BUTTON),
+        default: "NONE",
+        range: None,
+    },
+    Def {
+        key: "questBindSwap",
+        kind: Kind::Enum(QUEST_BUTTON),
+        default: "NONE",
+        range: None,
+    },
+    Def {
+        key: "questBindChat",
+        kind: Kind::Enum(QUEST_BUTTON),
+        default: "NONE",
+        range: None,
+    },
+    Def {
+        key: "questBindKeyboard",
+        kind: Kind::Enum(QUEST_BUTTON),
+        default: "NONE",
+        range: None,
+    },
+    Def {
+        key: "questBindSneak",
+        kind: Kind::Enum(QUEST_BUTTON),
+        default: "MAIN_STICK",
+        range: None,
+    },
+    Def {
+        key: "questBindSprint",
+        kind: Kind::Enum(QUEST_BUTTON),
+        default: "NONE",
+        range: None,
+    },
+    Def {
+        key: "questBindMainHotbar",
+        kind: Kind::Enum(QUEST_BUTTON),
+        default: "MAIN_GRIP",
+        range: None,
+    },
+    Def {
+        key: "questBindOffHotbar",
+        kind: Kind::Enum(QUEST_BUTTON),
+        default: "OFF_GRIP",
+        range: None,
+    },
+    Def {
+        key: "questBindMenu",
+        kind: Kind::Enum(QUEST_BUTTON),
+        default: "OFF_SECONDARY",
+        range: None,
+    },
+    Def {
+        key: "questMoveStick",
+        kind: Kind::Enum(QUEST_STICK),
+        default: "OFF",
+        range: None,
+    },
+    Def {
+        key: "questTurnStick",
+        kind: Kind::Enum(QUEST_STICK),
+        default: "MAIN",
+        range: None,
+    },
     Def {
         key: "smoothRunTickCount",
         kind: Kind::Int,

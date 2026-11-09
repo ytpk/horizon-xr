@@ -62,6 +62,11 @@ impl VrOpt {
             Shown::Lang(key) => tr(&key),
             Shown::LangArg(key, arg) => Text::translate(&key, &[Text::literal(arg)]),
         };
+        let value = if options::binding_conflict(&s.vr, self.info().key) {
+            Text::translate("horizon.vr.binding.shared", &[value])
+        } else {
+            value
+        };
         Text::translate("options.generic_value", &[tr(self.caption()), value])
     }
 }

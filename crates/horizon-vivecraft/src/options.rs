@@ -178,6 +178,15 @@ pub fn cycle(s: &mut VrSettings, o: &OptInfo, back: bool) {
     }
 }
 
+/// Sharing a physical control is allowed, but must be visible before gameplay resumes.
+pub fn binding_conflict(s: &VrSettings, key: &str) -> bool {
+    key.starts_with("questBind")
+        && s.enum_name(key) != "NONE"
+        && crate::settings::DEFS.iter().any(|d| {
+            d.key != key && d.key.starts_with("questBind") && s.enum_name(d.key) == s.enum_name(key)
+        })
+}
+
 /// `getButtonDisplayString`'s value half.
 pub fn shown(s: &VrSettings, o: &OptInfo) -> Shown {
     if let Some(layout) = o.name.strip_prefix("VISOR_KEYBOARD_LAYOUT_") {
@@ -250,6 +259,18 @@ pub fn shown(s: &VrSettings, o: &OptInfo) -> Shown {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn duplicate_quest_bindings_are_reported_and_unbinding_clears_the_conflict() {
+        let mut s = VrSettings::default();
+        assert!(!binding_conflict(&s, "questBindJump"));
+        s.set("questBindInventory", "MAIN_SECONDARY");
+        assert!(binding_conflict(&s, "questBindJump"));
+        assert!(binding_conflict(&s, "questBindInventory"));
+        s.set("questBindJump", "NONE");
+        assert!(!binding_conflict(&s, "questBindJump"));
+        assert!(!binding_conflict(&s, "questBindInventory"));
+    }
 
     #[test]
     fn every_option_binds_a_known_setting() {

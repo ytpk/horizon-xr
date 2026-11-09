@@ -136,6 +136,10 @@ impl Game<'_> {
 
     /// Visor's game menu "Keyboard": the keyboard opens below the head, or closes when it shows.
     pub(super) fn vr_keyboard_toggle(&mut self) {
+        if self.visor_keyboard_wanted() {
+            self.visor_keyboard_toggle();
+            return;
+        }
         if self.pad.headset.vr.keyboard.showing() {
             self.vr_keyboard_hide();
         } else {

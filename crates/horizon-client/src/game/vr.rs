@@ -209,6 +209,7 @@ impl Game<'_> {
         let vr = &mut self.pad.headset.vr;
         vr.player.histories = Default::default();
         vr.height.reset();
+        self.visor.swing.clear();
         vr.room_jump.clear();
         vr.visor_sneak.clear();
         vr.sneak.sneak_override = false;
@@ -522,8 +523,13 @@ impl SwingWorld for GameSwing<'_, '_> {
             pos: hit.pos,
             face: face_of(hit.face),
             location: DVec3::from_array(hit.point),
-            // A segment that starts inside the block has no face.
-            inside: hit.face == [0; 3],
+            // Match VoxelShape.clip's inside test, including starts on a face.
+            inside: hit.face == [0; 3]
+                || horizon_visor::tasks::swing::starts_inside_outline(
+                    from,
+                    to,
+                    &self.0.outline_boxes(hit.pos),
+                ),
         })
     }
 

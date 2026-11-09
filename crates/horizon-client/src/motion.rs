@@ -2153,7 +2153,30 @@ impl MotionWorld<'_, '_, '_> {
     /// stepping as the head walks in the room (Vivecraft's room-scale
     /// movement), stopped and slid along by what it collides with.
     pub fn room_step(&mut self, movement: Vec3) -> Result<()> {
-        entity_move::move_entity(self, MoverType::Player, movement)
+        let grounded = self.player.ground.on_ground;
+        entity_move::move_entity(self, MoverType::Player, movement)?;
+        // A room-scale move runs between simulation ticks and has no gravity component.
+        // Entity.move therefore clears onGround even on a flat floor. Revalidate support
+        // at the destination, so head motion cannot suppress button or physical jumps.
+        // Never retain a stale ground flag over an edge or while already rising.
+        let bounds = self.player.bounds();
+        let min = bounds.min_position();
+        let max = bounds.max_position();
+        let feet = Aabb::new(
+            Vec3::new(min.x, min.y - 1.0e-5, min.z),
+            Vec3::new(max.x, min.y, max.z),
+        );
+        if grounded
+            && movement.y == 0.0
+            && self.player.velocity.y <= 0.0
+            && !self.player.spectator
+            && !self.no_player_collision(feet)?
+        {
+            let horizontal = self.player.collision.horizontal;
+            self.set_on_ground_with_movement(true, horizontal, movement)?;
+            self.player.collision.below = true;
+        }
+        Ok(())
     }
     /// `LocalPlayer.move`: the move, then `updateAutoJump` with the float
     /// horizontal displacement.

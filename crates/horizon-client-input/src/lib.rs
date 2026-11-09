@@ -18,3 +18,6 @@ pub mod mouse;
 pub mod room;
 pub mod snap;
 pub mod window;
+
+/// Quest gameplay bindings; menu interaction retains a fixed recovery layout.
+pub mod vr_bindings;

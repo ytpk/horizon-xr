@@ -130,12 +130,18 @@ impl Game<'_> {
         }
         // Visor's keyboard: the rays and triggers on its keys (before the screen's pointer, so a
         // press on a key is not a click beside the screen).
+        if headset::take_keyboard_toggle() {
+            self.vr_keyboard_toggle();
+        }
         self.visor_keyboard_frame();
         let effective = self.vivecraft_effective_settings();
         headset::set_settings(&effective);
         self.vr_update();
         self.vr_teleport_frame();
         let menu = self.pad_in_menu();
+        if menu {
+            self.visor.swing.clear();
+        }
         if menu && !headset::menu() {
             headset::set_panel_anchor(self.headset_menu_anchor());
         }
@@ -359,13 +365,17 @@ impl Game<'_> {
         if !headset::active() || headset::settings().seated() {
             return false;
         }
-        let [main, off] = headset::hand_buttons();
-        if main.trigger > 0.5 || main.primary {
+        let buttons = headset::hand_buttons();
+        let off = buttons[1];
+        let settings = headset::settings();
+        if horizon_client_input::vr_bindings::held(&settings, "questBindAttack", buttons, false)
+            || horizon_client_input::vr_bindings::held(&settings, "questBindUse", buttons, false)
+        {
             return false;
         }
         // Visor's X is the off hand's right click (`ActionRightMouse`): it uses what the off hand
         // holds, and the off hand also acts for a swing, a meal or a shield.
-        off.primary
+        headset::off_use()
             || (self.offhand_redirect.is_some() && off.trigger > 0.5)
             || self.pad.headset.off_pending
             || self.pad.headset.eating == Some(Hand::Off)

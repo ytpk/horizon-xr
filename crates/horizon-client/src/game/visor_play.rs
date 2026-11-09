@@ -354,6 +354,9 @@ impl Game<'_> {
         event_loop: &dyn EventLoopCtl,
         id: winit::window::WindowId,
     ) {
+        if !self.visor.swing.begin_tick(self.ticks) {
+            return;
+        }
         let settings = headset::settings();
         let flags = self.vr_flags();
         let hands = [headset::main_hand(), headset::off_hand()];

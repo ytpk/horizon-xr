@@ -1,5 +1,7 @@
 # Quest / Visor port: current change set
 
+Latest follow-up: [Quest input, mining and controls](quest-controls-followup.md).
+
 Base: `ytpk/horizon-xr` at `6c82f6d56ec17a1a9530a6402202fa304d6d05e5`.
 Reference: Visor 0.6.1, `c01354fad8ac03a016c249239a04b07adeb36476`.
 
@@ -48,7 +50,8 @@ peak memory with every overlay opened must be measured on the Quest.
 
 ## Remaining work, not represented as completed
 
-- Full per-profile action-binding editor, including triggers, grips and action sets.
+- Arbitrary per-profile OpenXR action-set editing for other controller families. Quest Touch gameplay
+  bindings, including triggers and grips, are now editable; see the follow-up above.
 - Keyboard-only gameplay / synthetic real-key fallback with no screen; the existing legacy keyboard
   toggle remains. Not every nonstandard field has a dedicated clipboard route.
 - Full Visor overlay/addon/template editor, imported layouts and arbitrary overlay dragging.
