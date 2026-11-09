@@ -140,3 +140,7 @@ No Quest hardware, compositor performance or Android APK validation is implied.
 These results establish desktop source/build consistency and selected GPU
 behavior, not sustained Quest frame rate. Headset checks listed above remain
 required before treating the experimental paths as verified on device.
+
+The next [water geometry follow-up](quest-water-followup.md) reduces repeated
+sorting and unnecessary back-facing geometry for visible planar water as well
+as tightening offscreen translucent bounds.

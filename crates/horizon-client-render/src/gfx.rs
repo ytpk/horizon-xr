@@ -49,8 +49,11 @@ mod entity_outline;
 #[cfg(test)]
 mod inter_stage_tests;
 mod multiview;
+mod planar_water;
 #[cfg(test)]
 pub(crate) mod test_gpu;
+#[cfg(test)]
+mod water_gpu_tests;
 mod weather;
 use entity_batch::EntityBatch;
 pub use entity_batch::{
@@ -5505,14 +5508,7 @@ impl Renderer {
                 Sides::unsorted(solid)
             },
             translucent,
-            sort: translucency::SortState::new(
-                mesh.translucent
-                    .as_chunks::<4>()
-                    .0
-                    .iter()
-                    .map(|q| translucency::quad_center(q[0].pos, q[2].pos))
-                    .collect(),
-            ),
+            sort: translucency::SortState::from_vertices(&mesh.translucent, headset::installed()),
             sorted_indices,
             flat_id,
             gpu_id: None,
@@ -8607,6 +8603,14 @@ impl Renderer {
         // LevelRenderer: nearby sections each frame, plus a rotating eighth
         // (at least 15) of the visible list. Cached views avoid needless sorts.
         self.translucent_draws.clear();
+        let vr_transparency = self.headset_eye.is_some()
+            && !native_render::world_drawn_hooked()
+            && self.native.is_none()
+            && self.pack_post.as_ref().is_none_or(|p| p.1.is_none());
+        let eye_y = [
+            camera.y + f64::from(views.primary().view.inverse().w_axis.y),
+            camera.y + f64::from(views.views().last().unwrap().view.inverse().w_axis.y),
+        ];
         let count = visible.len() + visible_lods.len();
         let budget = (count / 8).max(15).min(count);
         self.translucency_cursor %= count.max(1);
@@ -8622,10 +8626,26 @@ impl Renderer {
                     self.layout.min_y() + v.key.1 * 16,
                     v.key.2 * 16,
                 ];
-                if (!s.sort.is_sorted() || nearby || scheduled)
-                    && let Some(indices) =
+                let relative = DVec3::from_array(origin.map(f64::from)) - camera;
+                if vr_transparency && !s.sort.visible(relative, &view) {
+                    continue;
+                }
+                if (!s.sort.is_sorted()
+                    || nearby
+                    || scheduled
+                    || s.sort.needs_headset_update(vr_transparency))
+                    && let Some(indices) = if vr_transparency {
+                        s.sort.update_headset(
+                            camera.to_array(),
+                            origin,
+                            eye_y,
+                            &mut self.translucent_sorter,
+                            false,
+                        )
+                    } else {
                         s.sort
                             .update(camera.to_array(), origin, &mut self.translucent_sorter)
+                    }
                 {
                     self.uploads.buffer(
                         &mut encoder,
@@ -8634,12 +8654,15 @@ impl Renderer {
                         bytemuck::cast_slice(indices),
                     );
                 }
+                if s.sort.index_count() == 0 {
+                    continue;
+                }
                 let (page, first) = s.translucent_at;
                 self.translucent_draws.push((
                     v.distance,
                     i,
                     [
-                        s.translucent * 6,
+                        s.sort.index_count(),
                         1,
                         index_start as u32,
                         first as u32,
@@ -8657,13 +8680,29 @@ impl Renderer {
             let tile = self.lods.get_mut(&v.key).expect("visible resident tile");
             let s = tile.drawn_mut();
             if let Some((index_page, index_start)) = s.sorted_indices {
+                let relative = DVec3::from_array(v.key.origin().map(f64::from)) - camera;
+                if vr_transparency && !s.sort.visible(relative, &view) {
+                    continue;
+                }
                 let scheduled = (instance + count - self.translucency_cursor) % count < budget;
-                if (!s.sort.is_sorted() || scheduled)
-                    && let Some(indices) = s.sort.update_lod(
-                        camera.to_array(),
-                        v.key.origin(),
-                        &mut self.translucent_sorter,
-                    )
+                if (!s.sort.is_sorted()
+                    || scheduled
+                    || s.sort.needs_headset_update(vr_transparency))
+                    && let Some(indices) = if vr_transparency {
+                        s.sort.update_headset(
+                            camera.to_array(),
+                            v.key.origin(),
+                            eye_y,
+                            &mut self.translucent_sorter,
+                            true,
+                        )
+                    } else {
+                        s.sort.update_lod(
+                            camera.to_array(),
+                            v.key.origin(),
+                            &mut self.translucent_sorter,
+                        )
+                    }
                 {
                     self.uploads.buffer(
                         &mut encoder,
@@ -8672,12 +8711,15 @@ impl Renderer {
                         bytemuck::cast_slice(indices),
                     );
                 }
+                if s.sort.index_count() == 0 {
+                    continue;
+                }
                 let (page, first) = s.translucent_at;
                 self.translucent_draws.push((
                     v.distance,
                     instance,
                     [
-                        s.translucent * 6,
+                        s.sort.index_count(),
                         1,
                         index_start as u32,
                         first as u32,
@@ -8736,7 +8778,7 @@ impl Renderer {
                 let distance = (depth * depth).to_bits();
                 // A section the camera never saw has no sorted indices yet: sorted once now.
                 if let Some((index_page, index_start)) = s.sorted_indices
-                    && !s.sort.is_sorted()
+                    && (!s.sort.is_sorted() || s.sort.needs_headset_update(false))
                 {
                     let origin = [
                         v.key.0 * 16,
