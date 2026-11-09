@@ -249,6 +249,68 @@ impl Room {
             log::info!("Horizon room: pressed {action:?}");
             self.host.act(action);
         }
+        if let Some(Event::RenderScale(delta) | Event::RefreshRate(delta)) = event {
+            use horizon_client_input::headset_display;
+            let key = if matches!(event, Some(Event::RenderScale(_))) {
+                "renderScaleFactor"
+            } else {
+                "horizonRefreshRate"
+            };
+            let current = self.settings.vr.float(key);
+            let next = if key == "renderScaleFactor" {
+                headset_display::step_scale(current, delta)
+            } else {
+                headset_display::snapshot().map_or(current, |i| {
+                    headset_display::step_rate(current, delta, &i.rates)
+                })
+            };
+            if next != current {
+                Arc::make_mut(&mut self.settings.vr).set_float(key, next);
+                self.settings.save(&Game::options_path());
+                horizon_client::headset::set_settings(&self.settings.vr);
+                horizon_client::headset::pulse(!horizon_client::headset::pointer_off(), 0.4, 0.04);
+            }
+        }
+        if matches!(event, Some(Event::Multiview)) {
+            let enabled = !self.settings.vr.bool("horizonMultiview");
+            Arc::make_mut(&mut self.settings.vr).set_bool("horizonMultiview", enabled);
+            self.settings.save(&Game::options_path());
+            horizon_client::headset::set_settings(&self.settings.vr);
+            horizon_client::headset::pulse(!horizon_client::headset::pointer_off(), 0.4, 0.04);
+        }
+        if matches!(
+            event,
+            Some(Event::DynamicResolution | Event::Foveation | Event::SuperResolution)
+        ) {
+            let settings = Arc::make_mut(&mut self.settings.vr);
+            match event {
+                Some(Event::DynamicResolution) => {
+                    settings.set_bool(
+                        "horizonDynamicResolution",
+                        !settings.bool("horizonDynamicResolution"),
+                    );
+                }
+                Some(Event::SuperResolution) => {
+                    settings.set_bool(
+                        "horizonSuperResolution",
+                        !settings.bool("horizonSuperResolution"),
+                    );
+                }
+                Some(Event::Foveation) => {
+                    let next = match settings.enum_name("horizonFoveation") {
+                        "OFF" => "LOW",
+                        "LOW" => "MEDIUM",
+                        "MEDIUM" => "HIGH",
+                        _ => "OFF",
+                    };
+                    settings.set("horizonFoveation", next);
+                }
+                _ => unreachable!(),
+            }
+            self.settings.save(&Game::options_path());
+            horizon_client::headset::set_settings(&self.settings.vr);
+            horizon_client::headset::pulse(!horizon_client::headset::pointer_off(), 0.4, 0.04);
+        }
         // A developer's press with no hand: `HORIZON_ROOM_PRESS=signin@120` (also retry, play,
         // signout, cancel) presses that button once at that frame, for a headset on a desk.
         if let Some((name, at)) = std::env::var("HORIZON_ROOM_PRESS").ok().and_then(|v| {

@@ -7,6 +7,7 @@ pub mod clipboard;
 pub mod embed;
 pub mod gamepad;
 pub mod headset;
+pub mod headset_display;
 pub mod held;
 pub mod input;
 pub mod interaction_input;

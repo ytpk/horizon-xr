@@ -2,7 +2,7 @@
 use crate::weather::{Time, Vertex};
 
 pub(super) struct Weather {
-    pipeline: wgpu::RenderPipeline,
+    pub(super) pipeline: wgpu::RenderPipeline,
     /// The layouts of groups 0 (the entities') and 1 (the fall clock), for a native pack's
     /// weather pipeline.
     pub entity_layout: wgpu::BindGroupLayout,
@@ -19,6 +19,7 @@ impl Weather {
         format: wgpu::TextureFormat,
         entities: &wgpu::BindGroupLayout,
         shader: &wgpu::ShaderModule,
+        kept: &super::reuse::On<'_>,
     ) -> Self {
         let bindings = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("Weather time"),
@@ -40,7 +41,7 @@ impl Weather {
         });
         let attributes = wgpu::vertex_attr_array![0=>Float32x3,1=>Float32x2,2=>Float32x4,
             3=>Float32x4,4=>Uint32x4,5=>Unorm8x4,6=>Uint8x4,7=>Uint32];
-        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        let pipeline = kept.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("Weather"),
             layout: Some(&layout),
             vertex: wgpu::VertexState {

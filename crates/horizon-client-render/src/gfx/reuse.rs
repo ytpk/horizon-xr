@@ -65,6 +65,8 @@ impl<T: Clone> Kept<T> {
 #[derive(Default)]
 pub struct Reuse {
     generation: std::sync::atomic::AtomicU32,
+    stereo_shaders: Mutex<HashMap<wgpu::ShaderModule, wgpu::ShaderModule>>,
+    stereo_pipelines: Mutex<HashMap<wgpu::RenderPipeline, wgpu::RenderPipeline>>,
     shaders: Kept<wgpu::ShaderModule>,
     bind_group_layouts: Kept<wgpu::BindGroupLayout>,
     pipeline_layouts: Kept<wgpu::PipelineLayout>,
@@ -86,6 +88,30 @@ impl Reuse {
         self.bind_group_layouts.keep_only(generation);
         self.pipeline_layouts.keep_only(generation);
         self.render.keep_only(generation);
+        let shaders: Vec<_> = self
+            .shaders
+            .map
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .values()
+            .map(|(v, _)| v.clone())
+            .collect();
+        self.stereo_shaders
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .retain(|k, _| shaders.contains(k));
+        let pipelines: Vec<_> = self
+            .render
+            .map
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .values()
+            .map(|(v, _)| v.clone())
+            .collect();
+        self.stereo_pipelines
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .retain(|k, v| pipelines.contains(k) || pipelines.contains(v));
     }
     /// How many objects are kept.
     pub fn len(&self) -> usize {
@@ -93,6 +119,22 @@ impl Reuse {
             + self.bind_group_layouts.len()
             + self.pipeline_layouts.len()
             + self.render.len()
+    }
+    #[cfg(test)]
+    pub(super) fn stereo_for_test<'a>(&'a self, device: &'a wgpu::Device) -> On<'a> {
+        let mut on = self.on(device);
+        on.stereo = true;
+        on
+    }
+    pub fn alternates<'a>(
+        &self,
+        pipelines: impl Iterator<Item = &'a wgpu::RenderPipeline>,
+    ) -> Option<Vec<wgpu::RenderPipeline>> {
+        let variants = self
+            .stereo_pipelines
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        pipelines.map(|p| variants.get(p).cloned()).collect()
     }
     fn current(&self) -> u32 {
         self.generation.load(std::sync::atomic::Ordering::Relaxed)
@@ -103,6 +145,7 @@ impl Reuse {
             reuse: self,
             device,
             generation: self.current(),
+            stereo: stereo_enabled(device),
         }
     }
 }
@@ -113,6 +156,7 @@ pub struct On<'a> {
     reuse: &'a Reuse,
     device: &'a wgpu::Device,
     generation: u32,
+    stereo: bool,
 }
 impl On<'_> {
     pub fn create_shader_module(
@@ -120,9 +164,34 @@ impl On<'_> {
         descriptor: wgpu::ShaderModuleDescriptor<'_>,
     ) -> wgpu::ShaderModule {
         let key = format!("{descriptor:?}");
-        self.reuse.shaders.get(key, self.generation, || {
-            self.device.create_shader_module(descriptor)
-        })
+        let module = self.reuse.shaders.get(key, self.generation, || {
+            self.device.create_shader_module(descriptor.clone())
+        });
+        if self.stereo {
+            let mut variants = self
+                .reuse
+                .stereo_shaders
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            if !variants.contains_key(&module)
+                && let wgpu::ShaderSource::Wgsl(source) = &descriptor.source
+            {
+                let source = super::multiview::shader(source);
+                let scope = self.device.push_error_scope(wgpu::ErrorFilter::Validation);
+                let variant = self
+                    .device
+                    .create_shader_module(wgpu::ShaderModuleDescriptor {
+                        label: descriptor.label,
+                        source: wgpu::ShaderSource::Wgsl(source.into()),
+                    });
+                if let Some(error) = pollster::block_on(scope.pop()) {
+                    log::warn!("Quest multiview shader unavailable: {error}");
+                } else {
+                    variants.insert(module.clone(), variant);
+                }
+            }
+        }
+        module
     }
     pub fn create_bind_group_layout(
         &self,
@@ -147,10 +216,54 @@ impl On<'_> {
         descriptor: &wgpu::RenderPipelineDescriptor<'_>,
     ) -> wgpu::RenderPipeline {
         let key = format!("{descriptor:?}");
-        self.reuse.render.get(key, self.generation, || {
+        let pipeline = self.reuse.render.get(key, self.generation, || {
             self.device.create_render_pipeline(descriptor)
-        })
+        });
+        if self.stereo && descriptor.multiview_mask.is_none() {
+            let mut variants = self
+                .reuse
+                .stereo_pipelines
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            if !variants.contains_key(&pipeline) {
+                let shaders = self
+                    .reuse
+                    .stereo_shaders
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner);
+                let vertex = shaders.get(descriptor.vertex.module);
+                let fragment = descriptor
+                    .fragment
+                    .as_ref()
+                    .and_then(|f| shaders.get(f.module));
+                if let Some(vertex) = vertex
+                    && (descriptor.fragment.is_none() || fragment.is_some())
+                {
+                    let mut stereo = descriptor.clone();
+                    stereo.vertex.module = vertex;
+                    if let Some(f) = stereo.fragment.as_mut() {
+                        f.module = fragment.unwrap();
+                    }
+                    stereo.multiview_mask = super::multiview::MASK;
+                    let scope = self.device.push_error_scope(wgpu::ErrorFilter::Validation);
+                    let variant = self.device.create_render_pipeline(&stereo);
+                    if let Some(error) = pollster::block_on(scope.pop()) {
+                        log::warn!("Quest multiview pipeline unavailable: {error}");
+                    } else {
+                        variants.insert(pipeline.clone(), variant.clone());
+                        variants.insert(variant, pipeline.clone());
+                    }
+                }
+            }
+        }
+        pipeline
     }
+}
+
+fn stereo_enabled(device: &wgpu::Device) -> bool {
+    device.features().contains(wgpu::Features::MULTIVIEW)
+        && super::headset::installed()
+        && horizon_client_input::headset::settings().bool("horizonMultiview")
 }
 
 #[cfg(test)]

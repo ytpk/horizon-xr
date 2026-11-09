@@ -1289,6 +1289,20 @@ pub const DEFS: &[Def] = &[
         default: "0",
         range: None,
     },
+    // Optional compositor hint; does not reduce the saved render scale.
+    Def {
+        key: "horizonSuperResolution",
+        kind: Kind::Bool,
+        default: "false",
+        range: None,
+    },
+    // Experimental stereo world pass, with automatic compatibility fallback.
+    Def {
+        key: "horizonMultiview",
+        kind: Kind::Bool,
+        default: "false",
+        range: None,
+    },
     // Horizon only: the display refresh rate asked for (Hz), the nearest the headset offers.
     Def {
         key: "horizonRefreshRate",

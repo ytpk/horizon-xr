@@ -82,7 +82,7 @@ const NAMES: [&str; STAGES] = [
     "xr wait",
     "xr begin",
     "xr acquire",
-    "eye L",
+    "eye L / stereo",
     "eye R",
     "submit L",
     "submit R",
@@ -155,9 +155,12 @@ pub struct Profile {
     sums: [f64; STAGES],
     worst: [f32; STAGES],
     frames: u32,
+    render_modes: [u32; 2],
     /// The slowest whole frame (its parts summed), and the sum of them all.
     worst_total: f32,
     total_sum: f64,
+    active_sum: f64,
+    worst_active: f32,
     gpu_sum: f64,
     gpu_worst: f32,
     gpu_count: u32,
@@ -179,12 +182,16 @@ pub const SCENE: [&str; 4] = ["chunks", "lod tiles", "draw calls", "indices"];
 #[derive(Clone, Debug, PartialEq)]
 pub struct Report {
     pub frames: u32,
+    pub render_modes: [u32; 2],
     pub fps: f32,
     /// Average milliseconds per frame by part.
     pub average: [f32; STAGES],
     pub worst: [f32; STAGES],
     pub average_total: f32,
     pub worst_total: f32,
+    /// Wall-clock app spans excluding XR calls and nested eye stalls, not hardware utilization.
+    pub average_active: f32,
+    pub worst_active: f32,
     /// Average and worst GPU time of an eye's pass, with the timed passes' count.
     pub gpu: Option<(f32, f32, u32)>,
     pub passes: Vec<(String, f32)>,
@@ -246,6 +253,20 @@ impl Profile {
             *sum += f64::from(ms);
             *worst = worst.max(ms);
         }
+        let runtime = [
+            Stage::XrWait,
+            Stage::XrBegin,
+            Stage::XrAcquire,
+            Stage::XrEnd,
+        ]
+        .into_iter()
+        .map(|s| self.current[s as usize])
+        .sum::<f32>();
+        let stalls =
+            self.current[Stage::StallLeft as usize] + self.current[Stage::StallRight as usize];
+        let active = (total - runtime - stalls).max(0.0);
+        self.active_sum += f64::from(active);
+        self.worst_active = self.worst_active.max(active);
         self.worst_total = self.worst_total.max(total);
         self.total_sum += f64::from(total);
         self.frames += 1;
@@ -258,11 +279,14 @@ impl Profile {
         let frames = self.frames.max(1) as f32;
         let report = Report {
             frames: self.frames,
+            render_modes: self.render_modes,
             fps: self.frames as f32 / (span / 1000.0) as f32,
             average: self.sums.map(|s| (s / f64::from(frames)) as f32),
             worst: self.worst,
             average_total: (self.total_sum / f64::from(frames)) as f32,
             worst_total: self.worst_total,
+            average_active: (self.active_sum / f64::from(frames)) as f32,
+            worst_active: self.worst_active,
             gpu: (self.gpu_count > 0).then(|| {
                 (
                     (self.gpu_sum / f64::from(self.gpu_count)) as f32,
@@ -298,9 +322,15 @@ impl Report {
                 .join(", ")
         };
         let mut lines = vec![format!(
-            "{} frames, {:.1} fps, cpu {:.1} ms (worst {:.1})",
+            "{} frames, {:.1} fps, paced spans {:.1} ms (worst {:.1})",
             self.frames, self.fps, self.average_total, self.worst_total
         )];
+        lines.push(format!("app CPU spans excluding XR calls/eye waits: {:.1} ms (worst {:.1}); not CPU utilization",
+            self.average_active, self.worst_active));
+        lines.push(format!(
+            "world frames: {} separate-eye, {} multiview; GPU samples arrive late",
+            self.render_modes[0], self.render_modes[1]
+        ));
         for (label, values) in [("avg", &self.average), ("max", &self.worst)] {
             lines.push(format!(
                 "{label}: sim [{}] prep [{}] xr [{}]",
@@ -321,14 +351,14 @@ impl Report {
         match self.gpu {
             Some((average, worst, n)) => {
                 lines.push(format!(
-                    "gpu per eye pass: {average:.1} ms (worst {worst:.1}, {n} timed)"
+                    "gpu per world render (one eye or stereo): {average:.1} ms (worst {worst:.1}, {n} timed)"
                 ));
             }
-            None => lines.push("gpu per eye pass: not timed".to_owned()),
+            None => lines.push("gpu per world render (one eye or stereo): not timed".to_owned()),
         }
         if let Some((average, worst)) = &self.scene {
             lines.push(format!(
-                "per eye pass: {}",
+                "per world render: {}",
                 SCENE
                     .iter()
                     .enumerate()
@@ -382,6 +412,13 @@ pub fn record(stage: Stage, elapsed: std::time::Duration) {
 pub fn gpu(ms: f32) {
     if enabled() {
         with(|g| g.profile.gpu(ms));
+    }
+}
+
+/// Which world path produced this frame, so fallback use is visible in profiles.
+pub fn render_mode(stereo: bool) {
+    if enabled() {
+        with(|g| g.profile.render_modes[usize::from(stereo)] += 1);
     }
 }
 
@@ -442,6 +479,24 @@ mod tests {
         profile.record(Stage::EyeRight, right);
         profile.record(Stage::SubmitLeft, 1.0);
         profile.record(Stage::SubmitRight, 0.5);
+    }
+
+    #[test]
+    fn runtime_pacing_is_not_reported_as_cpu_work() {
+        let mut p = Profile::default();
+        for at in [0.0, 5000.0] {
+            p.record(Stage::Prepare, 1.0);
+            p.record(Stage::EyeLeft, 1.0);
+            p.record(Stage::StallLeft, 0.5);
+            p.record(Stage::XrWait, 9.0);
+            if let Some(report) = p.finish(at) {
+                assert_eq!(report.average_total, 11.0);
+                assert_eq!(report.average_active, 1.5);
+                assert_eq!(report.worst_active, 1.5);
+                assert!(report.lines()[0].contains("paced spans 11.0"));
+                assert!(report.lines()[1].contains("1.5 ms"));
+            }
+        }
     }
 
     #[test]
@@ -511,11 +566,15 @@ mod tests {
         p.finish(0.0);
         let lines = p.finish(5_000.0).unwrap().lines();
         assert!(lines[0].starts_with("2 frames"), "{lines:?}");
+        let average = lines
+            .iter()
+            .find(|line| line.starts_with("avg: sim"))
+            .unwrap();
         assert!(
-            lines[1].contains("avg: sim [update 1.0, tick 1.5]"),
+            average.contains("avg: sim [update 1.0, tick 1.5]"),
             "{lines:?}"
         );
-        assert!(lines[1].contains("xr wait 3.5"), "{lines:?}");
+        assert!(average.contains("xr wait 3.5"), "{lines:?}");
         assert!(
             lines
                 .last()

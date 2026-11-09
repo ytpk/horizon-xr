@@ -48,6 +48,7 @@ mod entity_batch;
 mod entity_outline;
 #[cfg(test)]
 mod inter_stage_tests;
+mod multiview;
 #[cfg(test)]
 pub(crate) mod test_gpu;
 mod weather;
@@ -1426,6 +1427,13 @@ pub struct Renderer {
     acquire_validation_failures: u32,
     /// On a headset, the eye this pass draws and the view both eyes are culled with.
     headset_eye: Option<(View, View)>,
+    stereo_views: Option<[View; 2]>,
+    stereo_targets: Option<multiview::Targets>,
+    stereo_destinations: Option<[wgpu::Texture; 2]>,
+    stereo_failed: bool,
+    stereo_status: Option<bool>,
+    stereo_stable_frames: u32,
+    stereo_sample_size: [u32; 2],
     /// The last headset frame's cull view, which geometry built before the
     /// frame (`camera_frustum`) is culled with.
     headset_cull: Option<View>,
@@ -2248,7 +2256,11 @@ async fn open_backend(
 }
 /// The features the renderer asks a device for, of those `adapter` has.
 fn device_features(adapter: &wgpu::Adapter) -> wgpu::Features {
-    timing::GpuTimer::features(adapter)
+    (if headset::installed() {
+        adapter.features() & wgpu::Features::MULTIVIEW
+    } else {
+        wgpu::Features::empty()
+    }) | timing::GpuTimer::features(adapter)
         | cull::Cull::features(adapter)
         | oit::features(adapter)
         | (adapter.features()
@@ -3054,25 +3066,29 @@ impl Renderer {
         drop(terrain_step);
         let globals = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Horizon globals"),
-            size: std::mem::size_of::<Globals>() as u64,
+            size: (std::mem::size_of::<Globals>() + std::mem::size_of::<[multiview::Eye; 2]>())
+                as u64,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
         let hand_globals = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("First-person hand globals"),
-            size: std::mem::size_of::<Globals>() as u64,
+            size: (std::mem::size_of::<Globals>() + std::mem::size_of::<[multiview::Eye; 2]>())
+                as u64,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
         let crosshair_globals = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Debug crosshair globals"),
-            size: std::mem::size_of::<Globals>() as u64,
+            size: (std::mem::size_of::<Globals>() + std::mem::size_of::<[multiview::Eye; 2]>())
+                as u64,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
         let mirror_globals = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Water mirror globals"),
-            size: std::mem::size_of::<Globals>() as u64,
+            size: (std::mem::size_of::<Globals>() + std::mem::size_of::<[multiview::Eye; 2]>())
+                as u64,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -3383,7 +3399,7 @@ impl Renderer {
             label: Some("Horizon entities"),
             source: wgpu::ShaderSource::Wgsl(entity_shader().into()),
         });
-        let static_entity_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        let static_entity_shader = kept.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Horizon static block entities"),
             source: wgpu::ShaderSource::Wgsl(static_entity_shader().into()),
         });
@@ -3465,8 +3481,13 @@ impl Renderer {
                     },
                 )],
             });
-        let weather =
-            weather::Weather::new(&device, frame_format, &entity_bindings, &entity_shader);
+        let weather = weather::Weather::new(
+            &device,
+            frame_format,
+            &entity_bindings,
+            &entity_shader,
+            &kept,
+        );
         let atlas_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("Atlas"),
             ..Default::default()
@@ -3826,41 +3847,40 @@ impl Renderer {
             alpha_blend,
             false,
         );
-        let static_entity_pipeline =
-            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                label: Some("Static block entities"),
-                layout: Some(&static_entity_layout),
-                vertex: wgpu::VertexState {
-                    module: &static_entity_shader,
-                    entry_point: Some("vs_static_entity"),
-                    compilation_options: Default::default(),
-                    buffers: &static_entity_vertex,
-                },
-                primitive: wgpu::PrimitiveState::default(),
-                depth_stencil: Some(wgpu::DepthStencilState {
-                    format: wgpu::TextureFormat::Depth32Float,
-                    depth_write_enabled: Some(true),
-                    depth_compare: Some(wgpu::CompareFunction::GreaterEqual),
-                    stencil: Default::default(),
-                    bias: Default::default(),
-                }),
-                multisample: Default::default(),
-                fragment: Some(wgpu::FragmentState {
-                    module: &static_entity_shader,
-                    entry_point: Some("fs_entity"),
-                    compilation_options: Default::default(),
-                    targets: &[Some(wgpu::ColorTargetState {
-                        format: frame_format,
-                        // fs_entity's discard handles binary cutout alpha. Any
-                        // sprite with fractional alpha stays on the blended
-                        // dynamic entity path.
-                        blend: None,
-                        write_mask: wgpu::ColorWrites::ALL,
-                    })],
-                }),
-                multiview_mask: None,
-                cache: None,
-            });
+        let static_entity_pipeline = kept.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("Static block entities"),
+            layout: Some(&static_entity_layout),
+            vertex: wgpu::VertexState {
+                module: &static_entity_shader,
+                entry_point: Some("vs_static_entity"),
+                compilation_options: Default::default(),
+                buffers: &static_entity_vertex,
+            },
+            primitive: wgpu::PrimitiveState::default(),
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: wgpu::TextureFormat::Depth32Float,
+                depth_write_enabled: Some(true),
+                depth_compare: Some(wgpu::CompareFunction::GreaterEqual),
+                stencil: Default::default(),
+                bias: Default::default(),
+            }),
+            multisample: Default::default(),
+            fragment: Some(wgpu::FragmentState {
+                module: &static_entity_shader,
+                entry_point: Some("fs_entity"),
+                compilation_options: Default::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: frame_format,
+                    // fs_entity's discard handles binary cutout alpha. Any
+                    // sprite with fractional alpha stays on the blended
+                    // dynamic entity path.
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            multiview_mask: None,
+            cache: None,
+        });
         // RenderPipelines.ENERGY_SWIRL: BlendFunction.ADDITIVE (one, one), no culling; no depth
         // writes either: vanilla sorts the quads far to near, so every face passes the test.
         let one_one = wgpu::BlendComponent {
@@ -4515,7 +4535,7 @@ impl Renderer {
         let world_post = world_post::Post::new(&device, frame_format);
         let uploads = upload::Uploads::new(&device);
         let section_uploads = upload::Uploads::with_chunk(&device, SECTION_UPLOAD_CHUNK);
-        let stars = stars::Stars::new(&device, frame_format);
+        let stars = stars::Stars::new(&device, frame_format, &kept);
         let entity_outline = entity_outline::EntityOutline::new(
             &device,
             (&entity_shader, &entity_layout, &entity_vertex),
@@ -4774,6 +4794,13 @@ impl Renderer {
             suspended: !drawable_size(size.width, size.height, max_side),
             acquire_validation_failures: 0,
             headset_eye: None,
+            stereo_views: None,
+            stereo_targets: None,
+            stereo_destinations: None,
+            stereo_failed: false,
+            stereo_status: None,
+            stereo_stable_frames: 0,
+            stereo_sample_size: [0, 0],
             headset_cull: None,
             eye_mask: None,
             vis_mask: None,
@@ -6764,7 +6791,10 @@ impl Renderer {
     /// The views `render` draws `frame` from.
     pub fn views(&self, frame: &Frame) -> ViewSet {
         if let Some((eye, cull)) = self.headset_eye {
-            return ViewSet::eye(eye, cull);
+            return match self.stereo_views {
+                Some([left, right]) => ViewSet::stereo(left, right, cull),
+                None => ViewSet::eye(eye, cull),
+            };
         }
         ViewSet::single(self.screen_view(
             frame.fov_degrees,
@@ -6970,6 +7000,91 @@ impl Renderer {
         }
         self.render_flat(frame)
     }
+    /// Swap the entire compatible pipeline set atomically; a failed variant
+    /// leaves the original renderer intact. Calling again restores mono handles.
+    fn swap_stereo_pipelines(&mut self) -> bool {
+        let mut slots = vec![
+            &mut self.solid,
+            &mut self.solid_opaque,
+            &mut self.solid_cutout,
+            &mut self.translucent,
+            &mut self.translucent_mark,
+            &mut self.sky,
+            &mut self.sky_base,
+            &mut self.sunrise_pipeline,
+            &mut self.dark_disc,
+            &mut self.depth_reset,
+            &mut self.lines,
+            &mut self.lines_secondary,
+            &mut self.debug_lines_opaque,
+            &mut self.debug_lines,
+            &mut self.debug_lines_on_top,
+            &mut self.entity_pipeline,
+            &mut self.static_entity_pipeline,
+            &mut self.crumbling_pipeline,
+            &mut self.shadow_blob_pipeline,
+            &mut self.translucent_item_pipeline,
+            &mut self.water_mask_pipeline,
+            &mut self.cloud_pipeline,
+            &mut self.additive_pipeline,
+            &mut self.dragon_rays_pipeline,
+            &mut self.energy_swirl_pipeline,
+            &mut self.lightning_pipeline,
+            &mut self.see_through_pipeline,
+            &mut self.text_polygon_offset_pipeline,
+            &mut self.celestial_pipeline,
+            &mut self.stars.pipeline,
+            &mut self.weather.pipeline,
+        ];
+        slots.extend(self.screen_pipelines.iter_mut());
+        if let Some(flat) = &mut self.flat {
+            slots.extend([
+                &mut flat.solid,
+                &mut flat.solid_opaque,
+                &mut flat.solid_cutout,
+                &mut flat.solid_mirror,
+                &mut flat.translucent,
+                &mut flat.translucent_mark,
+            ]);
+        }
+        let variants = self.reuse.alternates(slots.iter().map(|p| &**p));
+        let Some(variants) = variants else {
+            return false;
+        };
+        for (slot, variant) in slots.into_iter().zip(variants) {
+            *slot = variant;
+        }
+        true
+    }
+    fn stereo_compatible(&self, frame: &Frame) -> bool {
+        !self.stereo_failed
+            && horizon_client_input::headset::settings().bool("horizonMultiview")
+            && self.device.features().contains(wgpu::Features::MULTIVIEW)
+            && self.device.limits().max_multiview_view_count >= 2
+            && (self.gpu_timer.is_none()
+                || self
+                    .device
+                    .features()
+                    .contains(wgpu::Features::TIMESTAMP_QUERY_INSIDE_ENCODERS))
+            && horizon_client_input::headset_display::snapshot().is_none_or(|info| !info.foveated)
+            && self.hdr.is_none()
+            && self.native.is_none()
+            && self.pack_post.is_none()
+            && self.core_lines.is_none()
+            && !self.improved_transparency
+            && self.visbuf.is_none()
+            && self.world_post.scale == 1.0
+            && !self.world_post.antialias
+            && frame.menu_blur.is_none()
+            && frame.post_effects.effects.is_empty()
+            && frame.glowing.is_empty()
+            && frame.skin.is_none_or(|skin| skin.outline_vertices == 0)
+            && frame.border.is_none()
+            && frame.debug_crosshair.is_empty()
+            && self.screenshot.is_none()
+            && !native_render::world_drawn_hooked()
+            && self.frame_format == self.config.format
+    }
     /// A headset's frame: each eye drawn in a pass of its own into the runtime's
     /// image, from the eye's pose and lens, or the frame as a screen shows it onto
     /// the menu panel's image while a screen is open.
@@ -6977,6 +7092,8 @@ impl Renderer {
         if self.device_lost() {
             return Err("the graphics device was lost".into());
         }
+        let timed = self.gpu_times.len();
+        self.land_frame();
         vr_profile::refresh_often();
         let layers = match horizon_client_input::headset::menu() {
             false => headset::Layers::World,
@@ -7108,9 +7225,64 @@ impl Renderer {
                 let cull = headset::cull_view(body_yaw, &poses, frame.depth_far);
                 self.headset_cull = Some(cull);
                 let mut drawn = Ok(false);
-                let timed = self.gpu_times.len();
                 let masks = headset::with(|h| h.hidden_areas()).flatten();
-                for (eye, (image, pose)) in eyes.iter().enumerate() {
+                let stereo = self.stereo_compatible(frame) && self.swap_stereo_pipelines();
+                if stereo {
+                    self.stereo_views =
+                        Some(poses.map(|p| View::eye(body_yaw, &p, frame.depth_far)));
+                    self.headset_eye = Some((self.stereo_views.unwrap()[0], cull));
+                    if self
+                        .stereo_targets
+                        .as_ref()
+                        .is_none_or(|t| !t.fits(size, self.config.format))
+                    {
+                        let validation =
+                            self.device.push_error_scope(wgpu::ErrorFilter::Validation);
+                        let memory = self.device.push_error_scope(wgpu::ErrorFilter::OutOfMemory);
+                        let target =
+                            multiview::Targets::new(&self.device, size, self.config.format);
+                        let error = pollster::block_on(memory.pop())
+                            .or(pollster::block_on(validation.pop()));
+                        if let Some(error) = error {
+                            log::warn!(
+                                "Quest multiview targets unavailable, using per-eye passes: {error}"
+                            );
+                            self.stereo_targets = None;
+                            self.stereo_failed = true;
+                        } else {
+                            self.stereo_targets = Some(target);
+                        }
+                    }
+                    if let Some(target) = &self.stereo_targets {
+                        self.offscreen = Some(target.color.clone());
+                        self.stereo_destinations = Some([eyes[0].0.clone(), eyes[1].0.clone()]);
+                        let drawing = Instant::now();
+                        drawn = self.render_flat(frame);
+                        self.stereo_destinations = None;
+                        vr_profile::record(vr_profile::Stage::EyeLeft, drawing.elapsed());
+                        vr_profile::record(vr_profile::Stage::SubmitLeft, self.last_submit);
+                        vr_profile::record(vr_profile::Stage::StallLeft, self.last_wait);
+                    }
+                    self.stereo_views = None;
+                    self.headset_eye = None;
+                    assert!(self.swap_stereo_pipelines());
+                }
+                let stereo_drawn = stereo && self.stereo_targets.is_some();
+                if self.stereo_status != Some(stereo_drawn) || self.stereo_sample_size != size {
+                    log::info!(
+                        "Quest world rendering: {}",
+                        if stereo_drawn {
+                            "single-pass multiview (2 layers)"
+                        } else {
+                            "separate eye passes (disabled or compatibility fallback)"
+                        }
+                    );
+                    self.stereo_status = Some(stereo_drawn);
+                    self.stereo_stable_frames = 0;
+                    self.stereo_sample_size = size;
+                    horizon_client_input::headset_display::clear_gpu_frame();
+                }
+                for (eye, (image, pose)) in eyes.iter().enumerate().filter(|_| !stereo_drawn) {
                     self.eye_mask = masks
                         .as_ref()
                         .and_then(|m| vis_mask::EyeMask::new(&m[eye], pose.tangents));
@@ -7141,6 +7313,16 @@ impl Renderer {
                         break;
                     }
                 }
+                self.stereo_stable_frames = self.stereo_stable_frames.saturating_add(1);
+                let samples = self.gpu_times.get(timed..).unwrap_or_default();
+                // Timer readbacks are delayed. Ignore transition frames and batches
+                // whose size cannot describe a complete stereo world render.
+                if self.stereo_stable_frames > 16
+                    && samples.len() == if stereo_drawn { 1 } else { 2 }
+                {
+                    horizon_client_input::headset_display::record_gpu_frame(samples.iter().sum());
+                }
+                vr_profile::render_mode(stereo_drawn);
                 if vr_profile::enabled() {
                     // Read back a few frames late: the eye passes timed since this frame began.
                     for &ms in self.gpu_times.get(timed..).unwrap_or_default() {
@@ -7155,15 +7337,26 @@ impl Renderer {
                 let size = headset::with(|h| h.menu_size()).unwrap_or([1, 1]);
                 self.set_headset_size(size);
                 let hud_started = Instant::now();
-                self.draw_headset_hud(frame.hud, hud.as_ref());
+                let mut panels =
+                    self.device
+                        .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                            label: Some("Quest panels and runtime layouts"),
+                        });
+                self.encode_headset_hud(frame.hud, hud.as_ref(), &mut panels);
                 // The overlay panel (Visor's hotbar wheel in front of the hand), when the game
                 // wants one: its own batch onto its own image.
                 let overlays: Vec<wgpu::Texture> = (0..horizon_client_input::headset::OVERLAYS)
                     .filter_map(|slot| {
                         let image = headset::with(|h| h.overlay_image(slot)).flatten()?;
                         match frame.overlays[slot] {
-                            Some(batch) => self.draw_headset_hud(batch, Some(&image)),
-                            None => self.draw_headset_hud(&HudBatch::new([1, 1]), Some(&image)),
+                            Some(batch) => {
+                                self.encode_headset_hud(batch, Some(&image), &mut panels)
+                            }
+                            None => self.encode_headset_hud(
+                                &HudBatch::new([1, 1]),
+                                Some(&image),
+                                &mut panels,
+                            ),
                         }
                         Some(image)
                     })
@@ -7174,7 +7367,7 @@ impl Renderer {
                 images.extend(overlays.iter());
                 images.extend(upload.as_ref().map(|u| &u.0));
                 let finish_started = Instant::now();
-                self.finish_headset_images(&images, images.len());
+                self.finish_headset_images_encoded(panels, &images, images.len());
                 vr_profile::record(vr_profile::Stage::Finish, finish_started.elapsed());
                 drawn
             }
@@ -7228,14 +7421,24 @@ impl Renderer {
     /// compositor shows it in front of the eyes' images. With no image its
     /// atlas patches still go up.
     fn draw_headset_hud(&mut self, hud: &HudBatch, image: Option<&wgpu::Texture>) {
-        let size = [self.config.width, self.config.height];
         let mut encoder = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("Horizon headset HUD"),
             });
+        self.encode_headset_hud(hud, image, &mut encoder);
+        self.uploads.finish(&encoder);
+        self.queue.submit([encoder.finish()]);
+    }
+    fn encode_headset_hud(
+        &mut self,
+        hud: &HudBatch,
+        image: Option<&wgpu::Texture>,
+        encoder: &mut wgpu::CommandEncoder,
+    ) {
+        let size = [self.config.width, self.config.height];
         self.hud
-            .prepare(&self.device, &mut self.uploads, &mut encoder, hud, size);
+            .prepare(&self.device, &mut self.uploads, encoder, hud, size);
         if let Some(image) = image {
             let view = image.create_view(&Default::default());
             drop(encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -7252,7 +7455,7 @@ impl Renderer {
                 ..Default::default()
             }));
             self.hud.draw_range(
-                &mut encoder,
+                encoder,
                 &view,
                 &self.depth,
                 hud,
@@ -7261,18 +7464,24 @@ impl Renderer {
                 None,
             );
         }
-        self.uploads.finish(&encoder);
-        self.queue.submit([encoder.finish()]);
     }
     /// Leaves the headset's images as its runtime takes them back (in the
     /// colour attachment layout) and submits the frame before they go; those
     /// from `drawn` on are cleared to black.
     fn finish_headset_images(&mut self, images: &[&wgpu::Texture], drawn: usize) {
-        let mut encoder = self
+        let encoder = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("Horizon headset images"),
             });
+        self.finish_headset_images_encoded(encoder, images, drawn);
+    }
+    fn finish_headset_images_encoded(
+        &mut self,
+        mut encoder: wgpu::CommandEncoder,
+        images: &[&wgpu::Texture],
+        drawn: usize,
+    ) {
         // A tiling GPU (Quest's Adreno) reads and writes the whole image again for a pass that
         // loads and stores it and draws nothing, some 30 MB a frame an eye. With
         // `HORIZON_XR_LAYOUT=barrier` the images drawn already hold their colour work and only
@@ -7310,6 +7519,7 @@ impl Renderer {
         if !moved.is_empty() {
             encoder.transition_resources(std::iter::empty(), moved.into_iter());
         }
+        self.uploads.finish(&encoder);
         self.queue.submit([encoder.finish()]);
     }
     fn render_flat(&mut self, frame: &Frame) -> Result<bool> {
@@ -7802,6 +8012,17 @@ impl Renderer {
         };
         self.uploads
             .buffer(&mut encoder, &self.globals, 0, bytemuck::bytes_of(&globals));
+        if let Some(eyes) = self.stereo_views {
+            let values = eyes.map(|eye| multiview::Eye::new(eye, globals.misc, *views.primary()));
+            for buffer in [&self.globals, &self.hand_globals, &self.crosshair_globals] {
+                self.uploads.buffer(
+                    &mut encoder,
+                    buffer,
+                    std::mem::size_of::<Globals>() as u64,
+                    bytemuck::cast_slice(&values),
+                );
+            }
+        }
         // The sunrise fan as sixteen triangles. Its clip positions use the sky's
         // own view (no TAA jitter, bob or spin: `fs_sky`'s `view_ray` has none),
         // and its apex weight interpolates the barycentric the shader used to
@@ -7937,7 +8158,8 @@ impl Renderer {
         // Decided before the walk, so that a pass whose buffers no longer fit can still
         // switch GPU culling off.
         let radius = (frame.detail_distance / 16.0) as i32;
-        let mut gpu_frame = self.gpu_culling.is_some()
+        let mut gpu_frame = self.stereo_views.is_none()
+            && self.gpu_culling.is_some()
             && !frame.title
             && !pack_terrain
             && shadow_view.is_none()
@@ -8199,6 +8421,7 @@ impl Renderer {
             .as_mut()
             .filter(|c| {
                 self.cull_on
+                    && self.stereo_views.is_none()
                     && !frame.title
                     && !pack_terrain
                     && self.multi_draw
@@ -8995,7 +9218,9 @@ impl Renderer {
             self.stars.prepare(
                 &mut self.uploads,
                 &mut encoder,
-                jittered * rotation,
+                self.stereo_views.map_or([jittered * rotation; 2], |views| {
+                    views.map(|v| v.view_proj(Mat4::IDENTITY) * rotation)
+                }),
                 brightness,
             );
         }
@@ -9265,7 +9490,13 @@ impl Renderer {
         );
         let (world_view, world_depth) = match &scaled {
             Some((color, depth)) => (color, depth),
-            None => (&view_target, &self.depth),
+            None => (
+                &view_target,
+                self.stereo_targets
+                    .as_ref()
+                    .filter(|_| self.stereo_views.is_some())
+                    .map_or(&self.depth, |t| &t.depth),
+            ),
         };
         // The headset's hidden area, put in the buffers before the pass that draws it.
         let mask_format = scaled
@@ -9719,6 +9950,7 @@ impl Renderer {
             })];
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("Horizon world"),
+                multiview_mask: self.stereo_views.and(multiview::MASK),
                 timestamp_writes: self.own_timing.as_mut().and_then(|t| t.writes("World")),
                 color_attachments: &attachments,
                 depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
@@ -10851,6 +11083,11 @@ impl Renderer {
         if culling && let Some(cull) = &mut self.cull {
             cull.end(&self.device, &mut encoder);
         }
+        // Keep the two layer copies in the world's submission. No extra
+        // queue submission or forced submit-thread wait for multiview.
+        if let (Some(target), Some(eyes)) = (&self.stereo_targets, &self.stereo_destinations) {
+            target.copy(&mut encoder, [&eyes[0], &eyes[1]]);
+        }
         if let Some(timer) = &mut self.gpu_timer {
             timer.end(
                 &self.device,
@@ -11099,10 +11336,15 @@ impl Renderer {
             })];
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("First-person hand"),
+                multiview_mask: self.stereo_views.and(multiview::MASK),
                 timestamp_writes: timing.as_mut().and_then(|t| t.writes("Hand")),
                 color_attachments: &attachments,
                 depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                    view: &self.depth,
+                    view: self
+                        .stereo_targets
+                        .as_ref()
+                        .filter(|_| self.stereo_views.is_some())
+                        .map_or(&self.depth, |t| &t.depth),
                     depth_ops: Some(wgpu::Operations {
                         load: wgpu::LoadOp::Clear(0.0),
                         // HDR output's hand marks test against it (below).
@@ -11239,6 +11481,7 @@ impl Renderer {
             })];
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("Screen effects"),
+                multiview_mask: self.stereo_views.and(multiview::MASK),
                 timestamp_writes: timing.as_mut().and_then(|t| t.writes("Screen effects")),
                 color_attachments: &attachments,
                 ..Default::default()

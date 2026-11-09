@@ -33,6 +33,7 @@ use wgpu::hal::api::Vulkan;
 mod actions;
 mod dynres;
 mod foveation;
+mod layer_filter;
 mod panel;
 mod permission;
 mod platform;
@@ -69,6 +70,11 @@ pub struct Quest {
     eye_size: [u32; 2],
     /// The eyes' size before any dynamic scaling.
     base_eye_size: [u32; 2],
+    recommended_eye_size: [u32; 2],
+    maximum_eye_size: [u32; 2],
+    configured_scale: f32,
+    scale_override: Option<f32>,
+    resize_retry: Option<(f32, std::time::Instant)>,
     format: Option<(u32, wgpu::TextureFormat)>,
     /// Foveation asked for and possible so far (the runtime's extensions, then the GPU's); `Off`
     /// when not wanted or when something is missing (logged).
@@ -90,6 +96,7 @@ struct Session {
     space: xr::Space,
     head_space: xr::Space,
     eyes: [Chain; 2],
+    retired_eyes: Vec<[Chain; 2]>,
     menu: Chain,
     /// The overlay panels' images (the menu panel's size), when the game wants one this frame
     /// (`input::overlay_at`): Visor's hotbar wheel hung in front of the hand, the chat, the
@@ -235,6 +242,10 @@ impl Quest {
         let mut extensions = xr::ExtensionSet::default();
         extensions.khr_vulkan_enable = true;
         extensions.fb_display_refresh_rate = available.fb_display_refresh_rate;
+        extensions.fb_composition_layer_settings = available.fb_composition_layer_settings;
+        horizon_client_input::headset_display::update(|info| {
+            info.super_resolution_supported = available.fb_composition_layer_settings
+        });
         // Visor's hand joints and body trackers: only asked for here, used when the game wants them.
         extensions.ext_hand_tracking = available.ext_hand_tracking;
         extensions.fb_body_tracking = available.fb_body_tracking;
@@ -296,21 +307,27 @@ impl Quest {
             .enumerate_view_configuration_views(system, VIEW_TYPE)
             .map_err(xr_error("the eyes' views"))?;
         let view = views.first().ok_or("the headset has no views")?;
-        let scale = std::env::var("HORIZON_XR_SCALE")
+        let scale_override = std::env::var("HORIZON_XR_SCALE")
             .ok()
             .and_then(|s| s.parse::<f32>().ok())
-            .filter(|s| (0.25..=2.0).contains(s))
-            .unwrap_or_else(|| input::settings().float("renderScaleFactor"));
-        let side = |recommended: u32, max: u32| {
-            ((recommended as f32 * scale) as u32).clamp(64, max.max(64))
-        };
-        let eye_size = [
-            side(view.recommended_image_rect_width, view.max_image_rect_width),
-            side(
-                view.recommended_image_rect_height,
-                view.max_image_rect_height,
-            ),
+            .filter(|s| (0.25..=2.0).contains(s));
+        let scale = scale_override.unwrap_or_else(|| input::settings().float("renderScaleFactor"));
+        let recommended_eye_size = [
+            view.recommended_image_rect_width,
+            view.recommended_image_rect_height,
         ];
+        let maximum_eye_size = [view.max_image_rect_width, view.max_image_rect_height];
+        let eye_size = horizon_client_input::headset_display::eye_size(
+            recommended_eye_size,
+            maximum_eye_size,
+            scale,
+        );
+        horizon_client_input::headset_display::update(|info| {
+            info.recommended = recommended_eye_size;
+            info.maximum = maximum_eye_size;
+            info.active = eye_size;
+            info.scale_override = scale_override;
+        });
         log::info!(
             "Horizon XR: eyes {}x{} (recommended {}x{}, scale {scale})",
             eye_size[0],
@@ -325,6 +342,11 @@ impl Quest {
             blend,
             eye_size,
             base_eye_size: eye_size,
+            recommended_eye_size,
+            maximum_eye_size,
+            configured_scale: scale,
+            scale_override,
+            resize_retry: None,
             format: None,
             fov_level,
             session: None,
@@ -382,7 +404,7 @@ impl Quest {
         );
         // Foveation: the runtime's profile, then the eyes' swapchains made for it. Short of
         // either the eyes are made as always.
-        let foveation = (self.fov_level != foveation::Level::Off)
+        let mut foveation = (self.fov_level != foveation::Level::Off)
             .then(|| foveation::Foveation::new(&session, self.fov_level))
             .and_then(|made| {
                 made.inspect_err(|e| log::warn!("Horizon XR: foveation not used: {e}"))
@@ -402,6 +424,7 @@ impl Quest {
                     for e in [left.err(), right.err()].into_iter().flatten() {
                         log::warn!("Horizon XR: foveation not used: {e}");
                     }
+                    foveation = None;
                     [
                         chain(self.eye_size, "left eye", None)?,
                         chain(self.eye_size, "right eye", None)?,
@@ -415,6 +438,7 @@ impl Quest {
         if let Some(f) = &foveation {
             log::info!("Horizon XR: foveation {:?} on", f.level);
         }
+        horizon_client_input::headset_display::update(|info| info.foveated = foveation.is_some());
         let menu = chain(MENU_SIZE, "menu panel", None)?;
         let overlays = std::array::from_fn(|_| None);
         let vignette = chain([VIGNETTE_SIZE; 2], "comfort vignette", None)?;
@@ -422,6 +446,7 @@ impl Quest {
         let tracking = tracking::Tracking::new(tracking::Support::of(&self.instance, self.system));
         self.session = Some(Session {
             foveation,
+            retired_eyes: Vec::new(),
             dynres: dynres::DynamicScale::default(),
             last_begin: None,
             tracking,
@@ -563,6 +588,10 @@ impl Session {
             .enumerate_display_refresh_rates()
             .unwrap_or_default();
         let current = session.get_display_refresh_rate().ok();
+        horizon_client_input::headset_display::update(|info| {
+            info.rates = rates.clone();
+            info.current_hz = current;
+        });
         log::info!(
             "Horizon XR: {}",
             platform::rate_report(&rates, current, wanted)
@@ -934,11 +963,16 @@ impl Session {
                 }
                 // The runtime moved the display to another rate (after the request above, or
                 // by itself, e.g. the system menu): the frame profile's fps is read against it.
-                xr::Event::DisplayRefreshRateChangedFB(change) => log::info!(
-                    "Horizon XR: display refresh rate {} -> {} Hz",
-                    change.from_display_refresh_rate(),
-                    change.to_display_refresh_rate()
-                ),
+                xr::Event::DisplayRefreshRateChangedFB(change) => {
+                    horizon_client_input::headset_display::update(|info| {
+                        info.current_hz = Some(change.to_display_refresh_rate())
+                    });
+                    log::info!(
+                        "Horizon XR: display refresh rate {} -> {} Hz",
+                        change.from_display_refresh_rate(),
+                        change.to_display_refresh_rate()
+                    );
+                }
                 // Thermal or power notifications of XR_EXT_performance_settings: a warning or
                 // an impaired level means the chip is about to run slower than asked.
                 xr::Event::PerfSettingsEXT(change) => log::warn!(
@@ -1628,6 +1662,89 @@ impl Headset for Quest {
             log::warn!("Horizon XR: beginning a frame: {e}");
             return Targets::Skip;
         }
+        if !s.retired_eyes.is_empty()
+            && device
+                .poll(wgpu::PollType::Poll)
+                .is_ok_and(|status| status.is_queue_empty())
+        {
+            s.retired_eyes.clear();
+        }
+        let desired_scale = self
+            .scale_override
+            .unwrap_or_else(|| input::settings().float("renderScaleFactor"));
+        if layers != Layers::Flat
+            && desired_scale.is_finite()
+            && desired_scale > 0.0
+            && (desired_scale != self.configured_scale
+                || (!dynres_wanted() && self.eye_size != self.base_eye_size))
+            && self
+                .resize_retry
+                .is_none_or(|(value, at)| value != desired_scale || at.elapsed().as_secs() >= 6)
+            && let Some((format, wgpu_format)) = self.format
+        {
+            let size = horizon_client_input::headset_display::eye_size(
+                self.recommended_eye_size,
+                self.maximum_eye_size,
+                desired_scale,
+            );
+            let make = || {
+                let left = Chain::new(
+                    &s.session,
+                    device,
+                    format,
+                    wgpu_format,
+                    size,
+                    "left eye",
+                    s.foveation.as_ref(),
+                )?;
+                let right = Chain::new(
+                    &s.session,
+                    device,
+                    format,
+                    wgpu_format,
+                    size,
+                    "right eye",
+                    s.foveation.as_ref(),
+                )?;
+                Ok::<_, String>([left, right])
+            };
+            match make() {
+                Ok(eyes) => {
+                    // Old images may still be referenced by submitted GPU work. This wait is
+                    // only for an explicit quality change, never in the steady frame loop.
+                    match device.poll(wgpu::PollType::Wait {
+                        submission_index: None,
+                        timeout: Some(Duration::from_secs(5)),
+                    }) {
+                        Ok(_) => {
+                            s.eyes = eyes;
+                            self.eye_size = size;
+                            self.base_eye_size = size;
+                            self.configured_scale = desired_scale;
+                            self.resize_retry = None;
+                            s.dynres = Default::default();
+                            horizon_client_input::headset_display::update(|info| {
+                                info.active = size
+                            });
+                            log::info!(
+                                "Horizon XR: selected eye size {}x{}, scale {}",
+                                size[0],
+                                size[1],
+                                desired_scale
+                            );
+                        }
+                        Err(e) => {
+                            self.resize_retry = Some((desired_scale, std::time::Instant::now()));
+                            log::warn!("Horizon XR: eye resize postponed: {e}");
+                        }
+                    }
+                }
+                Err(e) => {
+                    self.resize_retry = Some((desired_scale, std::time::Instant::now()));
+                    log::warn!("Horizon XR: eye resize failed, retaining old size: {e}");
+                }
+            }
+        }
         // Dynamic resolution (off by default): late frames shrink the eyes' images a step, a long
         // quiet stretch grows them back. Only in play: a screen's frames say nothing.
         let now = std::time::Instant::now();
@@ -1636,7 +1753,14 @@ impl Headset for Quest {
             (dynres_wanted(), interval, menu, self.format)
         {
             let period = state.predicted_display_period.as_nanos() as f32 * 1e-9;
-            if let Some(scale) = s.dynres.frame(interval, period) {
+            let previous = s.dynres.clone();
+            if s.retired_eyes.len() < 2
+                && let Some(scale) = s.dynres.frame(
+                    interval,
+                    period,
+                    horizon_client_input::headset_display::recent_gpu_seconds(),
+                )
+            {
                 let size = self
                     .base_eye_size
                     .map(|side| dynres::scaled_side(side, scale));
@@ -1669,10 +1793,14 @@ impl Headset for Quest {
                             size[0],
                             size[1]
                         );
-                        s.eyes = eyes;
+                        s.retired_eyes.push(std::mem::replace(&mut s.eyes, eyes));
                         self.eye_size = size;
+                        horizon_client_input::headset_display::update(|info| info.active = size);
                     }
-                    Err(e) => log::warn!("Horizon XR: dynamic resolution failed: {e}"),
+                    Err(e) => {
+                        s.dynres.reject(previous);
+                        log::warn!("Horizon XR: dynamic resolution failed: {e}");
+                    }
                 }
             }
         }
@@ -1863,6 +1991,11 @@ impl Headset for Quest {
                 let layer = xr::CompositionLayerProjection::new()
                     .space(&s.space)
                     .views(&projection_views);
+                let filter = layer_filter::settings(
+                    self.instance.exts().fb_composition_layer_settings.is_some(),
+                    input::settings().bool("horizonSuperResolution"),
+                );
+                let layer = layer_filter::apply(layer, filter.as_ref());
                 // The HUD over the world, its transparent parts showing it
                 // (premultiplied: the HUD's alpha blending onto a clear image).
                 let panel = if screen { s.panel } else { s.hud_at };

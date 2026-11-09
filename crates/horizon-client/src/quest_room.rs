@@ -80,6 +80,31 @@ pub const KEYS: &[&str] = &[
     "settings.on",
     "settings.off",
     "settings.back",
+    "settings.graphics",
+    "graphics.title",
+    "graphics.resolution",
+    "graphics.scale",
+    "graphics.per_eye",
+    "graphics.refresh",
+    "graphics.display",
+    "graphics.apply",
+    "graphics.override",
+    "graphics.extras",
+    "graphics.dynamic.on",
+    "graphics.dynamic.off",
+    "graphics.mqsr.on",
+    "graphics.mqsr.off",
+    "graphics.mqsr.unavailable",
+    "graphics.ffr.off",
+    "graphics.ffr.low",
+    "graphics.ffr.medium",
+    "graphics.ffr.high",
+    "graphics.dynamic.note",
+    "graphics.mqsr.note",
+    "graphics.ffr.note",
+    "graphics.unknown",
+    "graphics.multiview.on",
+    "graphics.multiview.off",
 ];
 
 fn t(key: &str) -> String {
@@ -96,6 +121,14 @@ pub enum Event {
     Action(RoomAction),
     /// Settings opened or closed (the room's own page, no launcher involved).
     Settings(bool),
+    Graphics(bool),
+    RenderScale(i8),
+    RefreshRate(i8),
+    Multiview,
+    GraphicsExtras(bool),
+    DynamicResolution,
+    Foveation,
+    SuperResolution,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -116,6 +149,8 @@ impl Hit {
 pub struct RoomUi {
     qr: Option<(String, Vec<Vec<bool>>)>,
     settings: bool,
+    graphics: bool,
+    graphics_extras: bool,
     hits: Vec<Hit>,
     /// The button the trigger went down on.
     pressed: Option<Event>,
@@ -990,10 +1025,237 @@ impl Canvas<'_, '_> {
             }
         }
         self.fit(
+            Event::Graphics(true),
+            &t("settings.graphics"),
+            MARGIN,
+            420.0,
+            72.0,
+            Look::Secondary,
+        );
+        self.fit(
             Event::Settings(false),
             &t("settings.back"),
             MARGIN,
-            460.0,
+            520.0,
+            72.0,
+            Look::Secondary,
+        );
+    }
+    fn graphics_extras(&mut self) {
+        use horizon_client_input::{headset, headset_display};
+        let settings = headset::settings();
+        self.text(
+            Face::SemiBold,
+            H1,
+            64.0,
+            MARGIN,
+            120.0,
+            color::TEXT,
+            &t("graphics.extras"),
+        );
+        self.fit(
+            Event::DynamicResolution,
+            &t(if settings.bool("horizonDynamicResolution") {
+                "graphics.dynamic.on"
+            } else {
+                "graphics.dynamic.off"
+            }),
+            MARGIN,
+            215.0,
+            64.0,
+            Look::Secondary,
+        );
+        let supported = headset_display::snapshot().is_some_and(|i| i.super_resolution_supported);
+        self.fit(
+            Event::SuperResolution,
+            &t(if !supported {
+                "graphics.mqsr.unavailable"
+            } else if settings.bool("horizonSuperResolution") {
+                "graphics.mqsr.on"
+            } else {
+                "graphics.mqsr.off"
+            }),
+            MARGIN,
+            310.0,
+            64.0,
+            if supported {
+                Look::Secondary
+            } else {
+                Look::Off
+            },
+        );
+        let ffr = match settings.enum_name("horizonFoveation") {
+            "LOW" => "graphics.ffr.low",
+            "MEDIUM" => "graphics.ffr.medium",
+            "HIGH" => "graphics.ffr.high",
+            _ => "graphics.ffr.off",
+        };
+        self.fit(
+            Event::Foveation,
+            &t(ffr),
+            MARGIN,
+            405.0,
+            64.0,
+            Look::Secondary,
+        );
+        for (y, key) in [
+            (500.0, "graphics.dynamic.note"),
+            (540.0, "graphics.mqsr.note"),
+            (580.0, "graphics.ffr.note"),
+        ] {
+            self.text(
+                Face::Regular,
+                SMALL,
+                SMALL_LINE,
+                MARGIN,
+                y,
+                color::MUTED,
+                &t(key),
+            );
+        }
+        self.fit(
+            Event::GraphicsExtras(false),
+            &t("settings.back"),
+            MARGIN,
+            630.0,
+            64.0,
+            Look::Secondary,
+        );
+    }
+    fn graphics(&mut self) {
+        use horizon_client_input::{headset, headset_display};
+        let settings = headset::settings();
+        let info = headset_display::snapshot();
+        let scale = info
+            .as_ref()
+            .and_then(|i| i.scale_override)
+            .unwrap_or_else(|| settings.float("renderScaleFactor"));
+        self.text(
+            Face::SemiBold,
+            H1,
+            64.0,
+            MARGIN,
+            120.0,
+            color::TEXT,
+            &t("graphics.title"),
+        );
+        let label = info.as_ref().map_or_else(
+            || tf("graphics.scale", &[&(scale * 100.0).round()]),
+            |i| {
+                let size = headset_display::eye_size(i.recommended, i.maximum, scale);
+                tf(
+                    "graphics.per_eye",
+                    &[&size[0], &size[1], &(scale * 100.0).round()],
+                )
+            },
+        );
+        self.text(
+            Face::Regular,
+            BODY,
+            64.0,
+            MARGIN,
+            210.0,
+            color::TEXT,
+            &t("graphics.resolution"),
+        );
+        self.text(
+            Face::Regular,
+            SMALL,
+            SMALL_LINE,
+            MARGIN,
+            265.0,
+            color::MUTED,
+            &label,
+        );
+        let right = self.ui.w - MARGIN - 170.0;
+        let changeable = info.as_ref().is_none_or(|i| i.scale_override.is_none());
+        for (delta, x, label) in [(-1, right, "−"), (1, right + 90.0, "+")] {
+            self.button(
+                Event::RenderScale(delta),
+                label,
+                [x, 210.0, 72.0, 64.0],
+                if changeable && headset_display::step_scale(scale, delta) != scale {
+                    Look::Secondary
+                } else {
+                    Look::Off
+                },
+                32.0,
+            );
+        }
+        let hz = settings.float("horizonRefreshRate");
+        self.text(
+            Face::Regular,
+            BODY,
+            64.0,
+            MARGIN,
+            330.0,
+            color::TEXT,
+            &tf("graphics.refresh", &[&hz.round()]),
+        );
+        for (delta, x, label) in [(-1, right, "−"), (1, right + 90.0, "+")] {
+            let can = info
+                .as_ref()
+                .is_some_and(|i| headset_display::step_rate(hz, delta, &i.rates) != hz);
+            self.button(
+                Event::RefreshRate(delta),
+                label,
+                [x, 330.0, 72.0, 64.0],
+                if can { Look::Secondary } else { Look::Off },
+                32.0,
+            );
+        }
+        let display = info.as_ref().and_then(|i| i.current_hz).map_or_else(
+            || t("graphics.unknown"),
+            |hz| tf("graphics.display", &[&hz.round()]),
+        );
+        self.text(
+            Face::Regular,
+            SMALL,
+            SMALL_LINE,
+            MARGIN,
+            395.0,
+            color::MUTED,
+            &display,
+        );
+        self.fit(
+            Event::Multiview,
+            &t(if settings.bool("horizonMultiview") {
+                "graphics.multiview.on"
+            } else {
+                "graphics.multiview.off"
+            }),
+            MARGIN,
+            425.0,
+            64.0,
+            Look::Secondary,
+        );
+        self.fit(
+            Event::GraphicsExtras(true),
+            &t("graphics.extras"),
+            MARGIN,
+            495.0,
+            58.0,
+            Look::Secondary,
+        );
+        let note = if changeable {
+            t("graphics.apply")
+        } else {
+            t("graphics.override")
+        };
+        self.text(
+            Face::Regular,
+            SMALL,
+            SMALL_LINE,
+            MARGIN,
+            570.0,
+            color::MUTED,
+            &note,
+        );
+        self.fit(
+            Event::Graphics(false),
+            &t("settings.back"),
+            MARGIN,
+            620.0,
             72.0,
             Look::Secondary,
         );
@@ -1045,6 +1307,10 @@ impl RoomUi {
                     Page::Checking => canvas.checking(model),
                     Page::Download => canvas.download(model),
                     Page::Prepare => canvas.prepare(model),
+                    Page::Idle if self.settings && self.graphics && self.graphics_extras => {
+                        canvas.graphics_extras()
+                    }
+                    Page::Idle if self.settings && self.graphics => canvas.graphics(),
                     Page::Idle if self.settings => canvas.settings(model),
                     Page::Idle => canvas.idle(model),
                 }
@@ -1092,6 +1358,16 @@ impl RoomUi {
         self.hover = under;
         if let Some(Event::Settings(open)) = event {
             self.settings = open;
+            if !open {
+                self.graphics = false;
+            }
+        }
+        if let Some(Event::Graphics(open)) = event {
+            self.graphics = open;
+            self.graphics_extras = false;
+        }
+        if let Some(Event::GraphicsExtras(open)) = event {
+            self.graphics_extras = open;
         }
         (event, moved)
     }
