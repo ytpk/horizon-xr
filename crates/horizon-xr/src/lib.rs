@@ -94,7 +94,9 @@ struct Session {
     /// The overlay panels' images (the menu panel's size), when the game wants one this frame
     /// (`input::overlay_at`): Visor's hotbar wheel hung in front of the hand, the chat, the
     /// handles of a screen.
-    overlays: [Chain; input::OVERLAYS],
+    overlays: [Option<Chain>; input::OVERLAYS],
+    overlay_retry: [Option<std::time::Instant>; input::OVERLAYS],
+    overlay_format: (u32, wgpu::TextureFormat),
     overlay_images: [Option<wgpu::Texture>; input::OVERLAYS],
     /// The comfort vignette's image (filled once) and how far it closes in now,
     /// 0..1; a snap turn flashes it for a moment (`turn_flash`, seconds left).
@@ -107,6 +109,8 @@ struct Session {
     running: bool,
     /// The head's rest position in the play space: the game's camera.
     rest: Option<Vec3>,
+    pose_epoch: u64,
+    recenter_at: Option<xr::Time>,
     panel: Option<Panel>,
     /// The HUD's panel over the world, and where it is this frame.
     hud_at: Option<Panel>,
@@ -411,12 +415,7 @@ impl Quest {
             log::info!("Horizon XR: foveation {:?} on", f.level);
         }
         let menu = chain(MENU_SIZE, "menu panel", None)?;
-        let overlays = [
-            chain(MENU_SIZE, "overlay panel", None)?,
-            chain(MENU_SIZE, "chat panel", None)?,
-            chain(MENU_SIZE, "screen handles panel", None)?,
-            chain(MENU_SIZE, "keyboard panel", None)?,
-        ];
+        let overlays = std::array::from_fn(|_| None);
         let vignette = chain([VIGNETTE_SIZE; 2], "comfort vignette", None)?;
         let controls = Controls::new(&self.instance, &session)?;
         let tracking = tracking::Tracking::new(tracking::Support::of(&self.instance, self.system));
@@ -433,7 +432,9 @@ impl Quest {
             eyes,
             menu,
             overlays,
-            overlay_images: [None, None, None, None],
+            overlay_retry: [None; input::OVERLAYS],
+            overlay_format: (format, wgpu_format),
+            overlay_images: std::array::from_fn(|_| None),
             vignette,
             vignette_filled: false,
             vignette_level: 0.0,
@@ -442,6 +443,8 @@ impl Quest {
             state: xr::SessionState::UNKNOWN,
             running: false,
             rest: None,
+            pose_epoch: 0,
+            recenter_at: None,
             panel: None,
             hud_at: None,
             last_time: None,
@@ -465,6 +468,44 @@ impl Quest {
 }
 
 impl Session {
+    /// Allocate only overlays the player actually opens, then reuse them until session end.
+    /// A runtime allocation failure backs off instead of retrying/logging at headset frame rate.
+    fn acquire_overlay(&mut self, slot: usize, device: &wgpu::Device) -> Option<wgpu::Texture> {
+        let now = std::time::Instant::now();
+        if self.overlay_retry[slot].is_some_and(|retry| now < retry) {
+            return None;
+        }
+        if self.overlays[slot].is_none() {
+            match Chain::new(
+                &self.session,
+                device,
+                self.overlay_format.0,
+                self.overlay_format.1,
+                MENU_SIZE,
+                "Visor overlay",
+                None,
+            ) {
+                Ok(chain) => self.overlays[slot] = Some(chain),
+                Err(e) => {
+                    log::warn!("Horizon XR: overlay {slot} could not be allocated: {e}");
+                    self.overlay_retry[slot] = Some(now + Duration::from_secs(6));
+                    return None;
+                }
+            }
+        }
+        match self.overlays[slot].as_mut()?.acquire() {
+            Ok(image) => {
+                self.overlay_retry[slot] = None;
+                Some(image)
+            }
+            Err(e) => {
+                log::warn!("Horizon XR: overlay {slot} could not be acquired: {e}");
+                self.overlay_retry[slot] = Some(now + Duration::from_secs(6));
+                None
+            }
+        }
+    }
+
     /// Asks for the display rate Horizon is made to keep up with, and for
     /// sustained high CPU and GPU clocks (the system otherwise picks levels
     /// that leave a two-pass renderer short). Both are optional extensions.
@@ -794,8 +835,22 @@ impl Chain {
 /// `origin + room * worldScale`, so its offset from the rest scales, and the standing head
 /// height (the rest's) is lifted by the same factor.
 fn world_offset(relative: Vec3, rest: Vec3) -> Vec3 {
-    let scale = input::world_scale();
+    scaled_world_offset(relative, rest, input::world_scale())
+}
+
+fn scaled_world_offset(relative: Vec3, rest: Vec3, scale: f32) -> Vec3 {
     relative * scale + Vec3::new(0.0, (scale - 1.0) * rest.y, 0.0)
+}
+
+fn neutral_rest_height(
+    settings: &horizon_vivecraft::settings::VrSettings,
+    tracked_eye: f32,
+) -> f32 {
+    if settings.seated() {
+        tracked_eye
+    } else {
+        horizon_vivecraft::player::player_height(settings) + 0.1
+    }
 }
 
 pub(crate) fn quat(q: xr::Quaternionf) -> Quat {
@@ -894,9 +949,8 @@ impl Session {
                 // The lens's hidden area changed (IPD adjusted, the headset refit).
                 xr::Event::VisibilityMaskChangedKHR(_) => self.hidden_stale = true,
                 // Recentred (the system's gesture): the play space moved under the head.
-                xr::Event::ReferenceSpaceChangePending(_) => {
-                    self.rest = None;
-                    self.panel = None;
+                xr::Event::ReferenceSpaceChangePending(event) => {
+                    self.recenter_at = Some(event.change_time());
                 }
                 xr::Event::InstanceLossPending(_) => {
                     log::warn!("Horizon XR: the OpenXR instance is going away; exiting");
@@ -911,11 +965,22 @@ impl Session {
     /// The head, the controllers and the pointer at `time`, for the game.
     fn sync_input(&mut self, time: xr::Time, menu: bool, title: bool) {
         let focused = self.state == xr::SessionState::FOCUSED;
+        if self
+            .recenter_at
+            .is_some_and(|at| time.as_nanos() >= at.as_nanos())
+        {
+            self.recenter_at = None;
+            self.rest = None;
+            self.panel = None;
+            self.grab.clear();
+            self.pose_epoch = self.pose_epoch.wrapping_add(1);
+        }
         let settings = input::settings();
         input::set_active(self.running);
         let head = self.head_space.locate(&self.space, time).ok().filter(|l| {
-            l.location_flags
-                .contains(xr::SpaceLocationFlags::ORIENTATION_VALID)
+            l.location_flags.contains(
+                xr::SpaceLocationFlags::ORIENTATION_VALID | xr::SpaceLocationFlags::POSITION_VALID,
+            ) && vec3(l.pose.position).is_finite()
         });
         diag::head(head.is_some());
         // Visor's hand joints and body trackers, while the game wants them.
@@ -933,10 +998,21 @@ impl Session {
             // The game walked the player after the head (room scale): the
             // rest position follows, and the eyes stay where the head is.
             // The VR options' Reset Origin (`MCVR.resetPosition`): the room is centred on the head.
-            if input::take_reset_origin() {
-                self.rest = Some(position);
+            // A recenter moves the horizontal origin, never teaches standing height from a crouch.
+            let reset = input::take_reset_origin();
+            if reset {
+                self.rest = None;
+                self.panel = None;
+                self.grab.clear();
+                input::take_walked();
+                self.pose_epoch = self.pose_epoch.wrapping_add(1);
             }
-            let rest = self.rest.get_or_insert(position);
+            let neutral_y = neutral_rest_height(&settings, position.y);
+            let rest = self
+                .rest
+                .get_or_insert(Vec3::new(position.x, neutral_y, position.z));
+            // Auto/manual calibration may change after a seated launch. Keep the camera anchor in sync.
+            rest.y = neutral_y;
             // The game walked in world metres: a room metre is `world_scale` of them.
             *rest += input::take_walked() / input::world_scale();
             // It follows the head once it wanders past leaning in any case.
@@ -1011,6 +1087,7 @@ impl Session {
             input::set_pointer_distance(None);
             input::set_pointer_buttons([false; 2]);
             input::set_hands([None; 2]);
+            input::set_room(None);
             input::set_buttons(Default::default());
             input::set_hud_slot(None);
             input::set_aim(head_pose.map(|(q, _)| input::angles(q)));
@@ -1037,6 +1114,7 @@ impl Session {
             grip: controls.grip,
             rest,
             time_ms: self.started.elapsed().as_millis() as u64,
+            pose_epoch: self.pose_epoch,
         }));
         if !self.logged_hands
             && let Some(hand) = hands[1]
@@ -1467,7 +1545,7 @@ impl Headset for Quest {
         MENU_SIZE
     }
 
-    fn begin(&mut self, _device: &wgpu::Device, layers: Layers) -> Targets {
+    fn begin(&mut self, device: &wgpu::Device, layers: Layers) -> Targets {
         let menu = layers != Layers::World;
         let Some(s) = self.session.as_mut() else {
             return Targets::Skip;
@@ -1516,7 +1594,7 @@ impl Headset for Quest {
                 let fov = s.foveation.as_ref();
                 let made = Chain::new(
                     &s.session,
-                    _device,
+                    device,
                     format,
                     wgpu_format,
                     size,
@@ -1526,7 +1604,7 @@ impl Headset for Quest {
                 .and_then(|left| {
                     Chain::new(
                         &s.session,
-                        _device,
+                        device,
                         format,
                         wgpu_format,
                         size,
@@ -1578,12 +1656,7 @@ impl Headset for Quest {
                 // Visor's keyboard over the title's screens too, on its own swapchain.
                 let keyboard = input::overlay_at(input::OVERLAY_KEYBOARD)
                     .is_some()
-                    .then(|| {
-                        s.overlays[input::OVERLAY_KEYBOARD]
-                            .acquire()
-                            .inspect_err(|e| log::warn!("Horizon XR: {e}"))
-                            .ok()
-                    })
+                    .then(|| s.acquire_overlay(input::OVERLAY_KEYBOARD, device))
                     .flatten();
                 s.overlay_images = std::array::from_fn(|i| {
                     keyboard.clone().filter(|_| i == input::OVERLAY_KEYBOARD)
@@ -1630,23 +1703,12 @@ impl Headset for Quest {
                     } else {
                         !screen && input::overlay_at(i).is_some()
                     };
-                    wanted
-                        .then(|| {
-                            s.overlays[i]
-                                .acquire()
-                                .inspect_err(|e| log::warn!("Horizon XR: {e}"))
-                                .ok()
-                        })
-                        .flatten()
+                    wanted.then(|| s.acquire_overlay(i, device)).flatten()
                 });
                 for (i, image) in overlay.iter().enumerate() {
                     if image.is_some() {
-                        static LOGGED: [std::sync::Once; input::OVERLAYS] = [
-                            std::sync::Once::new(),
-                            std::sync::Once::new(),
-                            std::sync::Once::new(),
-                            std::sync::Once::new(),
-                        ];
+                        static LOGGED: [std::sync::Once; input::OVERLAYS] =
+                            [const { std::sync::Once::new() }; input::OVERLAYS];
                         LOGGED[i].call_once(|| {
                             log::info!("Horizon XR: the overlay panel {i} is in use");
                         });
@@ -1731,8 +1793,8 @@ impl Headset for Quest {
                     s.menu.release();
                 }
                 for (i, held) in overlay.iter().enumerate() {
-                    if *held {
-                        s.overlays[i].release();
+                    if *held && let Some(chain) = s.overlays[i].as_mut() {
+                        chain.release();
                     }
                 }
                 if filling {
@@ -1853,7 +1915,7 @@ impl Headset for Quest {
                                 .space(&s.space)
                                 .layer_flags(xr::CompositionLayerFlags::BLEND_TEXTURE_SOURCE_ALPHA)
                                 .eye_visibility(xr::EyeVisibility::BOTH)
-                                .sub_image(s.overlays[i].sub_image())
+                                .sub_image(s.overlays[i].as_ref()?.sub_image())
                                 .pose(xr::Posef {
                                     orientation: xr::Quaternionf {
                                         x: q.x,
@@ -1889,8 +1951,8 @@ impl Headset for Quest {
                 keyboard,
             } => {
                 s.menu.release();
-                if keyboard {
-                    s.overlays[input::OVERLAY_KEYBOARD].release();
+                if keyboard && let Some(chain) = s.overlays[input::OVERLAY_KEYBOARD].as_mut() {
+                    chain.release();
                 }
                 if views.is_some() {
                     s.eyes[0].release();
@@ -1928,32 +1990,36 @@ impl Headset for Quest {
                 let scale = input::world_scale();
                 let keyboard_quad = input::overlay_at(input::OVERLAY_KEYBOARD)
                     .filter(|_| keyboard)
-                    .map(|spec| {
+                    .and_then(|spec| {
                         let relative =
                             (spec.pos - Vec3::new(0.0, (scale - 1.0) * rest.y, 0.0)) / scale;
                         let (at, q) = (rest + relative, spec.rot);
-                        xr::CompositionLayerQuad::new()
-                            .space(&s.space)
-                            .layer_flags(xr::CompositionLayerFlags::BLEND_TEXTURE_SOURCE_ALPHA)
-                            .eye_visibility(xr::EyeVisibility::BOTH)
-                            .sub_image(s.overlays[input::OVERLAY_KEYBOARD].sub_image())
-                            .pose(xr::Posef {
-                                orientation: xr::Quaternionf {
-                                    x: q.x,
-                                    y: q.y,
-                                    z: q.z,
-                                    w: q.w,
-                                },
-                                position: xr::Vector3f {
-                                    x: at.x,
-                                    y: at.y,
-                                    z: at.z,
-                                },
-                            })
-                            .size(xr::Extent2Df {
-                                width: spec.width / scale,
-                                height: spec.height / scale,
-                            })
+                        Some(
+                            xr::CompositionLayerQuad::new()
+                                .space(&s.space)
+                                .layer_flags(xr::CompositionLayerFlags::BLEND_TEXTURE_SOURCE_ALPHA)
+                                .eye_visibility(xr::EyeVisibility::BOTH)
+                                .sub_image(
+                                    s.overlays[input::OVERLAY_KEYBOARD].as_ref()?.sub_image(),
+                                )
+                                .pose(xr::Posef {
+                                    orientation: xr::Quaternionf {
+                                        x: q.x,
+                                        y: q.y,
+                                        z: q.z,
+                                        w: q.w,
+                                    },
+                                    position: xr::Vector3f {
+                                        x: at.x,
+                                        y: at.y,
+                                        z: at.z,
+                                    },
+                                })
+                                .size(xr::Extent2Df {
+                                    width: spec.width / scale,
+                                    height: spec.height / scale,
+                                }),
+                        )
                     });
                 let mut layers: Vec<&xr::CompositionLayerBase<'_, xr::Vulkan>> = Vec::new();
                 if let Some(p) = &projection {
@@ -2232,6 +2298,27 @@ fn hud_placement(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_seated_launch_does_not_become_a_tall_camera_after_standing() {
+        let mut settings = horizon_vivecraft::settings::VrSettings::default();
+        let reference = neutral_rest_height(&settings, 0.9);
+        let rest = Vec3::new(0.0, reference, 0.0);
+        for (physical, expected) in [(0.9, 0.9), (1.75, 1.75)] {
+            let offset = scaled_world_offset(Vec3::Y * (physical - reference), rest, 1.0);
+            assert!((1.62 + offset.y - expected).abs() < 1e-5);
+        }
+        settings.set_float("manualCalibration", 1.65);
+        let reference = neutral_rest_height(&settings, 1.75);
+        let rest = Vec3::Y * reference;
+        let physical = Vec3::Y * 1.75;
+        let offset = scaled_world_offset(physical - rest, rest, 1.0);
+        assert!((1.62 + offset.y - 1.62).abs() < 1e-5);
+        // Camera-base compensation and the XR offset together apply world scale once.
+        let offset = scaled_world_offset(physical - rest, rest, 2.0);
+        let base = 1.62 * 2.0 - reference;
+        assert!((base + offset.y - 3.24).abs() < 1e-5);
+    }
 
     #[test]
     fn srgb_comes_first_and_is_drawn_through_its_unorm_view() {

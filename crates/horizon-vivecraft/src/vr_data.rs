@@ -318,6 +318,18 @@ const HISTORY_CAPACITY: usize = 450;
 
 impl Vec3History {
     pub fn add(&mut self, now_ms: u64, v: Vec3) {
+        if !v.is_finite() {
+            return;
+        }
+        if let Some(last) = self.data.back_mut() {
+            if now_ms == last.0 {
+                last.1 = v;
+                return;
+            }
+            if now_ms < last.0 {
+                self.data.clear();
+            }
+        }
         self.data.push_back((now_ms, v));
         if self.data.len() > HISTORY_CAPACITY {
             self.data.pop_front();
@@ -359,6 +371,17 @@ impl Vec3History {
             None => Vec3::ZERO,
         }
     }
+    /// Actual coverage of a recent window, used before trusting manual calibration.
+    pub fn span_ms(&self, now_ms: u64, seconds: f64) -> u64 {
+        let mut samples = self.recent(now_ms, seconds);
+        let Some(newest) = samples.next() else {
+            return 0;
+        };
+        samples
+            .last()
+            .map_or(0, |oldest| newest.0.saturating_sub(oldest.0))
+    }
+
     /// `averageSpeed` in metres a second.
     pub fn average_speed(&self, now_ms: u64, seconds: f64) -> f32 {
         let mut total = 0.0;
@@ -366,9 +389,11 @@ impl Vec3History {
         let mut last: Option<&(u64, Vec3)> = None;
         for e in self.recent(now_ms, seconds) {
             if let Some(l) = last {
-                count += 1;
-                let dt = 0.001 * (l.0 as f32 - e.0 as f32);
-                total += l.1.distance(e.1) / dt;
+                let dt = 0.001 * l.0.saturating_sub(e.0) as f32;
+                if dt > 0.0 {
+                    count += 1;
+                    total += l.1.distance(e.1) / dt;
+                }
             }
             last = Some(e);
         }
@@ -423,6 +448,20 @@ mod tests {
             scale,
             rotation,
         )
+    }
+
+    #[test]
+    fn history_coalesces_duplicate_times_and_keeps_long_uptime_speed_finite() {
+        let mut h = Vec3History::default();
+        let t = 100_000_000;
+        h.add(t, Vec3::ZERO);
+        h.add(t, Vec3::X * 0.01);
+        h.add(t + 5, Vec3::X * 0.015);
+        assert!((h.average_speed(t + 5, 0.5) - 1.0).abs() < 1e-5);
+        h.add(t + 10, Vec3::splat(f32::NAN));
+        assert!(h.latest().is_finite());
+        h.add(0, Vec3::Y);
+        assert_eq!(h.net_movement(0, 0.5), Vec3::ZERO);
     }
 
     #[test]

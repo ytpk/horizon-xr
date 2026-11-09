@@ -254,6 +254,22 @@ impl VisorServer {
     /// `ServerPacketHandler.handlePacket`.
     pub fn handle(&mut self, uuid: u128, payload: C2s) -> Out {
         let mut out = Out::default();
+        if self.sessions.get(&uuid).is_some_and(|s| s.vr.is_none())
+            && let C2s::Handshake {
+                vr_active: true,
+                network_version,
+                visor_version,
+            } = &payload
+        {
+            self.handshake(
+                uuid,
+                true,
+                *network_version,
+                visor_version.clone(),
+                &mut out,
+            );
+            return out;
+        }
         let settings = &self.settings;
         let Some(session) = self.sessions.get_mut(&uuid) else {
             // A player that has not said HANDSHAKE can say nothing else.
@@ -642,6 +658,60 @@ mod tests {
         let out = hello(&mut s, 2, false);
         assert_eq!(out.replies, vec![S2c::Handshake, s.settings_payload()]);
         assert!(!s.is_vr(2) && s.sessions.contains_key(&2));
+    }
+
+    #[test]
+    fn a_headset_starting_after_login_can_upgrade_the_non_vr_session() {
+        let mut server = VisorServer::default();
+        hello(&mut server, 1, false);
+        assert!(!server.is_vr(1));
+        assert!(
+            hello(&mut server, 1, true)
+                .replies
+                .contains(&S2c::Handshake)
+        );
+        assert!(server.is_vr(1));
+        let pose = PoseData::default();
+        server.handle(1, C2s::Pose(Box::new(pose)));
+        assert_eq!(server.vr_state(1).unwrap().pose, Some(pose));
+        assert_eq!(hello(&mut server, 1, true), Out::default());
+        assert_eq!(server.vr_state(1).unwrap().pose, Some(pose));
+    }
+
+    #[test]
+    fn a_flat_client_receives_vr_poses_and_recovers_after_network_silence() {
+        use crate::client::ClientNet;
+        let mut server = VisorServer::default();
+        let mut client = ClientNet::default();
+        let hello_flat = client.login(false);
+        for packet in server.handle(2, hello_flat).replies {
+            client.handle(packet);
+        }
+        hello(&mut server, 1, true);
+        server.handle(1, C2s::FullHeight(3.04));
+        server.handle(1, C2s::Pose(Box::default()));
+        for (_, packet) in server.state_updates(1, &[2]) {
+            client.handle(packet);
+        }
+        for _ in 0..200 {
+            client.tick();
+        }
+        let mut moved = PoseData::default();
+        moved.hmd.position.y = 2.9;
+        server.handle(1, C2s::Pose(Box::new(moved)));
+        let packets = server.state_updates(1, &[2]);
+        assert!(
+            packets
+                .iter()
+                .all(|(_, p)| !matches!(p, S2c::OtherStartTracking(_)))
+        );
+        for (_, packet) in packets {
+            client.handle(packet);
+        }
+        assert_eq!(client.players[&1].pose.hmd.position.y, 2.9);
+        assert_eq!(client.players[&1].height_scale(), 2.0);
+        client.remove_player(1);
+        assert!(client.players.is_empty());
     }
 
     #[test]

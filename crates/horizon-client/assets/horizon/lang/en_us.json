@@ -1870,5 +1870,22 @@
   "horizon.quest.room.settings.language_none": "My language is English",
   "horizon.quest.room.settings.on": "On",
   "horizon.quest.room.settings.off": "Off",
-  "horizon.quest.room.settings.back": "Back"
+  "horizon.quest.room.settings.back": "Back",
+  "horizon.visor.keyboard.layouts": "Keyboard layouts",
+  "horizon.visor.overlays": "Overlay setup",
+  "horizon.visor.visorKeyboardScale": "Keyboard size",
+  "horizon.visor.visorChatVisible": "Chat overlay",
+  "horizon.visor.visorChatX": "Chat: horizontal offset",
+  "horizon.visor.visorChatY": "Chat: vertical offset",
+  "horizon.visor.visorChatZ": "Chat: depth",
+  "horizon.visor.visorChatScale": "Chat size",
+  "horizon.visor.layout.english": "English",
+  "horizon.visor.layout.russian": "Russian",
+  "horizon.visor.layout.ukrainian": "Ukrainian",
+  "horizon.visor.layout.german": "German",
+  "horizon.visor.layout.french": "French",
+  "horizon.visor.layout.spanish": "Spanish",
+  "horizon.visor.layout.italian": "Italian",
+  "horizon.visor.layout.portuguese": "Portuguese",
+  "horizon.visor.layout.hungarian": "Hungarian"
 }

@@ -10,13 +10,42 @@ use super::{Game, Screen};
 use glam::{Quat, Vec3};
 use horizon_client::{headset, hud::HudBatch, osk, ui};
 use horizon_visor::keyboard::{self, Action, Button, Keyboard, Layout};
+use horizon_visor::overlay::{Drag, Handle, Resize};
+use std::sync::Arc;
 use winit::keyboard::KeyCode;
+
+#[derive(Clone, Copy, Debug)]
+enum KeyboardGrab {
+    Drag { hand: usize, drag: Drag },
+    Resize { hand: usize, resize: Resize },
+}
+impl KeyboardGrab {
+    fn hand(self) -> usize {
+        match self {
+            Self::Drag { hand, .. } | Self::Resize { hand, .. } => hand,
+        }
+    }
+}
+
+/// Handles inside the keyboard's existing quad, below the keys (no extra XR layer).
+fn keyboard_handles(batch: [f32; 2], buttons: &[Button]) -> [[f32; 4]; 2] {
+    let bounds = keyboard::bounds(buttons);
+    let at = keyboard::placement(batch, bounds);
+    let y = (at[1] + (bounds[1] + bounds[3]) as f32 + 4.0).min(batch[1] - 9.0);
+    let centre = batch[0] * 0.5;
+    [[centre - 45.0, y, 72.0, 7.0], [centre + 32.0, y, 7.0, 7.0]]
+}
 
 /// Visor's keyboard while it is shown.
 #[derive(Default)]
 pub(super) struct KeyboardState {
     shown: bool,
     keyboard: Keyboard,
+    /// Rebuilt only on open, Shift or a layout change, not per hand/frame/tick.
+    buttons: Arc<[Button]>,
+    scale: f32,
+    grab: Option<KeyboardGrab>,
+    handle_hover: [Option<(Handle, f32)>; 2],
     /// The player closed it (the red cross, or Escape) for this screen: it stays closed.
     dismissed: bool,
     /// The screen it opened for; another screen (or none) closes it
@@ -31,6 +60,7 @@ pub(super) struct KeyboardState {
     hover: [Option<(usize, f32)>; 2],
     /// Each hand's trigger was down last frame.
     down: [bool; 2],
+    repeat_hand: Option<usize>,
 }
 
 impl Game<'_> {
@@ -59,12 +89,17 @@ impl Game<'_> {
         let Some(room) = headset::room() else {
             return;
         };
-        let (at, rotation) = keyboard::hang(room.head.0, room.head.1, headset::world_scale());
+        let (at, rotation) = keyboard::hang(room.head.0, room.head.1, 1.0);
         let layouts = self.visor_keyboard_layouts();
         let screen = (self.screen, self.title.is_some());
         let state = &mut self.pad.headset.keyboard;
         state.keyboard = Keyboard::new(layouts);
         state.keyboard.reopen();
+        state.buttons = state.keyboard.buttons().into();
+        state.repeat_hand = None;
+        state.scale = headset::settings().float("visorKeyboardScale");
+        state.grab = None;
+        state.handle_hover = [None; 2];
         state.shown = true;
         state.screen = Some(screen);
         state.room_at = at;
@@ -78,9 +113,12 @@ impl Game<'_> {
         let state = &mut self.pad.headset.keyboard;
         state.shown = false;
         state.keyboard.release();
+        state.repeat_hand = None;
         state.hover = [None; 2];
         state.down = [false; 2];
         state.dismissed = dismissed;
+        state.grab = None;
+        state.handle_hover = [None; 2];
         headset::set_overlay_at(headset::OVERLAY_KEYBOARD, None);
     }
 
@@ -124,14 +162,20 @@ impl Game<'_> {
     /// beside it.
     pub(super) fn visor_keyboard_hovered(&self) -> bool {
         let state = &self.pad.headset.keyboard;
-        state.shown && state.hover.iter().any(Option::is_some)
+        state.shown
+            && (state.hover.iter().any(Option::is_some)
+                || state.handle_hover.iter().any(Option::is_some)
+                || state.grab.is_some())
     }
 
     /// Whether the main (`off` false) or the off hand's ray is over the keyboard: that hand's
     /// pointer does not click what lies behind the keyboard.
     pub(super) fn visor_keyboard_hand_over(&self, off: bool) -> bool {
         let state = &self.pad.headset.keyboard;
-        state.shown && state.hover[usize::from(off)].is_some()
+        state.shown
+            && (state.hover[usize::from(off)].is_some()
+                || state.handle_hover[usize::from(off)].is_some()
+                || state.grab.is_some_and(|g| g.hand() == usize::from(off)))
     }
 
     /// The distance each hand's ray runs to the keyboard (main, off), for drawing the rays.
@@ -140,7 +184,11 @@ impl Game<'_> {
         if !state.shown {
             return [None; 2];
         }
-        state.hover.map(|h| h.map(|(_, distance)| distance))
+        std::array::from_fn(|i| {
+            state.hover[i]
+                .map(|(_, d)| d)
+                .or_else(|| state.handle_hover[i].map(|(_, d)| d))
+        })
     }
 
     /// The panel's place in the play space (from the rest point) and its size in metres.
@@ -152,9 +200,9 @@ impl Game<'_> {
             return None;
         }
         let width =
-            keyboard::SCALE * scale * state.batch[0] / horizon_visor::overlay::GUI_PIXELS_ACROSS;
+            state.scale * scale * state.batch[0] / horizon_visor::overlay::GUI_PIXELS_ACROSS;
         Some((
-            state.room_at - room.rest,
+            (state.room_at - room.rest) * scale + Vec3::Y * ((scale - 1.0) * room.rest.y),
             state.rotation,
             width,
             width * 9.0 / 16.0,
@@ -170,11 +218,102 @@ impl Game<'_> {
         let Some((pos, rot, width, height)) = self.visor_keyboard_panel() else {
             return;
         };
-        let buttons = self.pad.headset.keyboard.keyboard.buttons();
+        let buttons = Arc::clone(&self.pad.headset.keyboard.buttons);
         let at = keyboard::placement(self.pad.headset.keyboard.batch, keyboard::bounds(&buttons));
         let batch = self.pad.headset.keyboard.batch;
         let hands = [headset::main_hand(), headset::off_hand()];
         let triggers = headset::hand_buttons().map(|b| b.trigger > 0.5);
+        let handles = keyboard_handles(batch, &buttons);
+        for i in 0..2 {
+            let point = hands[i].and_then(|hand| {
+                keyboard::ray_uv(
+                    hand.aim.0,
+                    hand.aim.1 * Vec3::NEG_Z,
+                    pos,
+                    rot,
+                    width,
+                    height,
+                )
+            });
+            self.pad.headset.keyboard.handle_hover[i] = point.and_then(|([u, v], distance)| {
+                let (x, y) = (u * batch[0], v * batch[1]);
+                handles
+                    .iter()
+                    .position(|[l, t, w, h]| x >= *l && x < l + w && y >= *t && y < t + h)
+                    .map(|n| (if n == 0 { Handle::Drag } else { Handle::Resize }, distance))
+            });
+        }
+        if self.pad.headset.keyboard.grab.is_none() {
+            for i in 0..2 {
+                if !triggers[i] || self.pad.headset.keyboard.down[i] {
+                    continue;
+                }
+                let Some((handle, _)) = self.pad.headset.keyboard.handle_hover[i] else {
+                    continue;
+                };
+                let Some(hand) = hands[i] else {
+                    continue;
+                };
+                self.pad.headset.keyboard.grab = match handle {
+                    Handle::Drag => Some(KeyboardGrab::Drag {
+                        hand: i,
+                        drag: Drag::start(hand.aim.0, hand.aim.1, pos, rot, headset::world_scale()),
+                    }),
+                    Handle::Resize => hands[1 - i].map(|other| KeyboardGrab::Resize {
+                        hand: i,
+                        resize: Resize::start(
+                            hand.grip.0,
+                            other.grip.0,
+                            self.pad.headset.keyboard.scale,
+                        ),
+                    }),
+                };
+                if self.pad.headset.keyboard.grab.is_some() {
+                    headset::pulse(i == 0, 0.25, 0.03);
+                    break;
+                }
+            }
+        }
+        if let Some(grab) = self.pad.headset.keyboard.grab {
+            self.pad.headset.keyboard.keyboard.release();
+            self.pad.headset.keyboard.repeat_hand = None;
+            let i = grab.hand();
+            let mut save = false;
+            if triggers[i] && hands[i].is_some() {
+                match grab {
+                    KeyboardGrab::Drag { drag, .. } => {
+                        let hand = hands[i].expect("tracked grabbing hand");
+                        let scale = headset::world_scale();
+                        let (at, rotation) = drag.pose(hand.aim.0, hand.aim.1, scale);
+                        if let Some(room) = headset::room() {
+                            self.pad.headset.keyboard.room_at =
+                                room.rest + (at - Vec3::Y * ((scale - 1.0) * room.rest.y)) / scale;
+                            self.pad.headset.keyboard.rotation = rotation;
+                        }
+                    }
+                    KeyboardGrab::Resize { resize, .. } => {
+                        if let (Some(a), Some(b)) = (hands[0], hands[1]) {
+                            self.pad.headset.keyboard.scale =
+                                resize.scale_now(a.grip.0, b.grip.0).clamp(0.25, 1.5);
+                        } else {
+                            self.pad.headset.keyboard.grab = None;
+                            save = true;
+                        }
+                    }
+                }
+            } else {
+                self.pad.headset.keyboard.grab = None;
+                save = matches!(grab, KeyboardGrab::Resize { .. });
+            }
+            self.pad.headset.keyboard.down = triggers;
+            self.pad.headset.keyboard.hover = [None; 2];
+            if save {
+                Arc::make_mut(&mut self.settings.vr)
+                    .set_float("visorKeyboardScale", self.pad.headset.keyboard.scale);
+                self.settings.save(&Self::options_path());
+            }
+            return;
+        }
         for i in 0..2 {
             let hover = hands[i].and_then(|hand| {
                 let origin = hand.aim.0;
@@ -188,7 +327,7 @@ impl Game<'_> {
             // A pulse when the ray comes onto another key (the main hand is `true`).
             if hover.map(|h| h.0) != previous.map(|h| h.0) && hover.is_some() {
                 if let Some((k, distance)) = hover {
-                    log::info!(
+                    log::trace!(
                         "Horizon XR: the {} hand's ray is on the keyboard's {:?} key, {distance:.2} m away",
                         if i == 0 { "main" } else { "off" },
                         buttons[k].label
@@ -198,16 +337,29 @@ impl Game<'_> {
             }
             let down = triggers[i];
             let was = std::mem::replace(&mut self.pad.headset.keyboard.down[i], down);
+            if self.pad.headset.keyboard.repeat_hand == Some(i)
+                && (!down || hover.map(|h| h.0) != self.pad.headset.keyboard.keyboard.held())
+            {
+                self.pad.headset.keyboard.keyboard.release();
+                self.pad.headset.keyboard.repeat_hand = None;
+            }
             if down && !was {
                 if let Some((k, _)) = hover {
                     headset::pulse(i == 0, 0.35, 0.03);
-                    let action = self.pad.headset.keyboard.keyboard.press(&buttons, k);
+                    let state = &mut self.pad.headset.keyboard;
+                    let before = (state.keyboard.layout, state.keyboard.shift);
+                    let action = state.keyboard.press(&buttons, k);
+                    state.repeat_hand = state.keyboard.held().map(|_| i);
+                    if before != (state.keyboard.layout, state.keyboard.shift) {
+                        state.buttons = state.keyboard.buttons().into();
+                    }
                     if let Some(action) = action {
                         self.visor_keyboard_act(action);
                     }
                 }
-            } else if !down && was {
+            } else if !down && was && self.pad.headset.keyboard.repeat_hand == Some(i) {
                 self.pad.headset.keyboard.keyboard.release();
+                self.pad.headset.keyboard.repeat_hand = None;
             }
             if !self.pad.headset.keyboard.shown {
                 return;
@@ -220,7 +372,7 @@ impl Game<'_> {
         if !self.pad.headset.keyboard.shown {
             return;
         }
-        let buttons = self.pad.headset.keyboard.keyboard.buttons();
+        let buttons = Arc::clone(&self.pad.headset.keyboard.buttons);
         if let Some(action) = self.pad.headset.keyboard.keyboard.tick(&buttons) {
             self.visor_keyboard_act(action);
         }
@@ -230,8 +382,19 @@ impl Game<'_> {
     /// keyboard's output went; the cross closes it; Escape is the key.
     fn visor_keyboard_act(&mut self, action: Action) {
         let key = |game: &mut Self, code: KeyCode| {
-            if let Err(e) = game.key_pressed(code, code) {
-                log::warn!("Horizon: keyboard key: {e}");
+            let shifted = game.pad.headset.keyboard.keyboard.shift;
+            if shifted
+                && matches!(
+                    code,
+                    KeyCode::ArrowLeft
+                        | KeyCode::ArrowRight
+                        | KeyCode::ArrowUp
+                        | KeyCode::ArrowDown
+                )
+            {
+                game.pad_with_modifier(KeyCode::ShiftLeft, |g| g.visor_keyboard_key(code));
+            } else {
+                game.visor_keyboard_key(code);
             }
         };
         match action {
@@ -246,16 +409,85 @@ impl Game<'_> {
             Action::Left => key(self, KeyCode::ArrowLeft),
             Action::Right => key(self, KeyCode::ArrowRight),
             Action::Paste => {
-                use horizon_client::clipboard::Clipboard;
-                let text = self.clipboard.get();
-                if !text.is_empty() {
-                    self.pad_osk_output(osk::Output::Text(text));
-                }
+                self.visor_keyboard_clipboard(horizon_client::clipboard::EditShortcut::Paste)
             }
-            // Horizon's fields keep no selection a button could cut or copy.
-            Action::Cut | Action::Copy => {}
+            Action::Cut => {
+                self.visor_keyboard_clipboard(horizon_client::clipboard::EditShortcut::Cut)
+            }
+            Action::Copy => {
+                self.visor_keyboard_clipboard(horizon_client::clipboard::EditShortcut::Copy)
+            }
             Action::Close => self.visor_keyboard_close(true),
             Action::Shift | Action::Language => {}
+        }
+    }
+
+    /// Use the same selection/clipboard paths as a physical keyboard; do not append paste text.
+    fn visor_keyboard_clipboard(&mut self, shortcut: horizon_client::clipboard::EditShortcut) {
+        if self.dialog_open() {
+            if let Err(e) = self.dialog_key(KeyCode::KeyC, Some(shortcut), None) {
+                log::warn!("Horizon: dialog keyboard: {e}");
+            }
+        } else if self.title.is_some() {
+            self.title_shortcut(shortcut);
+        } else if self.screen == Screen::Chat {
+            self.chat_shortcut(shortcut);
+        } else if self.sign_edit.is_some() {
+            self.sign_shortcut(shortcut);
+        } else if self.book.is_some() {
+            self.book_shortcut(shortcut);
+        } else if self.screen == Screen::Creative && self.creative_screen.tab().search {
+            self.creative_search_shortcut(shortcut);
+        } else if self.recipe_search_focused() {
+            self.recipe_shortcut(shortcut);
+        } else if self.station_typing() {
+            self.station_shortcut(shortcut);
+        } else if self.screen == Screen::Options {
+            self.options_shortcut(shortcut);
+        } else if shortcut == horizon_client::clipboard::EditShortcut::Paste {
+            use horizon_client::clipboard::Clipboard;
+            let text = self.clipboard.get();
+            if !text.is_empty() {
+                self.pad_osk_output(osk::Output::Text(text));
+            }
+        }
+    }
+
+    fn visor_keyboard_key(&mut self, code: KeyCode) {
+        if self.dialog_open() {
+            if let Err(e) = self.dialog_key(code, None, None) {
+                log::warn!("Horizon: dialog keyboard: {e}");
+            }
+            return;
+        }
+        let shift = self.has_shift_down();
+        let ctrl = self.has_control_down_with_quirk();
+        if let Some(title) = self.title.as_mut()
+            && title.field_key(code, ctrl, shift)
+        {
+            return;
+        }
+        if self.screen == Screen::Creative
+            && self.creative_screen.tab().search
+            && self.creative_screen.search.key(code, ctrl, shift)
+        {
+            return;
+        }
+        if self.station_typing() && self.station_key(code) {
+            return;
+        }
+        if self.screen == Screen::Chat && self.title.is_none() {
+            self.chat_key_code(code, None);
+        } else if self.sign_edit.is_some() {
+            self.sign_input(Some(code), None);
+        } else if self.book.is_some() {
+            self.book_input(Some(code), None);
+        } else if self.screen == Screen::Options {
+            if let Err(e) = self.options_key(code, None) {
+                log::warn!("Horizon: keyboard key: {e}");
+            }
+        } else if let Err(e) = self.key_pressed(code, code) {
+            log::warn!("Horizon: keyboard key: {e}");
         }
     }
 
@@ -276,13 +508,31 @@ impl Game<'_> {
             Some(headset::OverlaySpec::new(pos, rot, width)),
         );
         let state = &self.pad.headset.keyboard;
-        let buttons = state.keyboard.buttons();
-        let at = keyboard::placement([batch.width, batch.height], keyboard::bounds(&buttons));
+        let buttons = &state.buttons;
+        let at = keyboard::placement([batch.width, batch.height], keyboard::bounds(buttons));
         let atlas = &self.gui.atlas;
         for (i, button) in buttons.iter().enumerate() {
             let hovered = state.hover.iter().flatten().any(|(k, _)| *k == i);
             let held = state.keyboard.held() == Some(i);
             self.draw_keyboard_button(&mut batch, atlas, button, at, hovered || held);
+        }
+        for (i, rect) in keyboard_handles([batch.width, batch.height], buttons)
+            .into_iter()
+            .enumerate()
+        {
+            let handle = if i == 0 { Handle::Drag } else { Handle::Resize };
+            let lit = state.grab.is_some()
+                || state
+                    .handle_hover
+                    .iter()
+                    .flatten()
+                    .any(|(h, _)| *h == handle);
+            horizon_client::graphics_style::fill(
+                &mut batch,
+                atlas,
+                rect,
+                if lit { 0xA078_DCFF } else { 0x55BE_BEBE },
+            );
         }
         Some(batch)
     }
@@ -314,8 +564,11 @@ impl Game<'_> {
         } else {
             u32::MAX
         };
-        let plain: String = button.label.replace("\u{a7}c", "");
-        let width = HudBatch::text_width(atlas, &plain);
+        let plain = button
+            .label
+            .strip_prefix("\u{a7}c")
+            .unwrap_or(&button.label);
+        let width = HudBatch::text_width(atlas, plain);
         let tx = x + ((w as f32 - width) / 2.0).floor();
         let ty = y + ((h as f32 - 8.0) / 2.0).floor();
         // The close button's red cross (`§cx`).
@@ -324,6 +577,6 @@ impl Game<'_> {
         } else {
             color
         };
-        batch.text(atlas, &plain, tx, ty, color, true);
+        batch.text(atlas, plain, tx, ty, color, true);
     }
 }

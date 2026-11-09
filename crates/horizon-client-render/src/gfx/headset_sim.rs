@@ -33,6 +33,7 @@ pub struct SimHeadset {
     pace: Option<Duration>,
     next: Instant,
     frame: u64,
+    started: Instant,
     dump: Option<Dump>,
     pending: Option<[wgpu::Texture; 3]>,
     overlays: [Option<wgpu::Texture>; horizon_client_input::headset::OVERLAYS],
@@ -104,6 +105,7 @@ impl SimHeadset {
             pace: (hz > 0.0).then(|| Duration::from_secs_f32(1.0 / hz)),
             next: Instant::now(),
             frame: 0,
+            started: Instant::now(),
             dump: std::env::var_os("HORIZON_SIM_DUMP").map(|dir| Dump {
                 dir: dir.into(),
                 frame: std::env::var("HORIZON_SIM_DUMP_FRAME")
@@ -113,8 +115,8 @@ impl SimHeadset {
                 exit: std::env::var("HORIZON_SIM_DUMP_EXIT").as_deref() == Ok("1"),
             }),
             pending: None,
-            overlays: [None, None, None, None],
-            overlay_pending: [None, None, None, None],
+            overlays: std::array::from_fn(|_| None),
+            overlay_pending: std::array::from_fn(|_| None),
             device: None,
             head_y: std::env::var("HORIZON_SIM_HEAD_Y")
                 .ok()
@@ -257,11 +259,12 @@ impl Headset for SimHeadset {
             .map(|x| reach.map(|reach| (rest + Vec3::new(x, -0.3, -reach), aim_rotation)));
         horizon_client_input::headset::set_room(Some(
             horizon_client_input::headset::RoomSnapshot {
-                head: (rest, Quat::IDENTITY),
+                head: (rest + Vec3::Y * self.head_y, Quat::IDENTITY),
                 aim: held,
                 grip: held,
                 rest,
-                time_ms: 0,
+                time_ms: self.started.elapsed().as_millis() as u64,
+                pose_epoch: 0,
             },
         ));
         // `HORIZON_SIM_HANDS=0.4` holds both controllers that many metres ahead of the head and
@@ -397,6 +400,7 @@ impl Headset for SimHeadset {
             "overlay_chat",
             "overlay_handles",
             "overlay_keyboard",
+            "overlay_offhand",
         ];
         let named = images.iter().zip(["left", "right", "panel"]).chain(
             overlays

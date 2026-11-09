@@ -125,6 +125,7 @@ impl Game<'_> {
         self.visor_late_login();
         self.visor_update_two_handed();
         if !headset::active() {
+            self.vr_clear_room_tracking();
             return;
         }
         // Visor's keyboard: the rays and triggers on its keys (before the screen's pointer, so a
@@ -179,6 +180,8 @@ impl Game<'_> {
             && !self.pad.headset.off_panel_click
             && self.title.is_none()
             && self.player.is_some()
+            && !self.remote_input_pending()
+            && !self.screen_over_playing()
             && self.screen != super::Screen::Chat
         {
             let _ = self.key_pressed(
@@ -545,10 +548,23 @@ impl Game<'_> {
             let p = self.player.as_ref()?;
             let pose = p.pose;
             let crawling = p.room_crawling;
-            let standing = horizon_client::pose::Pose::Standing
+            let entity_standing = horizon_client::pose::Pose::Standing
                 .dimensions(p.scale)
                 .eye_height;
-            let pose_eye = p.dimensions.eye_height;
+            let model_standing = if self.visor_mechanics()
+                && self.visor_height_mode()
+                    == horizon_visor::settings::SupportedHeightMode::RealSize
+            {
+                (horizon_vivecraft::player::player_height(&headset::settings()) + 0.1) * p.scale
+            } else {
+                entity_standing
+            };
+            let scale = headset::world_scale();
+            let lift = headset::room().map_or(0.0, |r| (scale - 1.0) * r.rest.y);
+            // XR adds the scaled head displacement later. Remove its standing-height lift
+            // from the base once, so calibration/world scale cannot add the height twice.
+            let standing = model_standing * scale - lift;
+            let pose_eye = p.dimensions.eye_height * scale - lift;
             // `visor$hasHeadroom`: the body's column up to the eye and 0.1 m above is free.
             let headroom = if pose == horizon_client::pose::Pose::Swimming && crawling {
                 let half = f64::from(p.dimensions.width / 2.0);

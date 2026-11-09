@@ -63,6 +63,8 @@ pub enum PageId {
     ImmersionAdvanced,
     Gui,
     Hotbar,
+    KeyboardLayouts,
+    Overlays,
     World,
 }
 
@@ -101,6 +103,8 @@ impl PageId {
             PageId::ImmersionAdvanced => "visor.options.immersion.advanced.button",
             PageId::Gui => "visor.options.gui.button",
             PageId::Hotbar => "visor.options.gui.hotbar.button",
+            PageId::KeyboardLayouts => "horizon.visor.keyboard.layouts",
+            PageId::Overlays => "horizon.visor.overlays",
             PageId::World => "visor.options.world.button",
         }
     }
@@ -138,6 +142,8 @@ impl PageId {
             PageId::ImmersionAdvanced => "visor.options.immersion.advanced.button",
             PageId::Gui => "visor.options.gui.button",
             PageId::Hotbar => "visor.options.gui.hotbar.button",
+            PageId::KeyboardLayouts => "horizon.visor.keyboard.layouts",
+            PageId::Overlays => "horizon.visor.overlays",
             PageId::World => "visor.options.world.button",
         }
     }
@@ -148,6 +154,8 @@ impl PageId {
 pub enum Entry {
     /// An option, by config key.
     Opt(&'static str),
+    /// An option selected by name when several controls edit one serialized setting.
+    NamedOpt(&'static str),
     /// A button that opens another page.
     Page(PageId),
     /// `RESET_ORIGIN`: put the room origin back under the player.
@@ -210,8 +218,9 @@ pub fn entries(page: PageId, s: &VrSettings, server_limited_teleport: bool) -> V
             Opt("visorHeightUnits"),
             Opt("visorHeightAuto"),
             Entry::CalibrateHeight,
+            Entry::ResetOrigin,
         ],
-        PageId::Controls => vec![Opt("reverseHands")],
+        PageId::Controls => vec![Opt("reverseHands"), Entry::ResetOrigin],
         PageId::Movement => vec![
             Opt("visorMovementMode"),
             Opt("vrFreeMoveMode"),
@@ -242,6 +251,8 @@ pub fn entries(page: PageId, s: &VrSettings, server_limited_teleport: bool) -> V
         ],
         PageId::Gui => vec![
             Entry::Page(PageId::Hotbar),
+            Entry::Page(PageId::KeyboardLayouts),
+            Entry::Page(PageId::Overlays),
             Opt("autoOpenKeyboard"),
             Opt("hudDistance"),
             Opt("headHudScale"),
@@ -252,6 +263,30 @@ pub fn entries(page: PageId, s: &VrSettings, server_limited_teleport: bool) -> V
             Opt("visorHotbarHysteresis"),
             Opt("visorHotbarSlotNumbers"),
             Opt("visorHudHotbar"),
+        ],
+        PageId::KeyboardLayouts => vec![
+            Opt("visorKeyboardAutoLayout"),
+            Opt("visorKeyboardScale"),
+            Entry::NamedOpt("VISOR_KEYBOARD_LAYOUT_ENGLISH"),
+            Entry::NamedOpt("VISOR_KEYBOARD_LAYOUT_RUSSIAN"),
+            Entry::NamedOpt("VISOR_KEYBOARD_LAYOUT_UKRAINIAN"),
+            Entry::NamedOpt("VISOR_KEYBOARD_LAYOUT_GERMAN"),
+            Entry::NamedOpt("VISOR_KEYBOARD_LAYOUT_FRENCH"),
+            Entry::NamedOpt("VISOR_KEYBOARD_LAYOUT_SPANISH"),
+            Entry::NamedOpt("VISOR_KEYBOARD_LAYOUT_ITALIAN"),
+            Entry::NamedOpt("VISOR_KEYBOARD_LAYOUT_PORTUGUESE"),
+            Entry::NamedOpt("VISOR_KEYBOARD_LAYOUT_HUNGARIAN"),
+        ],
+        PageId::Overlays => vec![
+            Opt("vrHudLockMode"),
+            Opt("hudDistance"),
+            Opt("headHudScale"),
+            Opt("hudOpacity"),
+            Opt("visorChatVisible"),
+            Opt("visorChatX"),
+            Opt("visorChatY"),
+            Opt("visorChatZ"),
+            Opt("visorChatScale"),
         ],
         // The server rules of a world (`VRServerSettings`) have no page; a note says where they live.
         PageId::World => Vec::new(),

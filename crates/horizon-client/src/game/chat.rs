@@ -867,17 +867,21 @@ impl Game<'_> {
             focused,
         );
     }
+    /// Shared by physical edit shortcuts and the headset keyboard's CUT/COPY/PASTE buttons.
+    pub(super) fn chat_shortcut(&mut self, shortcut: horizon_client::clipboard::EditShortcut) {
+        let m = Measure(&self.gui.atlas.font);
+        let c = Commands {
+            dispatcher: chat_tree(&self.remote),
+            registries: &self.ui.registries,
+        };
+        if let Some(screen) = self.ui.chat_screen.as_mut() {
+            screen.shortcut(&m, &c, shortcut, &mut self.clipboard);
+        }
+    }
     /// Keys while the chat screen is open.
     pub(super) fn chat_key(&mut self, event: &KeyEvent) {
         if let Some(shortcut) = self.edit_shortcut(event) {
-            let m = Measure(&self.gui.atlas.font);
-            let c = Commands {
-                dispatcher: chat_tree(&self.remote),
-                registries: &self.ui.registries,
-            };
-            if let Some(screen) = self.ui.chat_screen.as_mut() {
-                screen.shortcut(&m, &c, shortcut, &mut self.clipboard);
-            }
+            self.chat_shortcut(shortcut);
             return;
         }
         let PhysicalKey::Code(key) = event.physical_key else {

@@ -31,6 +31,26 @@ pub const SPEED_WINDOW: f64 = 0.31;
 pub const HAPTIC_BLOCK_PER_HIT_MICROS: u32 = 250;
 pub const HAPTIC_ATTACK_MICROS: u32 = 1_000;
 
+/// `TaskSwing.isActive`: do not inherit Vivecraft's AUTO exclusion in creative.
+pub fn is_active(
+    player: &horizon_vivecraft::trackers::PlayerFlags,
+    creative: bool,
+    in_creative: bool,
+    blocking: bool,
+    attacks_while_blocking: bool,
+    grabbed: bool,
+) -> bool {
+    player.in_game
+        && player.alive
+        && !player.sleeping
+        && !player.spectator
+        && !player.passenger
+        && !player.paused_or_screen
+        && !grabbed
+        && (in_creative || !creative)
+        && (attacks_while_blocking || !blocking)
+}
+
 /// What the hand holds, as `getItemProperties` sorts it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ItemKind {
@@ -94,19 +114,18 @@ impl TipHistory {
 
     pub fn average_speed(&self, now_ms: u64, window: f64) -> f32 {
         let cutoff = now_ms as f64 - window * 1000.0;
-        let recent: Vec<&(u64, DVec3)> = self
-            .samples
-            .iter()
-            .filter(|s| s.0 as f64 >= cutoff)
-            .collect();
+        let mut previous = None;
         let mut sum = 0.0f64;
         let mut segments = 0;
-        for pair in recent.windows(2) {
-            let dt = (pair[1].0 - pair[0].0) as f64 / 1000.0;
-            if dt > 0.0 {
-                sum += pair[1].1.distance(pair[0].1) / dt;
-                segments += 1;
+        for &(at, point) in self.samples.iter().filter(|s| s.0 as f64 >= cutoff) {
+            if let Some((last_at, last_point)) = previous {
+                let dt = (at - last_at) as f64 / 1000.0;
+                if dt > 0.0 {
+                    sum += point.distance(last_point) / dt;
+                    segments += 1;
+                }
             }
+            previous = Some((at, point));
         }
         if segments == 0 {
             0.0
@@ -437,6 +456,54 @@ fn find_block_hit(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn creative_swings_follow_visor_and_busy_bodies_do_not_swing() {
+        use horizon_vivecraft::{settings::VrSettings, trackers::PlayerFlags};
+        let mut settings = VrSettings::default();
+        settings.apply_visor_profile();
+        let flags = PlayerFlags {
+            in_game: true,
+            alive: true,
+            ..Default::default()
+        };
+        assert!(is_active(
+            &flags,
+            true,
+            settings.bool("visorSwingInCreative"),
+            false,
+            true,
+            false
+        ));
+        assert!(!is_active(&flags, true, false, false, true, false));
+        assert!(is_active(&flags, false, false, false, true, false));
+        assert!(!is_active(&flags, false, true, true, false, false));
+        assert!(!is_active(&flags, false, true, false, true, true));
+        for blocked in [
+            PlayerFlags {
+                passenger: true,
+                ..flags
+            },
+            PlayerFlags {
+                spectator: true,
+                ..flags
+            },
+            PlayerFlags {
+                sleeping: true,
+                ..flags
+            },
+            PlayerFlags {
+                paused_or_screen: true,
+                ..flags
+            },
+            PlayerFlags {
+                alive: false,
+                ..flags
+            },
+        ] {
+            assert!(!is_active(&blocked, false, true, false, true, false));
+        }
+    }
 
     #[derive(Default)]
     struct Stub {

@@ -26,14 +26,16 @@ pub struct HandPose {
 }
 
 /// How many second panels the game can show beside the HUD: the hand's overlay (the hotbar wheel,
-/// the movement state), the chat, the handles of a screen and the keyboard.
-pub const OVERLAYS: usize = 4;
+/// the movement state), the chat, the handles of a screen, the keyboard and the off-hand wheel.
+pub const OVERLAYS: usize = 5;
 /// The overlay slots.
 pub const OVERLAY_HAND: usize = 0;
 pub const OVERLAY_CHAT: usize = 1;
 pub const OVERLAY_HANDLES: usize = 2;
 /// Visor's keyboard (`VROverlayKeyboard`), under a screen or alone.
 pub const OVERLAY_KEYBOARD: usize = 3;
+/// The off-hand hotbar wheel has its own panel so both grips can be held.
+pub const OVERLAY_OFFHAND: usize = 4;
 
 /// The handles below a screen's panel and what is going on with them.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -92,6 +94,8 @@ pub struct RoomSnapshot {
     pub rest: Vec3,
     /// Milliseconds on the session's clock.
     pub time_ms: u64,
+    /// Changes on recenter/reference-space discontinuities.
+    pub pose_epoch: u64,
 }
 
 /// One controller's buttons at one moment.

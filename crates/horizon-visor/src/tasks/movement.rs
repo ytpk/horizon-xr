@@ -15,6 +15,7 @@ pub const DEFAULT_CRAWL_THRESHOLD: f32 = 0.7;
 #[derive(Clone, Copy, Debug, Default)]
 pub struct CrawlTask {
     pub crawling: bool,
+    pending: Option<(bool, u64)>,
 }
 
 impl CrawlTask {
@@ -30,8 +31,37 @@ impl CrawlTask {
         self.set(actual_height / full_height <= limit)
     }
 
+    /// Ignore single-frame height spikes; require a candidate pose for 100 ms.
+    pub fn tick_at(&mut self, now_ms: u64, actual: f32, full: f32, threshold: f32) -> Option<bool> {
+        if !actual.is_finite() || !full.is_finite() || full <= 0.0 {
+            return self.clear();
+        }
+        let limit = threshold
+            + if self.crawling {
+                CRAWL_EXIT_MARGIN
+            } else {
+                0.0
+            };
+        let wanted = actual / full <= limit;
+        if wanted == self.crawling {
+            self.pending = None;
+            return None;
+        }
+        match self.pending {
+            Some((candidate, since)) if candidate == wanted && now_ms >= since => {
+                if now_ms - since >= 100 {
+                    self.pending = None;
+                    return self.set(wanted);
+                }
+            }
+            _ => self.pending = Some((wanted, now_ms)),
+        }
+        None
+    }
+
     /// `onClear`: the task stops (a screen, a vehicle, sleep).
     pub fn clear(&mut self) -> Option<bool> {
+        self.pending = None;
         self.set(false)
     }
 
@@ -63,13 +93,64 @@ impl SneakTask {
         threshold: f32,
         crawling: bool,
     ) -> bool {
-        self.sneaking = !crawling && actual_height / full_height <= threshold;
+        let limit = threshold + if self.sneaking { 0.02 } else { 0.0 };
+        self.sneaking = !crawling
+            && actual_height.is_finite()
+            && full_height.is_finite()
+            && full_height > 0.0
+            && actual_height / full_height <= limit;
         self.sneaking
     }
 
     /// `onClear`.
     pub fn clear(&mut self) {
         self.sneaking = false;
+    }
+}
+
+/// Physical jumps must start from a settled standing pose, not a recenter or rising from a chair.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct RoomJumpTask {
+    stable_since: Option<u64>,
+    armed: bool,
+}
+impl RoomJumpTask {
+    pub fn clear(&mut self) {
+        *self = Self::default();
+    }
+
+    pub fn tick(
+        &mut self,
+        active: bool,
+        now_ms: u64,
+        actual: f32,
+        full: f32,
+        threshold: f32,
+        rise: f32,
+        upward_speed: f32,
+    ) -> bool {
+        if !active || !actual.is_finite() || !full.is_finite() || full <= 0.0 {
+            self.clear();
+            return false;
+        }
+        let near_rest = (actual - full).abs() < 0.05 && rise.abs() < 0.025;
+        if near_rest {
+            let since = *self.stable_since.get_or_insert(now_ms);
+            if now_ms.saturating_sub(since) >= 200 {
+                self.armed = true;
+            }
+        } else {
+            self.stable_since = None;
+        }
+        if actual < full * 0.85 {
+            self.clear();
+            return false;
+        }
+        if self.armed && rise >= 0.1 && upward_speed >= 0.6 && actual / full >= threshold {
+            self.clear();
+            return true;
+        }
+        false
     }
 }
 
@@ -110,6 +191,33 @@ pub fn teleport_limits(server: &ServerSettings) -> (i32, i32, i32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn crawl_ignores_a_spike_and_requires_a_sustained_transition() {
+        let mut task = CrawlTask::default();
+        assert_eq!(task.tick_at(0, 0.8, 1.52, 0.7), None);
+        assert_eq!(task.tick_at(50, 1.52, 1.52, 0.7), None);
+        assert!(!task.crawling);
+        assert_eq!(task.tick_at(100, 0.8, 1.52, 0.7), None);
+        assert_eq!(task.tick_at(200, 0.8, 1.52, 0.7), Some(true));
+        assert_eq!(task.tick_at(250, 1.52, 1.52, 0.7), None);
+        assert_eq!(task.tick_at(350, 1.52, 1.52, 0.7), Some(false));
+    }
+
+    #[test]
+    fn standing_up_and_a_recenter_do_not_arm_a_jump() {
+        let mut task = RoomJumpTask::default();
+        for (ms, height) in [(0, 0.8), (100, 1.2), (200, 1.6)] {
+            assert!(!task.tick(true, ms, height, 1.52, 1.05, 0.2, 1.0));
+        }
+        for ms in [300, 400, 500] {
+            assert!(!task.tick(true, ms, 1.52, 1.52, 1.05, 0.0, 0.0));
+        }
+        assert!(task.tick(true, 600, 1.67, 1.52, 1.05, 0.15, 1.2));
+        assert!(!task.tick(true, 650, 1.7, 1.52, 1.05, 0.18, 1.0));
+        task.clear();
+        assert!(!task.tick(true, 700, 1.7, 1.52, 1.05, 0.2, 2.0));
+    }
 
     #[test]
     fn crawling_starts_below_the_threshold_and_ends_a_margin_above() {

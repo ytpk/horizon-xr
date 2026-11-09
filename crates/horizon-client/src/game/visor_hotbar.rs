@@ -5,10 +5,8 @@
 //! clockwise from the top) and letting go closes it. Copyright (C) Phoenix-Ra and Visor
 //! contributors; MPL-2.0 (see LICENSE-MPL-2.0).
 //!
-//! Visor hangs the wheel in the room, 0.6 m ahead of the hand, and draws it as an overlay there. Here it
-//! is drawn on the HUD panel (the one panel the headset shows in play), where the head keeps it in
-//! front of the player; the hand's ray is still taken against the plane 0.6 m ahead of where the hand
-//! was when the grip went down, so the hand moves the same way.
+//! Each hand has its own room overlay, 0.6 m ahead of where it opened its wheel.
+//! Both wheels remain visible and selectable while both grips are held.
 use super::Game;
 use glam::{Quat, Vec3};
 use horizon_client::{graphics_style, headset, hud::HudBatch, visor_art};
@@ -41,21 +39,10 @@ pub(super) struct Wheel {
     slot: Option<usize>,
 }
 
-/// The two wheels (`VROverlayHotBar.ID_MAIN` and `ID_OFFHAND`), and which of them the one overlay
-/// panel shows when both are open (the later one).
+/// The two independent wheels (`VROverlayHotBar.ID_MAIN` and `ID_OFFHAND`).
 #[derive(Clone, Copy, Debug, Default)]
 pub(super) struct Wheels {
     pub(super) hands: [Option<Wheel>; 2],
-    shown: usize,
-}
-
-impl Wheels {
-    /// The wheel the panel draws, with the hand it belongs to (0 main, 1 off).
-    pub(super) fn shown(&self) -> Option<(usize, Wheel)> {
-        self.hands[self.shown]
-            .map(|w| (self.shown, w))
-            .or_else(|| self.hands[1 - self.shown].map(|w| (1 - self.shown, w)))
-    }
 }
 
 impl Game<'_> {
@@ -138,15 +125,22 @@ impl Game<'_> {
         // is just opening starts on the centre (and the off hand's on 1 if the main hand's is
         // on 0, `onRender`).
         let mut slices = [None; 2];
+        let tuning = Self::visor_wheel_tuning();
         for h in 0..2 {
             let other = slices_of(&self.pad.headset.wheels, 1 - h);
             slices[h] = match (self.pad.headset.wheels.hands[h], hands[h]) {
                 (Some(wheel), Some(hand)) => {
                     let (pos, rot) = hand.aim;
                     let at = wheel_point(wheel.origin, wheel.rot, pos, rot * Vec3::NEG_Z);
-                    let disabled: Vec<usize> = other.into_iter().collect();
+                    let disabled = other.map(|slot| [slot]);
                     at.and_then(|(x, y)| {
-                        slice_from_pos(x, y, wheel.slot, &disabled, Self::visor_wheel_tuning())
+                        slice_from_pos(
+                            x,
+                            y,
+                            wheel.slot,
+                            disabled.as_ref().map_or(&[], |s| s.as_slice()),
+                            tuning,
+                        )
                     })
                     .or(wheel.slot)
                 }
@@ -190,7 +184,6 @@ impl Game<'_> {
                             rot,
                             slot: slices[h],
                         });
-                        self.pad.headset.wheels.shown = h;
                     }
                 }
                 Some(false) => self.pad.headset.wheels.hands[h] = None,
@@ -212,8 +205,8 @@ impl Game<'_> {
     /// pictures: the backdrop for the slot the hand points at, the slot numbers, the items, the
     /// name of the pointed slot under it, and the marks of the slot in the main hand (and, in
     /// two-handed play, the off hand's).
-    pub(super) fn draw_visor_wheel(&self, batch: &mut HudBatch) {
-        let Some((_, wheel)) = self.pad.headset.wheels.shown() else {
+    pub(super) fn draw_visor_wheel(&self, batch: &mut HudBatch, hand: usize) {
+        let Some(wheel) = self.pad.headset.wheels.hands[hand] else {
             return;
         };
         let atlas = &self.gui.atlas;

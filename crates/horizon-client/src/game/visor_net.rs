@@ -46,13 +46,25 @@ impl Preference {
 /// The protocol a connection speaks.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(super) enum Protocol {
-    /// Not in a headset, or not connected: no VR protocol.
+    /// Not connected: no VR protocol.
     #[default]
     None,
     /// Visor's HANDSHAKE went out; Vivecraft's VERSION waits for the answer (or the timeout).
     Auto,
     Visor,
     Vivecraft,
+    /// Auto tried Vivecraft; a delayed Visor HANDSHAKE may still select Visor.
+    Fallback,
+}
+
+impl Protocol {
+    fn accepts(self, payload: &S2c) -> bool {
+        match self {
+            Self::None | Self::Vivecraft => false,
+            Self::Fallback => matches!(payload, S2c::Handshake),
+            Self::Auto | Self::Visor => true,
+        }
+    }
 }
 
 /// What the game keeps of the channel (`ClientNetworking`'s statics).
@@ -138,10 +150,6 @@ impl Game<'_> {
         self.visor.pending_breaks.clear();
         self.visor.protocol = Protocol::None;
         headset::set_tracking_wanted(false, false);
-        if !headset::active() {
-            self.vivecraft_reset(false);
-            return;
-        }
         match preference {
             Preference::Vivecraft => {
                 self.visor.protocol = Protocol::Vivecraft;
@@ -154,7 +162,7 @@ impl Game<'_> {
                 } else {
                     Protocol::Visor
                 };
-                let hello = self.visor.net.login(true);
+                let hello = self.visor.net.login(headset::active());
                 self.visor_send(&hello);
                 log::info!(
                     "VR protocol: Visor HANDSHAKE sent (network {}, preference {preference:?})",
@@ -167,7 +175,10 @@ impl Game<'_> {
     /// A respawn (`vivecraft$resetServerState` on `handleRespawn`); Visor sends its HANDSHAKE
     /// on login only.
     pub(super) fn vr_respawn(&mut self) {
-        if self.visor.protocol == Protocol::Vivecraft {
+        if matches!(
+            self.visor.protocol,
+            Protocol::Vivecraft | Protocol::Fallback
+        ) {
             self.vivecraft_reset(true);
         } else {
             self.vivecraft_reset(false);
@@ -183,16 +194,18 @@ impl Game<'_> {
                 return;
             }
         };
-        // Only a client that said HANDSHAKE can be answered.
-        if matches!(self.visor.protocol, Protocol::None | Protocol::Vivecraft) {
+        let is_handshake = payload == S2c::Handshake;
+        // An explicit Vivecraft choice never said HANDSHAKE. Auto's fallback did, so
+        // accept its delayed answer, but no state packets before that answer.
+        if !self.visor.protocol.accepts(&payload) {
             return;
         }
-        let is_handshake = payload == S2c::Handshake;
         let Some(event) = self.visor.net.handle(payload) else {
             return;
         };
         if is_handshake {
             self.visor.protocol = Protocol::Visor;
+            self.vivecraft_reset(false);
         }
         match event {
             Event::ServerSupportsVisor => {
@@ -301,7 +314,7 @@ impl Game<'_> {
                 log::info!(
                     "VR protocol: no Visor answer in {AUTO_WAIT_TICKS} ticks, speaking Vivecraft"
                 );
-                self.visor.protocol = Protocol::Vivecraft;
+                self.visor.protocol = Protocol::Fallback;
                 self.vivecraft_reset(true);
             }
         }
@@ -356,10 +369,9 @@ pub(super) fn visor_rot_info(
         off_hand_pos: p.pose.off_hand.position,
         off_hand_quat: p.pose.off_hand.orientation,
         // The height Visor sends is the rendered model's, world scale included, and the pose
-        // offsets are scaled already: the model takes the height alone. Vivecraft's clamp keeps
-        // the arms model sane (todo: Visor draws any size).
+        // offsets are scaled already: the model takes the height alone.
         world_scale: 1.0,
-        height_scale: p.height_scale().clamp(0.5, 1.5),
+        height_scale: p.height_scale(),
         head_yaw_body: true,
         gun_angle: Some(p.gun_angle),
     }
@@ -368,6 +380,35 @@ pub(super) fn visor_rot_info(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn auto_accepts_a_delayed_handshake_but_an_explicit_choice_does_not() {
+        assert!(Protocol::Fallback.accepts(&S2c::Handshake));
+        assert!(!Protocol::Fallback.accepts(&S2c::ServerSettings(String::new())));
+        assert!(!Protocol::Vivecraft.accepts(&S2c::Handshake));
+        assert!(!Protocol::None.accepts(&S2c::Handshake));
+        assert!(Protocol::Visor.accepts(&S2c::ServerSettings(String::new())));
+    }
+
+    #[test]
+    fn remote_model_keeps_small_and_large_visor_scales() {
+        use horizon_visor::payload::StartTracking;
+        let mut net = ClientNet::default();
+        for (height, expected) in [(0.38, 0.25), (3.04, 2.0)] {
+            net.handle(S2c::OtherStartTracking(Box::new(StartTracking {
+                player: 1,
+                pose: PoseData::default(),
+                body_type: "hands_only".into(),
+                left_handed: false,
+                rotation_y: 0.0,
+                world_scale: expected,
+                full_height: height,
+                gun_angle: 60.0,
+                overlay_focused: false,
+            })));
+            assert_eq!(visor_rot_info(&net.players[&1]).height_scale, expected);
+        }
+    }
 
     #[test]
     fn model_height_follows_the_mode_and_the_world_scale() {

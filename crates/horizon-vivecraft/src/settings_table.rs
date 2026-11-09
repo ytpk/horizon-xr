@@ -1335,6 +1335,42 @@ pub const DEFS: &[Def] = &[
         default: "3.0",
         range: Some((0.5f32, 8.0f32, 0.1f32)),
     },
+    Def {
+        key: "visorKeyboardScale",
+        kind: Kind::Float,
+        default: "0.5",
+        range: Some((0.25, 1.5, 0.05)),
+    },
+    Def {
+        key: "visorChatVisible",
+        kind: Kind::Bool,
+        default: "true",
+        range: None,
+    },
+    Def {
+        key: "visorChatX",
+        kind: Kind::Float,
+        default: "0.392",
+        range: Some((-2.0, 2.0, 0.05)),
+    },
+    Def {
+        key: "visorChatY",
+        kind: Kind::Float,
+        default: "0.214",
+        range: Some((-2.0, 2.0, 0.05)),
+    },
+    Def {
+        key: "visorChatZ",
+        kind: Kind::Float,
+        default: "-1.706",
+        range: Some((-4.0, -0.25, 0.05)),
+    },
+    Def {
+        key: "visorChatScale",
+        kind: Kind::Float,
+        default: "1.2",
+        range: Some((0.25, 3.0, 0.05)),
+    },
     // Horizon only, Visor: its keyboard (`VROverlayKeyboard`) for typing in a headset; off brings
     // back Horizon's own on-screen keyboard. `keyboard.auto_layout` adds the layout of the
     // game's language, `keyboard.layouts` lists the layouts the language button walks

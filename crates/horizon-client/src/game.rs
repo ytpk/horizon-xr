@@ -8283,6 +8283,7 @@ impl Game<'_> {
             && (!self.focused
                 || self.server_packs.prompt.is_some()
                 || self.dialog_open()
+                || self.remote_input_pending()
                 || self.command_prompt.is_some())
         {
             return;
@@ -16536,12 +16537,7 @@ impl Game<'_> {
             hand: &hand,
             hand_items: &hand_items,
             hand_gui_quads: self.hand_gui_quads,
-            overlays: [
-                overlay_batches[0].as_ref(),
-                overlay_batches[1].as_ref(),
-                overlay_batches[2].as_ref(),
-                overlay_batches[3].as_ref(),
-            ],
+            overlays: std::array::from_fn(|i| overlay_batches[i].as_ref()),
             hand_fov_degrees: self.hud_fov_degrees(camera_alpha as f32, camera.to_array()),
             screen: &screen,
             pack: pack_inputs,

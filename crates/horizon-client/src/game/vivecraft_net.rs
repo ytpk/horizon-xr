@@ -86,6 +86,10 @@ impl Game<'_> {
 
     /// A payload from the server (`ClientNetworking.handlePacket`).
     pub(super) fn vivecraft_payload(&mut self, data: &[u8]) {
+        // A delayed Visor answer may have superseded Auto's Vivecraft probe.
+        if self.visor_active() {
+            return;
+        }
         let payload = match S2c::read(data) {
             Ok(p) => p,
             Err(e) => {

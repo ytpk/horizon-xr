@@ -54,6 +54,8 @@ pub(super) struct VrRuntime {
     pub(super) player: VrPlayer,
     sneak: SneakTracker,
     jump: JumpTracker,
+    room_jump: horizon_visor::tasks::movement::RoomJumpTask,
+    last_room: Option<(u64, u64)>,
     backpack: BackpackTracker,
     pub(super) swing: SwingTracker,
     teleport: TeleportTracker,
@@ -94,6 +96,8 @@ impl Default for VrRuntime {
             player: VrPlayer::new(&headset::settings()),
             sneak: SneakTracker::default(),
             jump: JumpTracker,
+            room_jump: Default::default(),
+            last_room: None,
             backpack: BackpackTracker::default(),
             swing: SwingTracker::default(),
             teleport: TeleportTracker::default(),
@@ -153,7 +157,7 @@ impl Game<'_> {
             sleeping: p.sleeping,
             spectator: p.spectator,
             in_game: true,
-            paused_or_screen: self.screen != super::Screen::Playing,
+            paused_or_screen: self.pad_in_menu(),
         }
     }
 
@@ -198,21 +202,77 @@ impl Game<'_> {
         Some(out)
     }
 
+    pub(super) fn vr_clear_room_tracking(&mut self) {
+        if self.pad.headset.vr.last_room.take().is_none() {
+            return;
+        }
+        let vr = &mut self.pad.headset.vr;
+        vr.player.histories = Default::default();
+        vr.height.reset();
+        vr.room_jump.clear();
+        vr.visor_sneak.clear();
+        vr.sneak.sneak_override = false;
+        vr.sneak.sneak_counter = 0;
+        vr.backpack_until = [None; 2];
+        vr.teleport_binding = false;
+        vr.teleport.inactive();
+        vr.jump_until = None;
+        vr.jumped = false;
+        headset::set_tracker_pad(PadState::default());
+        self.visor_room_sneak(false);
+        for effect in self.visor.climb.clear() {
+            if let horizon_visor::tasks::climb::ClimbEffect::NoGravity(on) = effect
+                && let Some(player) = self.player.as_mut()
+            {
+                player.no_gravity = on;
+            }
+        }
+        if self.visor.crawl.clear().is_some() && self.visor_active() {
+            self.visor_send(&horizon_visor::payload::C2s::Crawling(false));
+        }
+        if let Some(player) = self.player.as_mut() {
+            player.room_crawling = false;
+        }
+    }
+
     /// Once per loop iteration, standing in a headset: polls Vivecraft's player data and runs
     /// the body trackers (sneak, jump, backpack), whose presses go to the pad.
     pub(super) fn vr_update(&mut self) {
         let Some(snap) = headset::room() else {
-            headset::set_tracker_pad(PadState::default());
+            self.vr_clear_room_tracking();
             return;
         };
-        // `AutoCalibration.calibrateManual`: the average head pivot height of the last half second.
-        if headset::take_calibrate_height() {
-            self.vr_calibrate_height(snap.time_ms);
+        if let Some((last, epoch)) = self.pad.headset.vr.last_room {
+            if last == snap.time_ms && epoch == snap.pose_epoch {
+                return;
+            }
+            if epoch != snap.pose_epoch
+                || snap.time_ms < last
+                || snap.time_ms - last > 250
+                || (!self.pad.headset.vr.player.histories.hmd.is_empty()
+                    && self
+                        .pad
+                        .headset
+                        .vr
+                        .player
+                        .histories
+                        .hmd
+                        .latest()
+                        .distance(snap.head.0)
+                        > 0.5)
+            {
+                self.vr_clear_room_tracking();
+            }
         }
+        self.pad.headset.vr.last_room = Some((snap.time_ms, snap.pose_epoch));
         let settings = headset::settings();
         let room = room_poses(&snap, settings.left_handed());
         let vr = &mut self.pad.headset.vr;
         vr.player.poll(snap.time_ms, room, &settings);
+        // Include the current valid pose in a manual measurement.
+        if headset::take_calibrate_height() {
+            self.vr_calibrate_height(snap.time_ms);
+        }
         self.visor_height_tick(snap.time_ms, (snap.head.1 * Vec3::NEG_Z).y);
         let settings = headset::settings();
         // World data: the room turned as the body, the rest under the player's eyes.
@@ -243,7 +303,17 @@ impl Game<'_> {
                 "minecraft:leather_boots",
                 "Jump Boots",
             );
-        let playing = self.screen == super::Screen::Playing && self.player.is_some();
+        let playing = self.player.is_some() && !flags.paused_or_screen;
+        let visor = self.visor_mechanics();
+        let calibrated = !settings.bool("visorHeightAuto")
+            || settings.float("manualCalibration") >= horizon_visor::height::MIN_HEIGHT;
+        let body_free = !flags.spectator
+            && !flags.sleeping
+            && self
+                .player
+                .as_ref()
+                .is_some_and(|p| !p.flying && !p.fall_flying && p.auto_spin_attack_dmg <= 0.0)
+            && !self.visor.climb.is_grabbed();
         let mut room_sneak = false;
         let free_move = true;
         let now = Instant::now();
@@ -265,27 +335,44 @@ impl Game<'_> {
         vr.teleport_binding = playing && teleport_on && stick_forward > 0.5;
         headset::set_stick_teleports(playing && teleport_on);
         let mut pad = PadState::default();
-        if playing {
+        if playing && (!visor || calibrated) {
             vr.sneak
                 .tick(&settings, &flags, free_move, &vr.player.histories);
             // `TaskRoomSneak`: the head's pivot against the standing height, both in the room
             // above the floor, and never while crawling. It is held, not clicked: the stick's
             // click is a toggle, so a held click latched the sneak on after one dip.
-            room_sneak = vr.sneak.is_active(&settings, &flags, free_move)
+            room_sneak = body_free
+                && vr.sneak.is_active(&settings, &flags, free_move)
                 && vr.visor_sneak.tick(
                     vr.player.histories.hmd_pivot.latest().y,
                     horizon_vivecraft::player::player_height(&settings),
                     settings.float("visorSneakThreshold"),
                     self.visor.crawl.crawling,
                 );
-            let rising = vr.jump.tick(
-                &settings,
-                &flags,
-                free_move,
-                &vr.player.histories,
-                snap.time_ms,
-                boots,
-            );
+            let rising = if visor {
+                let h = &vr.player.histories.hmd_pivot;
+                let active = vr.jump.is_active(&settings, &flags, free_move)
+                    && body_free
+                    && !self.visor.crawl.crawling;
+                vr.room_jump.tick(
+                    active,
+                    snap.time_ms,
+                    h.latest().y,
+                    horizon_vivecraft::player::player_height(&settings),
+                    settings.float("visorJumpThreshold"),
+                    h.net_movement(snap.time_ms, 0.25).y,
+                    h.net_movement(snap.time_ms, 0.1).y / 0.1,
+                )
+            } else {
+                vr.jump.tick(
+                    &settings,
+                    &flags,
+                    free_move,
+                    &vr.player.histories,
+                    snap.time_ms,
+                    boots,
+                )
+            };
             // One jump per rise: the head must come back down before the next.
             let pivot = vr.player.histories.hmd_pivot.latest().y;
             if vr.jumped && pivot < horizon_vivecraft::player::player_height(&settings) + 0.025 {
@@ -315,6 +402,9 @@ impl Game<'_> {
         } else {
             vr.sneak.sneak_override = false;
             vr.visor_sneak.clear();
+            vr.room_jump.clear();
+            vr.jump_until = None;
+            vr.jumped = false;
         }
         headset::set_tracker_pad(pad);
         self.visor_room_sneak(room_sneak);
@@ -1633,7 +1723,10 @@ impl Game<'_> {
             .hmd_pivot
             .average_position(now_ms, 1.0)
             .y;
-        if y < horizon_visor::height::MIN_HEIGHT {
+        let history = &self.pad.headset.vr.player.histories.hmd_pivot;
+        let still =
+            history.span_ms(now_ms, 1.0) >= 800 && history.average_speed(now_ms, 1.0) <= 0.15;
+        if !still || !y.is_finite() || !(horizon_visor::height::MIN_HEIGHT..=2.6).contains(&y) {
             self.system_message(horizon_client::text::Text::translate(
                 "visor.messages.height_calibration_failed",
                 &[],
@@ -1681,6 +1774,9 @@ impl Game<'_> {
     /// Stores the standing height (`VRClientSettings.setFullHeight`) and saves it.
     fn visor_store_height(&mut self, height: f32) {
         Arc::make_mut(&mut self.settings.vr).set_float("manualCalibration", height);
+        self.pad.headset.vr.room_jump.clear();
+        self.pad.headset.vr.jump_until = None;
+        self.pad.headset.vr.jumped = false;
         self.settings.save(&Self::options_path());
     }
 
@@ -1710,7 +1806,7 @@ impl Game<'_> {
         );
         let vr = &mut self.pad.headset.vr;
         // What the body does must not teach the height: a crouch or a crawl is not a standing rest.
-        if !vr.visor_sneak.sneaking && !self.visor.crawl.crawling {
+        if stored.is_none() || (!vr.visor_sneak.sneaking && !self.visor.crawl.crawling) {
             vr.height.sample_at(now_ms, speed, look_y, height);
         }
         // `isSafeMoment`: a screen is open or the title shows.

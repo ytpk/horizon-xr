@@ -22,6 +22,12 @@ impl VrOpt {
             .map(|i| Self(i as u16))
     }
 
+    pub fn by_name(name: &str) -> Option<Self> {
+        OPTS.iter()
+            .position(|o| o.name == name)
+            .map(|i| Self(i as u16))
+    }
+
     fn info(self) -> &'static OptInfo {
         &OPTS[usize::from(self.0)]
     }

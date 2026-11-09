@@ -73,7 +73,7 @@ pub struct RemotePlayer {
     pub full_height: f32,
     pub gun_angle: f32,
     pub overlay_focused: bool,
-    /// Client ticks since the last pose (`expire` drops a player that stopped).
+    /// Client ticks since the last pose, for diagnostics; silence does not end tracking.
     pub idle_ticks: u32,
 }
 
@@ -119,11 +119,6 @@ pub enum Event {
     /// A VR player appeared or sent its whole state again.
     PlayerTracked(u128),
 }
-
-/// How many ticks without a pose before a remote VR player is forgotten. The server stops
-/// sending a player's poses when it leaves the tracking range; Visor drops the VR player when
-/// its entity goes (`VRClientPlayers`); here the entity is the game's, so this stands in.
-pub const REMOTE_EXPIRE_TICKS: u32 = 100;
 
 /// The state of the channel on the client (`ClientNetworking`'s statics).
 #[derive(Debug)]
@@ -291,13 +286,16 @@ impl ClientNet {
         None
     }
 
-    /// One client tick: remote players that stopped sending are forgotten.
+    /// `VRClientPlayers.removePlayer`: end tracking when the entity leaves the level.
+    pub fn remove_player(&mut self, uuid: u128) {
+        self.players.remove(&uuid);
+    }
+
+    /// Network silence may be a stalled server: keep the snapshot so later deltas work.
     pub fn tick(&mut self) {
         for p in self.players.values_mut() {
-            p.idle_ticks += 1;
+            p.idle_ticks = p.idle_ticks.saturating_add(1);
         }
-        self.players
-            .retain(|_, p| p.idle_ticks <= REMOTE_EXPIRE_TICKS);
     }
 }
 
@@ -447,9 +445,18 @@ mod tests {
         assert_eq!(p.pose.hmd.position.y, 1.6);
         assert_eq!(p.prev_pose.hmd.position.y, 0.0);
         assert!(!net.players.contains_key(&8));
-        for _ in 0..=REMOTE_EXPIRE_TICKS {
+        for _ in 0..200 {
             net.tick();
         }
+        moved.hmd.position.y = 1.7;
+        net.handle(S2c::OtherPose {
+            player: 7,
+            pose: Box::new(moved),
+        });
+        assert_eq!(net.players[&7].pose.hmd.position.y, 1.7);
+        assert_eq!(net.players[&7].full_height, 3.04);
+        assert!(net.players[&7].left_handed);
+        net.remove_player(7);
         assert!(net.players.is_empty());
     }
 }

@@ -40,6 +40,40 @@ def function(source, name):
 
 
 class WorldInputCaptureTests(unittest.TestCase):
+    @unittest.skipUnless(shutil.which("rustc"), "requires Rust")
+    def test_vr_keeps_menu_input_during_configuration_and_prompts(self):
+        source = (ROOT / "crates/horizon-client/src/game/pad_menu.rs").read_text(encoding="utf-8")
+        actual = method(source.replace("pub(super) ", ""), "pad_in_menu")
+        fixture = """
+#[derive(Clone, Copy, PartialEq)]
+enum Screen { Playing, Chat }
+struct Game { title: Option<()>, screen: Screen, overlay: bool, pending: bool }
+impl Game {
+    fn screen_over_playing(&self) -> bool { self.overlay }
+    fn remote_input_pending(&self) -> bool { self.pending }
+METHOD
+}
+fn main() {
+    let mut game = Game { title: None, screen: Screen::Playing, overlay: false, pending: true };
+    assert!(game.pad_in_menu(), "configuration/loading must retain VR pointer");
+    game.pending = false;
+    game.overlay = true;
+    assert!(game.pad_in_menu(), "a server dialog over Playing must retain VR pointer");
+    game.overlay = false;
+    assert!(!game.pad_in_menu(), "gameplay may resume only after load and dialog finish");
+    game.screen = Screen::Chat;
+    assert!(game.pad_in_menu());
+}
+""".replace("METHOD", actual)
+        with tempfile.TemporaryDirectory(prefix="horizon-vr-menu-") as folder:
+            rust = Path(folder) / "fixture.rs"
+            binary = Path(folder) / "fixture"
+            rust.write_text(fixture, encoding="utf-8")
+            built = subprocess.run(["rustc", "--edition=2024", str(rust), "-o", str(binary)], capture_output=True, text=True)
+            self.assertEqual(built.returncode, 0, built.stderr)
+            run = subprocess.run([str(binary)], capture_output=True, text=True)
+            self.assertEqual(run.returncode, 0, run.stderr)
+
     def test_loading_completion_wiring(self):
         game = (ROOT / "crates/horizon-client/src/game.rs").read_text(encoding="utf-8")
         remote = (ROOT / "crates/horizon-client/src/game/remote.rs").read_text(encoding="utf-8")
@@ -53,7 +87,7 @@ class WorldInputCaptureTests(unittest.TestCase):
                         ready.index("self.capture_loaded_world()"))
         level = remote[remote.index("    fn tick_remote_level("):]
         self.assertLess(level.index("self.tick_client_load()"),
-                        level.index("let stick = self.pad_move()"))
+                        level.index("let stick = self.vr_free_move_stick(self.pad_move())"))
 
     @unittest.skipUnless(shutil.which("rustc"), "requires Rust")
     def test_capture_lifecycle(self):
@@ -109,7 +143,7 @@ struct ServerPacks { prompt: Option<()> }
 struct Game {
     focused: bool, agent_pointer: bool, window: Option<Window>, mouse: Mouse,
     keyboard_mouse: bool, split_window: bool, view_at: [u32; 2],
-    captured: bool, capture_mode: Option<CursorGrabMode>, regrab_on_refocus: bool, title: Option<()>, screen: Screen,
+    captured: bool, connection_waiting: bool, capture_mode: Option<CursorGrabMode>, regrab_on_refocus: bool, title: Option<()>, screen: Screen,
     remote: Option<Remote>,
     mining: bool, lan_acting: Option<u32>, renderer: Option<Renderer>, cursor: (f32, f32),
     server_packs: ServerPacks, command_prompt: Option<()>, options: Options,
@@ -118,7 +152,7 @@ impl Default for Game {
     fn default() -> Self {
         Self { focused: true, agent_pointer: false, window: Some(Window::default()),
             keyboard_mouse: true, split_window: false, view_at: [0, 0],
-            mouse: Mouse::default(), captured: false, capture_mode: None, regrab_on_refocus: false, title: None,
+            mouse: Mouse::default(), captured: false, connection_waiting: false, capture_mode: None, regrab_on_refocus: false, title: None,
             screen: Screen::Playing, remote: None, mining: false, lan_acting: None,
             renderer: None, cursor: (0.0, 0.0), server_packs: ServerPacks::default(),
             command_prompt: None, options: Options::default() }
@@ -130,9 +164,26 @@ impl Game {
     fn reset_inventory_clicks(&mut self) {}
     fn restore_held_keys(&mut self) {}
     fn dialog_open(&self) -> bool { false }
+    fn remote_input_pending(&self) -> bool { self.connection_waiting }
 METHODS
 }
 fn main() {
+    // A LocalPlayer may exist before terrain/configuration and auth are ready.
+    // No focus gain or attempted world capture may hide the loading screen's pointer.
+    {
+        let mut game = Game::default();
+        game.connection_waiting = true;
+        game.capture_loaded_world();
+        game.capture(true);
+        assert!(!game.captured);
+        assert_eq!(game.window.as_ref().unwrap().grabs.get(), 0);
+        game.regrab_on_refocus = true;
+        game.regrab_on_refocus();
+        assert!(!game.captured);
+        game.connection_waiting = false;
+        game.capture_loaded_world();
+        assert!(game.captured);
+    }
     // The server pack prompt keeps the pointer: nothing grabs it while it is open.
     {
         let mut game = Game::default();

@@ -1411,5 +1411,22 @@
   "horizon.quest.room.settings.language_none": "Мой язык: английский",
   "horizon.quest.room.settings.on": "Вкл",
   "horizon.quest.room.settings.off": "Выкл",
-  "horizon.quest.room.settings.back": "Назад"
+  "horizon.quest.room.settings.back": "Назад",
+  "horizon.visor.keyboard.layouts": "Раскладки клавиатуры",
+  "horizon.visor.overlays": "Настройка оверлеев",
+  "horizon.visor.visorKeyboardScale": "Размер клавиатуры",
+  "horizon.visor.visorChatVisible": "Оверлей чата",
+  "horizon.visor.visorChatX": "Чат: смещение по горизонтали",
+  "horizon.visor.visorChatY": "Чат: смещение по вертикали",
+  "horizon.visor.visorChatZ": "Чат: расстояние",
+  "horizon.visor.visorChatScale": "Размер чата",
+  "horizon.visor.layout.english": "Английская",
+  "horizon.visor.layout.russian": "Русская",
+  "horizon.visor.layout.ukrainian": "Украинская",
+  "horizon.visor.layout.german": "Немецкая",
+  "horizon.visor.layout.french": "Французская",
+  "horizon.visor.layout.spanish": "Испанская",
+  "horizon.visor.layout.italian": "Итальянская",
+  "horizon.visor.layout.portuguese": "Португальская",
+  "horizon.visor.layout.hungarian": "Венгерская"
 }

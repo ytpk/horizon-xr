@@ -87,10 +87,11 @@ impl Game<'_> {
         size: [u32; 2],
     ) -> [Option<HudBatch>; headset::OVERLAYS] {
         [
-            self.hand_overlay(size),
+            self.hand_overlay(size, 0),
             self.chat_overlay(size),
             self.screen_handles_overlay(size),
             self.visor_keyboard_overlay(size),
+            self.hand_overlay(size, 1),
         ]
     }
 
@@ -104,8 +105,8 @@ impl Game<'_> {
     /// anchor HMD, rotation offset 0). Shown while there is something to read and the chat is not
     /// hidden; with the chat screen open the chat is on the screen's panel instead.
     fn chat_overlay(&mut self, size: [u32; 2]) -> Option<HudBatch> {
-        use horizon_visor::overlay::{CHAT_OFFSET, CHAT_SCALE};
-        if !self.chat_overlay_wanted() || self.pad_in_menu() {
+        let settings = headset::settings();
+        if !self.chat_overlay_wanted() || self.pad_in_menu() || !settings.bool("visorChatVisible") {
             headset::set_overlay_at(headset::OVERLAY_CHAT, None);
             return None;
         }
@@ -117,13 +118,20 @@ impl Game<'_> {
             return None;
         };
         let scale = headset::world_scale();
-        let (head, rot) = (room.head.0 - room.rest, room.head.1);
+        let head = (room.head.0 - room.rest) * scale + Vec3::Y * ((scale - 1.0) * room.rest.y);
+        let rot = room.head.1;
         // A GUI of 427 pixels across is `scale` metres wide (`PIXELS_PER_METRE`).
-        let width = CHAT_SCALE * scale * batch.width / horizon_visor::overlay::GUI_PIXELS_ACROSS;
+        let width = settings.float("visorChatScale") * scale * batch.width
+            / horizon_visor::overlay::GUI_PIXELS_ACROSS;
         headset::set_overlay_at(
             headset::OVERLAY_CHAT,
             Some(headset::OverlaySpec::new(
-                head + rot * (Vec3::from_array(CHAT_OFFSET) * scale),
+                head + rot
+                    * (Vec3::new(
+                        settings.float("visorChatX"),
+                        settings.float("visorChatY"),
+                        settings.float("visorChatZ"),
+                    ) * scale),
                 rot,
                 width,
             )),
@@ -132,25 +140,34 @@ impl Game<'_> {
     }
 
     /// The hotbar wheel and the movement state icon (`headset::set_overlay`).
-    fn hand_overlay(&mut self, size: [u32; 2]) -> Option<HudBatch> {
+    fn hand_overlay(&mut self, size: [u32; 2], hand: usize) -> Option<HudBatch> {
+        let slot = if hand == 0 {
+            headset::OVERLAY_HAND
+        } else {
+            headset::OVERLAY_OFFHAND
+        };
         if !headset::active() || self.pad_in_menu() || self.title.is_some() || self.spectator() {
-            headset::set_overlay(None);
+            headset::set_overlay_at(slot, None);
             return None;
         }
         // The hotbar wheel, where the hand was when the grip went down.
-        if let Some((_, wheel)) = self.pad.headset.wheels.shown() {
+        if let Some(wheel) = self.pad.headset.wheels.hands[hand] {
             let mut batch = HudBatch::new(size);
-            self.draw_visor_wheel(&mut batch);
+            self.draw_visor_wheel(&mut batch, hand);
             let (pos, rot) = wheel.panel();
-            headset::set_overlay(Some(headset::OverlaySpec::new(
-                pos,
-                rot,
-                batch.width / PIXELS_PER_METRE,
-            )));
+            headset::set_overlay_at(
+                slot,
+                Some(headset::OverlaySpec::new(
+                    pos,
+                    rot,
+                    batch.width / PIXELS_PER_METRE,
+                )),
+            );
             return Some(batch);
         }
         // The movement state on the off hand, with the HUD on the wrist (the Hand HUD preset).
-        if headset::settings().enum_name("vrHudLockMode") == "WRIST"
+        if hand == 0
+            && headset::settings().enum_name("vrHudLockMode") == "WRIST"
             && self.riding.is_none()
             && let Some(hand) = headset::off_hand()
             && let Some(p) = self.player.as_ref()
@@ -182,10 +199,10 @@ impl Game<'_> {
             let width = 0.05 * (batch.width / 400.0);
             let pos = hand.grip.0 + hand.grip.1 * Vec3::new(0.06, -0.0178, 0.2628);
             let rot = hand.grip.1 * Quat::from_rotation_y(std::f32::consts::FRAC_PI_2);
-            headset::set_overlay(Some(headset::OverlaySpec::new(pos, rot, width)));
+            headset::set_overlay_at(slot, Some(headset::OverlaySpec::new(pos, rot, width)));
             return Some(batch);
         }
-        headset::set_overlay(None);
+        headset::set_overlay_at(slot, None);
         None
     }
 

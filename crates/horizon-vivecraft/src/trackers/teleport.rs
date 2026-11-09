@@ -565,12 +565,14 @@ mod tests {
 
     #[test]
     fn the_arc_position_interpolates_along_its_points() {
-        let mut t = TeleportTracker::default();
-        t.arc = vec![
-            DVec3::ZERO,
-            DVec3::new(2.0, 0.0, 0.0),
-            DVec3::new(2.0, 2.0, 0.0),
-        ];
+        let t = TeleportTracker {
+            arc: vec![
+                DVec3::ZERO,
+                DVec3::new(2.0, 0.0, 0.0),
+                DVec3::new(2.0, 2.0, 0.0),
+            ],
+            ..Default::default()
+        };
         assert_eq!(t.arc_position(0.25), DVec3::new(1.0, 0.0, 0.0));
         assert_eq!(t.arc_position(0.75), DVec3::new(2.0, 1.0, 0.0));
         assert_eq!(t.arc_position(2.0), DVec3::new(2.0, 2.0, 0.0));

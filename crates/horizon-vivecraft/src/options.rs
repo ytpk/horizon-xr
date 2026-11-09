@@ -138,6 +138,24 @@ pub fn set_slider(s: &mut VrSettings, o: &OptInfo, at: f32, server_range: Option
 /// `VrOptions.setOptionValue` for the non-slider options: toggles, or the next enum constant
 /// (the previous one with `back`).
 pub fn cycle(s: &mut VrSettings, o: &OptInfo, back: bool) {
+    if let Some(layout) = o.name.strip_prefix("VISOR_KEYBOARD_LAYOUT_") {
+        let mut selected: Vec<String> = s
+            .string(o.key)
+            .split(',')
+            .map(|v| v.trim().to_ascii_uppercase())
+            .filter(|v| !v.is_empty())
+            .collect();
+        if selected.iter().any(|v| v == layout) {
+            // Keep at least one usable language; auto layout is optional.
+            if selected.len() > 1 {
+                selected.retain(|v| v != layout);
+            }
+        } else {
+            selected.push(layout.to_owned());
+        }
+        s.set(o.key, &selected.join(","));
+        return;
+    }
     let Some(d) = def(o.key) else {
         return;
     };
@@ -162,6 +180,13 @@ pub fn cycle(s: &mut VrSettings, o: &OptInfo, back: bool) {
 
 /// `getButtonDisplayString`'s value half.
 pub fn shown(s: &VrSettings, o: &OptInfo) -> Shown {
+    if let Some(layout) = o.name.strip_prefix("VISOR_KEYBOARD_LAYOUT_") {
+        let selected = s
+            .string(o.key)
+            .split(',')
+            .any(|v| v.trim().eq_ignore_ascii_case(layout));
+        return Shown::Lang(if selected { o.on } else { o.off }.into());
+    }
     let Some(d) = def(o.key) else {
         return Shown::Literal(String::new());
     };

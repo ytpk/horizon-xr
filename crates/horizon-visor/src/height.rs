@@ -48,7 +48,12 @@ impl HeightEstimator {
     /// vertical part of the direction it faces and `height` its average height over that half
     /// second. A moving head or one looking steeply up or down says nothing about the height.
     pub fn sample(&mut self, speed: f32, look_y: f32, height: f32) {
-        if speed.is_nan() || speed > 0.2 || look_y.abs() > LEVEL_LIMIT {
+        if !speed.is_finite()
+            || speed < 0.0
+            || speed > 0.2
+            || !look_y.is_finite()
+            || look_y.abs() > LEVEL_LIMIT
+        {
             return;
         }
         if !(MIN_HEIGHT..=MAX).contains(&height) {
@@ -68,7 +73,7 @@ impl HeightEstimator {
     pub fn sample_at(&mut self, now_ms: u64, speed: f32, look_y: f32, height: f32) {
         if self
             .last_ms
-            .is_some_and(|last| now_ms.saturating_sub(last) < SAMPLE_INTERVAL_MS)
+            .is_some_and(|last| now_ms >= last && now_ms - last < SAMPLE_INTERVAL_MS)
         {
             return;
         }
@@ -113,9 +118,15 @@ pub enum Auto {
 /// (`isSafeMoment`), so ducking through a door does not shrink the player. `stored` is `None` when
 /// nothing was measured yet.
 pub fn auto_update(estimate: Option<f32>, stored: Option<f32>, safe_moment: bool) -> Auto {
-    let Some(estimate) = estimate else {
+    let Some(estimate) = estimate.filter(|h| h.is_finite() && (MIN_HEIGHT..=MAX).contains(h))
+    else {
         return Auto::Keep;
     };
+    // A quiet seated/crawling launch is not an automatic standing calibration. Smaller
+    // users can explicitly Measure Now; never guess their standing height from a low pose.
+    if estimate < 1.2 {
+        return Auto::Keep;
+    }
     let Some(stored) = stored else {
         return Auto::Store {
             height: estimate,
@@ -318,6 +329,18 @@ mod tests {
             e.sample_at(t * 11, 0.0, 0.0, 1.75);
         }
         assert!(e.estimate().is_some());
+    }
+
+    #[test]
+    fn auto_does_not_calibrate_a_low_starting_pose_or_non_finite_motion() {
+        assert_eq!(auto_update(Some(0.85), None, true), Auto::Keep);
+        assert_eq!(auto_update(Some(0.85), Some(1.7), true), Auto::Keep);
+        let mut estimator = HeightEstimator::default();
+        for _ in 0..100 {
+            estimator.sample(f32::NAN, 0.0, 1.7);
+            estimator.sample(0.0, f32::NAN, 1.7);
+        }
+        assert_eq!(estimator.estimate(), None);
     }
 
     #[test]

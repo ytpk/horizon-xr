@@ -130,8 +130,16 @@ impl SwingWorld for VisorSwingWorld<'_, '_> {
     }
 
     fn weapon_can_break(&mut self, hit: &BlockHit) -> bool {
-        // `isCorrectToolForDrops || destroyProgress == 1`: only the instant half is known here.
-        self.0.0.destroy_progress(hit.pos) >= 1.0
+        let correct = {
+            let game = &*self.0.0;
+            let facts = game
+                .res
+                .facts()
+                .get(game.world.block(hit.pos[0], hit.pos[1], hit.pos[2]));
+            // The adapter runs with the swinging hand, including its tool components.
+            !facts.requires_tool || game.items().correct_for_drops(game.held(), &facts.name)
+        };
+        correct || self.0.0.destroy_progress(hit.pos) >= 1.0
     }
 
     fn is_farmable(&mut self, hit: &BlockHit) -> bool {
@@ -142,7 +150,9 @@ impl SwingWorld for VisorSwingWorld<'_, '_> {
             .get(game.world.block(hit.pos[0], hit.pos[1], hit.pos[2]));
         facts.classes.iter().any(|c| {
             c.ends_with("CropBlock") || c.ends_with("StemBlock") || c.ends_with("AttachedStemBlock")
-        })
+        }) || game
+            .held()
+            .is_some_and(|stack| game.block_transform(stack, hit.pos, hit.face).is_some())
     }
 }
 
@@ -197,17 +207,32 @@ impl Game<'_> {
             && settings.bool("allowCrawling")
             && !settings.seated()
             && flags.alive
+            && headset::room().is_some()
+            && (!settings.bool("visorHeightAuto")
+                || settings.float("manualCalibration") >= horizon_visor::height::MIN_HEIGHT)
+            && self
+                .player
+                .as_ref()
+                .is_some_and(|p| !p.flying && !p.fall_flying && p.auto_spin_attack_dmg <= 0.0)
+            && !flags.in_water
+            && !flags.in_lava
             && !flags.passenger
             && !flags.sleeping
             && !flags.spectator
             && !flags.paused_or_screen;
         let change = if allowed {
             let vr = &self.pad.headset.vr;
-            let actual = vr.player.histories.hmd_pivot.latest().y;
+            let actual = vr
+                .player
+                .histories
+                .hmd_pivot
+                .average_position(vr.clock_ms(), 0.1)
+                .y;
+            let now_ms = vr.clock_ms();
             let full = horizon_vivecraft::player::player_height(&settings);
             self.visor
                 .crawl
-                .tick(actual, full, settings.float("visorCrawlThreshold"))
+                .tick_at(now_ms, actual, full, settings.float("visorCrawlThreshold"))
         } else {
             self.visor.crawl.clear()
         };
@@ -250,6 +275,7 @@ impl Game<'_> {
                 .as_ref()
                 .is_some_and(|p| !p.flying && !p.fall_flying && p.auto_spin_attack_dmg <= 0.0);
         let active = settings.bool("realisticClimbEnabled")
+            && headset::room().is_some()
             && self.vr_server_settings().room_climbing_supported
             && free
             && !moving
@@ -344,22 +370,17 @@ impl Game<'_> {
             self.stack_in(slot)
                 .is_some_and(|s| self.blocks_attacks(s).is_some())
         });
-        // The existing gate: weapon collision off, seated, jumping, a screen, no health.
-        let creative = self.creative;
-        let jumping = self.pad.headset.vr.jumped;
-        let mut gate = std::mem::take(&mut self.pad.headset.vr.swing);
-        let active = gate.is_active(
-            &settings,
+        // `TaskSwing.isActive`: creative is controlled by Visor's own setting.
+        let grabbed = self.visor.climb.is_grabbed();
+        let active = swing::is_active(
             &flags,
-            creative,
+            self.creative,
+            settings.bool("visorSwingInCreative"),
             blocking,
             server.attacks_while_blocking,
-            false,
-            jumping,
-        );
-        self.pad.headset.vr.swing = gate;
-        // `TaskSwing.isActive`: `swing.in_creative` (on) lets a creative player swing too.
-        let active = active && (settings.bool("visorSwingInCreative") || !creative);
+            grabbed,
+        ) && settings.enum_name("weaponCollisionNew") != "OFF"
+            && !settings.seated();
         if !active || self.visor.swing.waiting() {
             self.visor.swing.clear();
             return;
@@ -402,8 +423,11 @@ impl Game<'_> {
                 task.busy(hand);
                 continue;
             }
-            let mut world = VisorSwingWorld(GameSwing(self));
-            all.extend(task.tick(hand, &input, threshold, grabbed, &mut world));
+            let actions = self.with_hand(item, |g| {
+                let mut world = VisorSwingWorld(GameSwing(g));
+                task.tick(hand, &input, threshold, grabbed, &mut world)
+            });
+            all.extend(actions);
         }
         self.visor.swing = task;
         self.visor_apply_swings(event_loop, id, all, &server);

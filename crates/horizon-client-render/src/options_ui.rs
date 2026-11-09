@@ -2879,6 +2879,8 @@ impl OptionsUi {
                     match e {
                         Entry::Opt(key) => crate::vr_options::VrOpt::by_key(key)
                             .map(|o| option_widget(s, Opt::Vr(o), 0.0, 0.0, 150.0)),
+                        Entry::NamedOpt(name) => crate::vr_options::VrOpt::by_name(name)
+                            .map(|o| option_widget(s, Opt::Vr(o), 0.0, 0.0, 150.0)),
                         Entry::Page(p) => Some(button(
                             0.0,
                             0.0,

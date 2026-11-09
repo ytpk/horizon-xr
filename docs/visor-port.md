@@ -1,5 +1,9 @@
 # Visor port: status, switches and device checklist
 
+Current fork changes and remaining work: [quest-port-status.md](quest-port-status.md).
+Validation results and remaining device checks: [quest-port-validation.md](quest-port-validation.md). The rounds below are historical;
+older TODO and done labels are not a current completion percentage.
+
 Target: Visor 0.6.1 (commit `c01354fad8ac03a016c249239a04b07adeb36476`, `visor:channel` network version 5) and the
 server half of VisorPlugin 0.2.0alpha (commit `b4f3fc8be0e67f517c3e98c07ac1b5510eaf3d24`) in Horizon on Meta Quest
 (OpenXR). Branch `visor-port`, from `vivecraft-port` (left untouched). The analysis and the phases are in
@@ -18,6 +22,34 @@ Rounds 1 to 3 used no device: what they touch (OpenXR, rendering, a real Visor s
 later section says it was looked at. Round 4 (the look and feel, below) ran on a Quest 3S that lay on a table, over adb:
 screens, the game menu, the hotbar wheel and the title room were seen in screenshots and the log; nothing could be felt (no
 head, no hands), so every gesture and every comfort question is in the checklist at the end of this file.
+
+## Post-audit fixes (standalone Quest fork)
+
+These fixes address seven functional gaps found against the pinned Visor 0.6.1 source. They do not
+claim to complete the unported settings editors, keyboard features, menu clouds or crosshair blend.
+
+- Login announces Visor even without an active XR session (`vr_active = false`), so flat clients can
+  see VR players. The Horizon server can upgrade that session when the headset starts after login.
+- Auto keeps a distinct fallback state: a delayed Visor handshake wins over the Vivecraft probe;
+  an explicit Vivecraft selection still ignores Visor. Late Vivecraft replies cannot override Visor.
+- Remote VR snapshots survive network silence. Entity removal and level changes clear them, rather
+  than a 100-tick pose timeout that made subsequent pose-only updates unusable.
+- Swing activation follows Visor's creative setting and excludes passengers and climbing players.
+  Horizon's explicit collision-off and seated settings remain respected.
+- Hoe swings query the existing block transformer without mutating the world. Dirt/grass that can
+  be tilled use the item, while an invalid face or blocked transform retains the mining fallback.
+  The query runs with the swinging hand's stack, including the redirected off hand.
+- Remote model height is no longer clamped to Vivecraft's 0.5–1.5 range.
+- Each hotbar wheel has its own quad layer; holding both grips keeps both visible. The simulator
+  writes the second wheel to `overlay_offhand.png`. The extra swapchain is 1280 by 720, like the other
+  overlay panels; its performance and memory cost still need measurement on Quest.
+
+Regression tests cover creative activation, a flat observer, a headset starting after login, delayed
+protocol selection, pose-only recovery after 200 silent ticks, entity removal and small/large model
+scales. No Quest device was attached for this audit. Before merging, check both wheels together on
+Quest, creative/survival swings, hoe swings on grass/dirt (including blocked-above and underside
+hits), a delayed server response and a network pause longer than five seconds. Test existing controls,
+chat, keyboard and screen handles alongside the new wheel layer.
 
 ## Visor look and feel: audit (round 4)
 

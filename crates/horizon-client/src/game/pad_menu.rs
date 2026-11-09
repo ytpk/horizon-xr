@@ -129,8 +129,8 @@ impl Game<'_> {
     pub(super) fn pad_in_menu(&self) -> bool {
         self.title.is_some()
             || self.screen != Screen::Playing
-            || self.sign_edit.is_some()
-            || self.book.is_some()
+            || self.screen_over_playing()
+            || self.remote_input_pending()
     }
 
     pub(super) fn gui_scale(&self) -> Option<HudBatch> {
@@ -434,7 +434,11 @@ impl Game<'_> {
     /// screens read as well as the physical keys, then put both back. The
     /// pad's only way to send Shift or Ctrl, so it can't fall out of step
     /// with what the keyboard sends.
-    fn pad_with_modifier<T>(&mut self, key: KeyCode, f: impl FnOnce(&mut Self) -> T) -> T {
+    pub(super) fn pad_with_modifier<T>(
+        &mut self,
+        key: KeyCode,
+        f: impl FnOnce(&mut Self) -> T,
+    ) -> T {
         let held = horizon_client_input::modifiers::hold(
             &mut self.modifiers,
             &mut self.physical_keys,
@@ -1506,9 +1510,7 @@ impl Game<'_> {
     /// here the on-screen keyboard opens on the screen's panel, once per screen; closing it keeps
     /// it closed for that screen.
     pub(super) fn headset_auto_keyboard(&mut self) {
-        let typing = self.screen == Screen::Chat
-            || self.sign_edit.is_some()
-            || matches!(self.book, Some(super::books::BookScreen::Edit { .. }));
+        let typing = self.pad_typing();
         // Visor's own keyboard (`visorKeyboard`, on by default); Horizon's on-screen keyboard is
         // only the fallback for a player who turned that off.
         if self.visor_keyboard_wanted() {
@@ -1542,6 +1544,7 @@ impl Game<'_> {
     /// fields, the LAN port.
     fn pad_typing(&self) -> bool {
         (self.screen == Screen::Chat && self.title.is_none())
+            || self.dialog_typing()
             || self.sign_edit.is_some()
             || matches!(self.book, Some(super::books::BookScreen::Edit { .. }))
             || (self.screen == Screen::Creative && self.creative_screen.tab().search)
@@ -1604,7 +1607,15 @@ impl Game<'_> {
             }
         };
         let backspace = key == Some(KeyCode::Backspace);
-        if self.screen == Screen::Chat && self.title.is_none() {
+        if self.dialog_open() {
+            if let Some(text) = text {
+                self.dialog_type(text);
+            } else if let Some(key) = key
+                && let Err(e) = self.dialog_key(key, None, None)
+            {
+                log::warn!("Horizon: dialog keyboard: {e}");
+            }
+        } else if self.screen == Screen::Chat && self.title.is_none() {
             match text {
                 Some(t) => self.chat_type(t),
                 None => self.chat_key_code(key.expect("a key"), None),

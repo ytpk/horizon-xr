@@ -2136,6 +2136,8 @@ impl Game<'_> {
         // The replacement player starts with its inventory menu, even if the
         // server switched levels without closing the previous container.
         self.remote_close_local();
+        // A dimension/login transition releases play input until its load tracker finishes.
+        self.capture(false);
         self.screen = Screen::Playing;
         let Some(r) = self.remote.as_mut() else {
             return;
@@ -2210,6 +2212,7 @@ impl Game<'_> {
             self.world.day_time = day;
             self.world.weather = weather;
             self.mobs.clear();
+            self.visor.net.players.clear();
             self.clear_remote_objects();
             self.clear_remote_projectiles();
             self.dropped.clear();
@@ -3440,6 +3443,7 @@ impl Game<'_> {
                 for id in p.ids {
                     if let Some(r) = self.remote.as_mut() {
                         if let Some(uuid) = r.level_players.remove(&id) {
+                            self.visor.net.remove_player(uuid);
                             r.attachments.remove(&Holder::Player(uuid));
                         }
                         r.level_player_names.remove(&id);
@@ -9869,6 +9873,14 @@ impl Game<'_> {
         horizon_client::level_loading::draw_connecting(batch, atlas, &status, self.cursor, cancel);
         true
     }
+    /// The connection owns a loading/configuration screen, even if a LocalPlayer already exists.
+    /// VR must keep its pointer/keyboard until PlayerLoaded and any server prompts are complete.
+    pub(super) fn remote_input_pending(&self) -> bool {
+        self.remote.as_ref().is_some_and(|r| {
+            !r.loaded_sent || r.level_load.is_active() || r.reconfiguring.is_some()
+        })
+    }
+
     /// Connected or connecting with no player yet: `ConnectScreen`, then
     /// `LevelLoadingScreen`, over the panorama with its blur.
     pub(super) fn remote_loading(&self) -> bool {
