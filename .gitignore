@@ -44,3 +44,6 @@ vivecraft-client-config.json
 .env*
 *.apk
 dist/
+
+# Local Quest build paths and application registration.
+/.quest-build.env

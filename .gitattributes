@@ -4,3 +4,9 @@ docs/launcher-commands.md text eol=lf
 docs/horizon-ctl-commands.md text eol=lf
 crates/horizon-theme/tokens.css text eol=lf
 docs/api/*-reference.md text eol=lf
+
+# Build entry points must run after a Git for Windows checkout.
+*.sh text eol=lf
+*.bash text eol=lf
+*.cmd text eol=crlf
+quest-build.env.example text eol=lf

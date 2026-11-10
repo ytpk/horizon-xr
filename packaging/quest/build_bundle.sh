@@ -14,13 +14,13 @@ set -euo pipefail
 
 here=$(cd "$(dirname "$0")" && pwd)
 root=$(cd "$here/../.." && pwd)
-OUT=$root/target/quest
+OUT=${OUT:-$root/target/quest}
 parity=mods/horizon/src/test/java/dev/horizonlab/parity
 stage=$OUT/bundle
 mkdir -p "$OUT/assets"
 
-(cd "$root" && cargo build --release -p horizon-prepare)
-prepare=$root/target/release/horizon-prepare
+(cd "$root" && cargo build --locked --release -p horizon-prepare)
+prepare=${CARGO_TARGET_DIR:-$root/target}/release/horizon-prepare
 echo "== compile-exporters"
 folder=$("$prepare" compile-exporters --root "$root" | tail -n 1)
 [ -f "$folder/manifest.json" ] || folder=$root/exporters

@@ -15,7 +15,7 @@ Minecraft-looking room. Play leaves the room and starts the game in the same pro
 
 | Part | Verdict | One line |
 |---|---|---|
-| 1. Microsoft sign-in by device code, token chain, ownership, profile | **Feasible, mostly reuse** | The launcher already does the whole flow in pure Rust with `ureq`. The game build already contains `ureq` with rustls, so TLS works on the Quest. Extracted into `crates/horizon-account` (done). It uses Horizon's existing client ID (`HORIZON_MSA_CLIENT_ID`); there is no separate Azure app. |
+| 1. Microsoft sign-in by device code, token chain, ownership, profile | **Feasible, mostly reuse** | The launcher already does the whole flow in pure Rust with `ureq`. The game build already contains `ureq` with rustls, so TLS works on the Quest. Extracted into `crates/horizon-account` (done). It requires the fork's own approved Azure application client ID (`HORIZON_MSA_CLIENT_ID`). |
 | 2a. Downloading client jar, asset index, assets, libraries, server jar | **Feasible, mostly reuse** | `launcher/src/mojang.rs` and `sources.rs` are pure Rust. They need extracting, plus Range resume, a disk-space check and a progress model. |
 | 2b. Building the prepared resources on the device | **Feasible only with a JVM on the headset. This is the biggest blocker.** | About 20 of the prepared files come from Java code that calls Mojang's own classes. There is no Rust replacement and none is cheap to write. See section 3. |
 | 3. Pre-game VR room with the TV as launcher UI | **Feasible** | Needs new rendering code (a voxel room pass), but the panel, overlay, pointer, keyboard, theme fonts, a no-Mojang boot atlas and a desktop headset simulator all exist. |
@@ -27,10 +27,10 @@ against it. Evidence it can work: Termux publishes `openjdk-25` for aarch64 (Apr
 OpenJDK's own mobile project has an Android port (the minimum API level is 32, which is
 this APK's `minSdkVersion`). It is untested here, so a spike comes first (Phase 0).
 
-Client ID, decided: the Quest build uses **Horizon's own Microsoft/Azure client ID**, the one
-`launcher/src/account.rs` already uses (`HORIZON_MSA_CLIENT_ID`, build time; the Horizon
-maintainers gave permission). There is no separate Azure app and no Mojang approval form for the
-headset.
+Client ID update (2026-11-10): permission to use Horizon's Microsoft/Azure registration was
+withdrawn. The fork requires its own application registration and Minecraft App ID approval.
+`HORIZON_MSA_CLIENT_ID` names the configuration variable; it does not supply an approved ID.
+Without it, a build cannot offer Microsoft sign-in.
 
 ## 2. What exists today
 
@@ -228,9 +228,9 @@ fallbacks, in order of effort:
 
 ### 4.2 What is missing for Android
 
-1. **The client ID.** Decided: Horizon's existing one, `HORIZON_MSA_CLIENT_ID` (a GitHub variable
-   on the upstream repo, read at build time by `horizon-account`; the run-time variable
-   overrides it). Nothing to register. A build made without it says sign-in is not configured.
+1. **The client ID.** The fork must supply its own approved registration through
+   `HORIZON_MSA_CLIENT_ID` at build time (or run time). Do not use Horizon's registration.
+   A build made without an ID says sign-in is not configured.
 2. **A shared crate.** `account.rs` is welded to the launcher (`proxy`, `backend`, `skins`,
    `java_launch`, accounts.json, keychains). Cut a `horizon-account` crate: endpoints, flow,
    `Secrets`, `SecretStore`, errors. The launcher keeps its UI and keychains and calls the crate.
@@ -442,7 +442,7 @@ foveation changes. No chunk streaming, so the CPU is free for the downloader and
 | 1 | The JVM does not run on Horizon OS (SELinux, bionic gaps, JIT), or Java 25 Android build is unstable | Phase 0 spike over adb: unpack the Termux `openjdk-25` .deb under `/data/local/tmp` (the shell user may exec there; that is a write to the device and needs the owner's go-ahead), run `java -version`, then run the real exporters against the jars. Decide go or no-go before any code. |
 | 2 | Not enough RAM when a JVM runs beside the room, and the system kills the app | Measure peak RSS per exporter JVM on the headset; run one JVM at a time with `-Xmx` from the existing table; the room does nothing heavy meanwhile. The serial collector and `TieredStopAtLevel=1` are already used. |
 | 3 | Prepare takes too long (my guess: 5 to 15 min) | Measure in the spike. The prepare output is cached by hash, so a retry only redoes the missing part. Show real stage progress. |
-| 4 | (dropped) A separate client ID for the fork | Decided: Horizon's own ID is used, nothing to register. |
+| 4 | A separate client ID for the fork | Required again since 2026-11-10: obtain the fork's own registration and Minecraft App ID approval. |
 | 5 | The Minecraft token step returns 403 "Invalid app registration" | Only if a build carries a wrong or no client ID. Show the exact text from `docs/microsoft-account.md`. |
 | 6 | The Quest browser or phone sign-in page shows an unexpected error for `XErr` accounts (child accounts, no Xbox profile, Korea) | Reuse the launcher's `XErr` table of messages; add them to `lang` keys. |
 | 7 | `/sdcard` FUSE I/O is too slow for 22,000 small files and the downloader | Benchmark write and read of a few thousand files on `/sdcard/Android/data/...` against the internal dir with a throwaway test app or from `adb shell` in the app dir (read-only first); decide where `resources/` goes. `horizon-data.bin` also helps reads. |
@@ -460,7 +460,7 @@ foveation changes. No chunk streaming, so the CPU is free for the downloader and
 Sizes are rough Rust lines unless stated. "Testable alone" means without a person in the headset.
 
 **Phase 0. Spikes and registrations (no repo code).**
-- (Removed: the Azure registration and Mojang form. Horizon's own client ID is used.)
+- The fork's own Azure application registration and Minecraft App ID review are required (updated 2026-11-10).
 - JVM spike on the Quest (needs the owner's permission to write to the device): run
   `java -version`, then the real exporter set; record time and peak memory.
 - Storage spike (I/O speed, `/sdcard` against internal).
@@ -536,7 +536,7 @@ unchanged (INTERNET and ACCESS_NETWORK_STATE are there). No storage permission n
 app's own folders.
 
 Environment and settings (all with the rule: tokens never in `launch.txt`):
-- `HORIZON_MSA_CLIENT_ID` (build time and run time, as in the launcher: Horizon's existing ID).
+- `HORIZON_MSA_CLIENT_ID` (build time and run time, the fork's own approved application ID).
 - `HORIZON_QUEST_ROOM=0|1` (force skip or force show), `HORIZON_ROOM_STATE=<state>` (desktop
   simulator: draw a fixed state), `HORIZON_FETCH_ROOT=<url>` (point the downloader at a mock,
   debug builds only, like `HORIZON_MSA_MICROSOFT_ENDPOINT`).
@@ -567,7 +567,8 @@ prepare byte compare, room pixel checks per state, account chain against the moc
 
 ## 12. Open questions for the user
 
-Decided by the user: 1 (no registration; Horizon's own client ID), 2 (yes, headset writes were
+Updated 2026-11-10: item 1 requires the fork's own approved registration; the earlier permission
+was withdrawn. Other decisions: 2 (yes, headset writes were
 allowed for the spike), 10 (not needed). Defaults in force until the user says otherwise: 4 files
 in the app's internal storage; 5 a token file with mode 0600 for v1; 6 sounds downloaded
 automatically after the core files, languages `en_us` plus the system language (`ru_ru` for this
@@ -726,7 +727,8 @@ lint, present before this work); `--no-deps` on `horizon-quest` is clean.
 
 ## 14. Round 2 results: phases 4 to 6 (2026-11-08)
 
-Decisions in force (from the user): Horizon's own client ID; `jdk.jfr` stays; news as the desktop
+Historical decisions for this round (the client-ID permission was withdrawn on 2026-11-10):
+`jdk.jfr` stays; news as the desktop
 launcher shows it; **the room shows on every start**; **auto-update is off** (the room checks for
 nothing and replaces nothing by itself; no "update available" button either); storage is the app's
 internal folder, the token file mode 0600 with a key file; languages `en_us` plus the system
@@ -812,7 +814,7 @@ another build).
     CPU 1.6 to 1.9 ms a frame for the app**. GPU margin by `HORIZON_ROOM_STRESS`: the room drawn 16
     times an eye ran at 39 fps and 48 times at 13 fps, so one room costs about 1.3 to 1.6 ms of GPU
     for both eyes against 11.1 ms at 90 Hz (8.3 at 120): a margin of about 7x.
-  - the sign-in page with a **real device code from Microsoft** (Horizon's client ID), its QR code
+  - the sign-in page with a **real device code from Microsoft** (the fork's own approved application ID), its QR code
     on the TV in the room (screenshot checked); the sign-in was not completed.
   - the dev no-gate build with no account: the whole provisioning ran inside the room (core,
     prepare, sounds: 4,962 files), the room turned real (18 block textures), then Play reached the
@@ -839,7 +841,7 @@ another build).
 
 ### 14.4 Headset checklist for the user
 
-1. Install the APK built with Horizon's client ID (`HORIZON_MSA_CLIENT_ID=<id>
+1. Install the APK built with the fork's own approved client ID (`HORIZON_MSA_CLIENT_ID=<id>
    packaging/quest/build_apk.sh`, no `QUEST_DEV_NO_GATE`). Start it: you stand in the room, the TV
    shows the check, then the sign-in page. Sit on the sofa (one step back): is the TV comfortable
    at eye height; is the text readable.

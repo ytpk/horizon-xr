@@ -352,9 +352,11 @@ validators; the script above doesn't send another player's chat.
 
 The Quest app signs in through the same code: `crates/horizon-account` (the flow and the secret
 store, extracted from the launcher's `account.rs`; the launcher re-exports it). It uses
-**Horizon's own client ID**, the one this page already describes (`HORIZON_MSA_CLIENT_ID` at build
-time, the repository variable): the headset is another Horizon product, not another application,
-so there is no separate Azure app and no second Mojang review. Tokens live in a file in the app's
+the fork's own Azure application client ID (`HORIZON_MSA_CLIENT_ID` at build time or run time),
+with the required Minecraft App ID approval. Permission to use Horizon's registration was withdrawn;
+the fork must not embed or ask users to supply Horizon's ID. Building from source does not provide
+an application registration or remove the ownership gate. Without a configured ID, sign-in is unavailable.
+Tokens live in a file in the app's
 internal folder (`<files>/launcher/`), sealed with ChaCha20-Poly1305 under a random key kept in a
 second file, both mode 0600 (`FileStore::with_key_file`; `/etc/machine-id` does not exist on
 Android). The room (docs/quest-launcher-plan.md) shows the device code and starts no download before

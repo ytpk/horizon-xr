@@ -1,4 +1,9 @@
-# Horizon для Meta Quest (OpenXR) — этап 1
+# Horizon для Meta Quest (OpenXR)
+
+Актуальная инструкция полной сборки, включая Windows/WSL2: [README проекта](../../README.md#build-the-apk).
+Из корня проекта: `sh build-apk.sh`; на Windows после настройки WSL2 — `build-apk.cmd`.
+Ниже сохранены низкоуровневые команды и заметки раннего этапа; описание офлайн-запуска историческое.
+Для входа требуется собственный одобренный application client ID; самосборка его не предоставляет.
 
 Нативный APK (NativeActivity, без Java-кода), который запускает Horizon на Quest 3S / 3 / 2 / Pro
 и рисует игру в стерео через OpenXR (Vulkan) с отслеживанием головы и контроллерами Touch.

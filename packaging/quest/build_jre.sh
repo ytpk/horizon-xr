@@ -21,7 +21,7 @@ here=$(cd "$(dirname "$0")" && pwd)
 root=$(cd "$here/../.." && pwd)
 # shellcheck source=env.sh
 source "$here/env.sh"
-OUT=$root/target/quest
+OUT=${OUT:-$root/target/quest}
 cache=$OUT/cache/jre
 jre=$OUT/jre
 mkdir -p "$cache" "$OUT/assets"

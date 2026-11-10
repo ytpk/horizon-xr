@@ -12,8 +12,8 @@
 #   PACKAGE=dev.horizon.questtest packaging/quest/build_apk.sh  # another app id: its own data folder,
 #                                              # beside the real install (for tests on a headset)
 #
-#   HORIZON_MSA_CLIENT_ID=<id> packaging/quest/build_apk.sh  # Horizon's Microsoft client ID (the
-#                                              # GitHub variable of the same name), built in; without
+#   HORIZON_MSA_CLIENT_ID=<id> packaging/quest/build_apk.sh  # your own approved Microsoft application
+#                                              # client ID, built in; without
 #                                              # it the room says sign-in is not configured
 #   QUEST_DEV_NO_GATE=1 packaging/quest/build_apk.sh  # a DEVELOPER build that can skip the ownership
 #                                              # gate (launch.txt line HORIZON_QUEST_NO_GATE=1) to try
@@ -56,8 +56,8 @@ if [ "${QUEST_DEV_NO_GATE:-0}" = 1 ]; then
 fi
 if [ "${SKIP_CARGO:-0}" != 1 ]; then
     echo "== cargo build (aarch64-linux-android, profile $PROFILE)"
-    (cd "$root" && cargo build --target aarch64-linux-android -p horizon-quest --profile "$PROFILE" "${features[@]}")
-    (cd "$root" && cargo build --target aarch64-linux-android -p horizon-jvm --profile "$PROFILE")
+    (cd "$root" && cargo build --locked --target aarch64-linux-android -p horizon-quest --profile "$PROFILE" "${features[@]}")
+    (cd "$root" && cargo build --locked --target aarch64-linux-android -p horizon-jvm --profile "$PROFILE")
 fi
 jvm=${CARGO_TARGET_DIR:-$root/target}/aarch64-linux-android/$PROFILE/horizon-jvm
 [ -f "$jvm" ] || { echo "missing $jvm" >&2; exit 1; }
