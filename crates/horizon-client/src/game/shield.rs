@@ -376,6 +376,31 @@ impl Game<'_> {
     }
 }
 
+/// `ItemStack.isDamageableItem` and `getMaxDamage` for the blocking stack.
+fn blocking_item_max_damage(stack: &ItemStack, prototype_max: u32) -> Option<u32> {
+    let data = stack.data();
+    let component = |id| data.and_then(|data| data.other(id));
+    if stack.count == 0
+        || component("minecraft:unbreakable").is_some()
+        || component("!minecraft:max_damage").is_some()
+        || component("!minecraft:damage").is_some()
+    {
+        return None;
+    }
+    // A non-damageable prototype supplies neither MAX_DAMAGE nor DAMAGE.
+    if prototype_max == 0
+        && stack.damage == 0
+        && !data.is_some_and(|data| data.explicit_zero_damage)
+    {
+        return None;
+    }
+    let max = match component("minecraft:max_damage") {
+        Some(value) => horizon_world::datafix::dynamic::as_int(Some(value), 0).max(0) as u32,
+        None => prototype_max,
+    };
+    (max > 0).then_some(max)
+}
+
 #[cfg(test)]
 mod vr_offhand_tests {
     use super::*;
@@ -486,28 +511,4 @@ mod vr_offhand_tests {
         g.active_off = false;
         assert!(!g.vr_dual_wield_swapped());
     }
-}
-/// `ItemStack.isDamageableItem` and `getMaxDamage` for the blocking stack.
-fn blocking_item_max_damage(stack: &ItemStack, prototype_max: u32) -> Option<u32> {
-    let data = stack.data();
-    let component = |id| data.and_then(|data| data.other(id));
-    if stack.count == 0
-        || component("minecraft:unbreakable").is_some()
-        || component("!minecraft:max_damage").is_some()
-        || component("!minecraft:damage").is_some()
-    {
-        return None;
-    }
-    // A non-damageable prototype supplies neither MAX_DAMAGE nor DAMAGE.
-    if prototype_max == 0
-        && stack.damage == 0
-        && !data.is_some_and(|data| data.explicit_zero_damage)
-    {
-        return None;
-    }
-    let max = match component("minecraft:max_damage") {
-        Some(value) => horizon_world::datafix::dynamic::as_int(Some(value), 0).max(0) as u32,
-        None => prototype_max,
-    };
-    (max > 0).then_some(max)
 }

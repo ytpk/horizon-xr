@@ -2641,6 +2641,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "horizon-account"
+version = "0.1.0"
+dependencies = [
+ "chacha20poly1305",
+ "getrandom 0.3.4",
+ "serde",
+ "serde_json",
+ "sha2",
+ "ureq",
+]
+
+[[package]]
 name = "horizon-addresses"
 version = "0.1.0"
 
@@ -2670,6 +2682,16 @@ dependencies = [
  "png 0.18.1",
  "serde",
  "serde_json",
+ "ureq",
+]
+
+[[package]]
+name = "horizon-fetch"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "serde_json",
+ "sha1",
  "ureq",
 ]
 
@@ -2709,8 +2731,10 @@ dependencies = [
  "glam",
  "gpui-fast",
  "gpui-fast-platform",
+ "horizon-account",
  "horizon-bench",
  "horizon-cosmetics",
+ "horizon-fetch",
  "horizon-friends",
  "horizon-mcp",
  "horizon-mod-api-gen",

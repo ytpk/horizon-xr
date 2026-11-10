@@ -215,6 +215,11 @@ impl On<'_> {
         &self,
         descriptor: &wgpu::RenderPipelineDescriptor<'_>,
     ) -> wgpu::RenderPipeline {
+        let mut cached = descriptor.clone();
+        cached.cache = cached
+            .cache
+            .or_else(|| super::pipeline_cache::get(self.device));
+        let descriptor = &cached;
         let key = format!("{descriptor:?}");
         let pipeline = self.reuse.render.get(key, self.generation, || {
             self.device.create_render_pipeline(descriptor)

@@ -9,6 +9,7 @@ import shutil
 import subprocess
 import tempfile
 import unittest
+from test_world_input_capture import method
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -18,8 +19,7 @@ ROOT = Path(__file__).resolve().parents[1]
 class RemoteMiningTests(unittest.TestCase):
     def test_break_timing_and_packets(self):
         source = (ROOT / "crates/horizon-client/src/game/remote.rs").read_text()
-        start = source.index("    pub(super) fn stop_remote_mining(")
-        end = source.index("    /// MultiPlayerGameMode.destroyBlock", start)
+        methods = "\n".join(method(source, name) for name in ("stop_remote_mining", "remote_mining"))
         fixture = r'''
 #![allow(dead_code)]
 #[derive(Clone, Copy)]
@@ -206,7 +206,7 @@ fn main() {
         assert!(game.remote.as_ref().unwrap().destroying.is_none());
     }
 }
-'''.replace("METHOD", source[start:end].replace("pub(super) fn", "fn"))
+'''.replace("METHOD", methods)
         with tempfile.TemporaryDirectory(prefix="remote-mining-") as directory:
             path = Path(directory)
             (path / "main.rs").write_text(fixture)

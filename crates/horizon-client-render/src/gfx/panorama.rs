@@ -412,7 +412,7 @@ fn cube_pipeline(
             })],
         }),
         multiview_mask: None,
-        cache: crate::gfx::pipeline_cache::get(&device),
+        cache: crate::gfx::pipeline_cache::get(device),
     })
 }
 

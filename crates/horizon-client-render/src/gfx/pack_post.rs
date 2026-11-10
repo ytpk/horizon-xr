@@ -1427,7 +1427,7 @@ impl Job {
                         targets: &j.targets,
                     }),
                     multiview_mask: None,
-                    cache: None,
+                    cache: crate::gfx::pipeline_cache::get(device),
                 });
                 let _ = slot.set(pipeline);
             }
@@ -1438,7 +1438,7 @@ impl Job {
                     module: &j.module,
                     entry_point: Some("main"),
                     compilation_options: Default::default(),
-                    cache: None,
+                    cache: crate::gfx::pipeline_cache::get(device),
                 });
                 let _ = slot.set(pipeline);
             }

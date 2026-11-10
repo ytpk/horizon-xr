@@ -4,7 +4,8 @@ from pathlib import Path
 
 from tools import parity_gaps as pg
 
-README = Path(__file__).resolve().parents[1] / "README.md"
+# The port keeps the upstream status tables in README.horizon.md.
+README = Path(__file__).resolve().parents[1] / "README.horizon.md"
 
 
 def lists(*opens):

@@ -420,6 +420,31 @@ impl SecretStore for FileStore {
     }
 }
 
+pub const SEALED_V2: &[u8] = b"HZSECv2\n";
+fn machine_id() -> Option<Vec<u8>> {
+    ["/etc/machine-id", "/var/lib/dbus/machine-id", "/etc/hostid"]
+        .iter()
+        .find_map(|path| std::fs::read(path).ok())
+        .map(|id| id.trim_ascii().to_vec())
+}
+
+/// The secrets file's key: a constant of the launcher's, this computer's identity and the install's
+/// own random secret (`account-secrets.key`, 0600). The tokens are never on disk in plain text,
+/// and the key is never something every local user can work out (the machine id is readable by
+/// all, and some systems have none): it takes the install secret, which only the player can read.
+/// The file's mode (0600) is still what keeps other users out; the secret means a copy of the file
+/// alone, or one left readable by others while the secret wasn't, can't be read either.
+fn file_key_v2(install_secret: &[u8; 32]) -> chacha20poly1305::Key {
+    use sha2::Digest;
+    let mut hash = sha2::Sha256::new();
+    hash.update(b"horizon-launcher account-secrets v2");
+    let id = machine_id().unwrap_or_default();
+    hash.update((id.len() as u64).to_le_bytes());
+    hash.update(&id);
+    hash.update(install_secret);
+    hash.finalize()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -464,6 +489,36 @@ mod tests {
     }
 
     #[test]
+    fn desktop_format_one_is_upgraded_without_losing_the_session() {
+        let dir = scratch("desktop-upgrade");
+        let path = dir.join("secrets.json");
+        std::fs::write(&path, seal(br#"{"uuid":"kept-session"}"#).unwrap()).unwrap();
+        let store = FileStore::new(path.clone());
+        assert_eq!(store.get("uuid").unwrap().as_deref(), Some("kept-session"));
+        assert!(std::fs::read(&path).unwrap().starts_with(SEALED_V2));
+        assert_eq!(std::fs::read(path.with_extension("key")).unwrap().len(), 32);
+        assert_eq!(
+            FileStore::new(path).get("uuid").unwrap().as_deref(),
+            Some("kept-session")
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn desktop_read_without_its_install_secret_never_creates_a_replacement() {
+        let dir = scratch("desktop-missing-key");
+        let path = dir.join("secrets.json");
+        let store = FileStore::new(path.clone());
+        store.set("uuid", "kept-session").unwrap();
+        let sealed = std::fs::read(&path).unwrap();
+        std::fs::remove_file(path.with_extension("key")).unwrap();
+        assert!(store.get("uuid").is_err());
+        assert!(!path.with_extension("key").exists());
+        assert_eq!(std::fs::read(&path).unwrap(), sealed);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn a_damaged_key_file_is_reported_and_not_replaced() {
         let dir = scratch("damaged");
         std::fs::write(dir.join("secrets.key"), b"short").unwrap();
@@ -472,29 +527,4 @@ mod tests {
         assert_eq!(std::fs::read(dir.join("secrets.key")).unwrap(), b"short");
         std::fs::remove_dir_all(dir).unwrap();
     }
-}
-
-pub const SEALED_V2: &[u8] = b"HZSECv2\n";
-fn machine_id() -> Option<Vec<u8>> {
-    ["/etc/machine-id", "/var/lib/dbus/machine-id", "/etc/hostid"]
-        .iter()
-        .find_map(|path| std::fs::read(path).ok())
-        .map(|id| id.trim_ascii().to_vec())
-}
-
-/// The secrets file's key: a constant of the launcher's, this computer's identity and the install's
-/// own random secret (`account-secrets.key`, 0600). The tokens are never on disk in plain text,
-/// and the key is never something every local user can work out (the machine id is readable by
-/// all, and some systems have none): it takes the install secret, which only the player can read.
-/// The file's mode (0600) is still what keeps other users out; the secret means a copy of the file
-/// alone, or one left readable by others while the secret wasn't, can't be read either.
-fn file_key_v2(install_secret: &[u8; 32]) -> chacha20poly1305::Key {
-    use sha2::Digest;
-    let mut hash = sha2::Sha256::new();
-    hash.update(b"horizon-launcher account-secrets v2");
-    let id = machine_id().unwrap_or_default();
-    hash.update((id.len() as u64).to_le_bytes());
-    hash.update(&id);
-    hash.update(install_secret);
-    hash.finalize()
 }

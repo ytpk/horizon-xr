@@ -46,24 +46,29 @@ class WorldInputCaptureTests(unittest.TestCase):
     @unittest.skipUnless(shutil.which("rustc"), "requires Rust")
     def test_vr_keeps_menu_input_during_configuration_and_prompts(self):
         source = (ROOT / "crates/horizon-client/src/game/pad_menu.rs").read_text(encoding="utf-8")
-        actual = method(source.replace("pub(super) ", ""), "pad_in_menu")
+        actual = "\n".join(method(source.replace("pub(super) ", ""), name)
+                           for name in ("key_focus_screen", "pad_in_menu"))
         fixture = """
 #[derive(Clone, Copy, PartialEq)]
 enum Screen { Playing, Chat }
-struct Game { title: Option<()>, screen: Screen, overlay: bool, pending: bool }
+struct Game { title: Option<()>, screen: Screen, overlay: bool, pending: bool, prompt: bool }
 impl Game {
     fn screen_over_playing(&self) -> bool { self.overlay }
     fn remote_input_pending(&self) -> bool { self.pending }
+    fn prompt_open(&self) -> bool { self.prompt }
 METHOD
 }
 fn main() {
-    let mut game = Game { title: None, screen: Screen::Playing, overlay: false, pending: true };
+    let mut game = Game { title: None, screen: Screen::Playing, overlay: false, pending: true, prompt: false };
     assert!(game.pad_in_menu(), "configuration/loading must retain VR pointer");
     game.pending = false;
     game.overlay = true;
     assert!(game.pad_in_menu(), "a server dialog over Playing must retain VR pointer");
     game.overlay = false;
     assert!(!game.pad_in_menu(), "gameplay may resume only after load and dialog finish");
+    game.prompt = true;
+    assert!(game.pad_in_menu(), "a modal prompt retains pointer input without a screen change");
+    game.prompt = false;
     game.screen = Screen::Chat;
     assert!(game.pad_in_menu());
 }

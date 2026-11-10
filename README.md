@@ -54,3 +54,5 @@ License summary: the Horizon code is MIT (`LICENSE`); `crates/horizon-visor` and
 Mojang прямо на шлем, в APK их нет. Сборка: `packaging/quest/`. Состояние и известные проблемы: `docs/visor-port.md`.
 Лицензии: Horizon MIT, Visor MPL-2.0, Vivecraft LGPL-3.0, OpenJDK GPLv2 + Classpath Exception; подробности в `THIRD_PARTY_NOTICES.md`.
 Не одобрено Mojang, Microsoft или Meta.
+
+Upstream update branch: [integration notes and headset checks](docs/quest-upstream-integration.md).

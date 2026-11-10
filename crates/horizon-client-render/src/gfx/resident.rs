@@ -419,7 +419,7 @@ impl<T> Resident<T> {
     /// culling's frames, where the GPU draws those. A column's box spans all of
     /// its sections either way, so both decide alike on those they share.
     pub fn walk(
-        &self,
+        &mut self,
         camera: DVec3,
         radius: i32,
         frustum: &impl Cull,

@@ -170,10 +170,10 @@ mod tests {
     #[test]
     fn built_in_stereo_shaders_validate() {
         for source in [
-            include_str!("../terrain.wgsl").to_owned(),
+            super::super::terrain_shader(),
             super::super::entity_shader(),
             super::super::static_entity_shader(),
-            include_str!("stars.wgsl").to_owned(),
+            include_str!("../hdr_light.wgsl").to_owned() + include_str!("stars.wgsl"),
         ] {
             let source = shader(&source);
             let module = naga::front::wgsl::parse_str(&source)
@@ -242,7 +242,7 @@ mod tests {
         let kept = reuse.stereo_for_test(&device);
         let module = kept.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: None,
-            source: wgpu::ShaderSource::Wgsl(include_str!("../terrain.wgsl").into()),
+            source: wgpu::ShaderSource::Wgsl(super::super::terrain_shader().into()),
         });
         let attributes = wgpu::vertex_attr_array![0 => Float32x4, 1 => Float32];
         let mono = kept.create_render_pipeline(&wgpu::RenderPipelineDescriptor {

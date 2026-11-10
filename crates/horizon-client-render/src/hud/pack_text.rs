@@ -224,7 +224,7 @@ impl PackText {
                 })],
             }),
             multiview_mask: None,
-            cache: crate::gfx::pipeline_cache::get(&device),
+            cache: crate::gfx::pipeline_cache::get(device),
         };
         let source = wgpu::ShaderSource::Naga(std::borrow::Cow::Owned(program.fragment.clone()));
         let pipeline = Pipeline::new(device, &desc, source, coverage);

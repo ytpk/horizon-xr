@@ -88,6 +88,7 @@ struct Game {
 }
 impl Game {
 fn stack_in(&self, slot: usize) -> Option<&ItemStack> { self.hotbar.as_ref().filter(|_| slot == 3) }
+fn offhand_item(&self) -> Option<&ItemStack> { self.offhand.as_ref() }
 METHODS
 }
 fn rocket() -> Option<ItemStack> { Some(ItemStack { item: "minecraft:firework_rocket".into() }) }

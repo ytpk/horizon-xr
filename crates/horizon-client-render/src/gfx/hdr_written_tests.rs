@@ -760,11 +760,12 @@ fn float_stars_keep_the_original_rgb_with_brightness_as_coverage() {
         source: wgpu::ShaderSource::Wgsl(source.into()),
     });
     for gain in [0.0, 1.0] {
-        let mut data = [0.0_f32; 32];
-        data[16..20].copy_from_slice(&[0.7, 0.8, 0.9, 0.35]);
-        data[20..24].copy_from_slice(&settings);
-        data[24..28].copy_from_slice(&shares);
-        data[31] = gain;
+        // The production Stars ABI has one matrix per eye, then colour/HDR values.
+        let mut data = [0.0_f32; 48];
+        data[32..36].copy_from_slice(&[0.7, 0.8, 0.9, 0.35]);
+        data[36..40].copy_from_slice(&settings);
+        data[40..44].copy_from_slice(&shares);
+        data[47] = gain;
         let uniform = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: None,
             contents: bytemuck::cast_slice(&data),

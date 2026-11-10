@@ -12596,7 +12596,7 @@ fn before_loading(options: &Options, vanilla_root: &std::path::Path) -> Result<S
     // official server in their list (servers.dat in the game folder, the working directory). Not
     // for a server, a benchmark, a run that quits by itself, a harness's fixture or a run that
     // horizon-ctl drives: those start in a source checkout and wrote the list there.
-    if !options.offscreen && !synchronous_startup(&options) {
+    if !options.offscreen && !synchronous_startup(options) {
         let version = horizon_client::telemetry::version();
         let game_dir = horizon_client::logging::player_dir();
         horizon_hooks::engine::started(&horizon_hooks::Started::new(&version, &game_dir));
@@ -12628,7 +12628,7 @@ fn before_loading(options: &Options, vanilla_root: &std::path::Path) -> Result<S
         narrator::start(&early_settings);
     }
     // A game window's hooks (Discord's presence): never for a server.
-    activity::client_started(&options);
+    activity::client_started(options);
     // Snapshots of derived tables live in the game folder, never beside the
     // shared resources.
     Behaviours::set_cache_dir(std::env::current_dir()?.join(".horizon-cache"));

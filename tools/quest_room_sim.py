@@ -22,6 +22,11 @@ import sys
 import tempfile
 import zlib
 
+try:
+    from . import lab
+except ImportError:
+    import lab
+
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 RESOURCES = os.path.join(ROOT, ".local/horizon-client/26.3")
 
@@ -103,14 +108,12 @@ class Sim:
         scratch = tempfile.mkdtemp(prefix="quest-room-sim-")
         dump = os.path.join(self.keep or scratch, name)
         os.makedirs(dump, exist_ok=True)
-        full = dict(os.environ)
-        full.update(
+        full = lab.game_env(
             HORIZON_HOME=scratch + "/h",
             HORIZON_LAUNCHER_HOME=scratch + "/l",
             XDG_DATA_HOME=scratch + "/d",
             XDG_CONFIG_HOME=scratch + "/c",
             HORIZON_LAUNCHER_NO_SELF_UPDATE="1",
-            HORIZON_NO_AUDIO="1",
             HORIZON_LAUNCHER_TRASH=scratch + "/t",
             HORIZON_LAUNCHER_CLIPBOARD=scratch + "/cl",
             HORIZON_LAUNCHER_DESKTOP=scratch + "/de",

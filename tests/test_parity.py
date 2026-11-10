@@ -2,7 +2,8 @@ import re
 import unittest
 from pathlib import Path
 
-README = Path(__file__).resolve().parents[1] / 'README.md'
+# The port keeps the upstream status tables in README.horizon.md.
+README = Path(__file__).resolve().parents[1] / 'README.horizon.md'
 
 
 class ParityTableTests(unittest.TestCase):
