@@ -9,7 +9,7 @@
 //! is by kind (mods, modpacks, resource packs, shader packs, data packs), each with its sources,
 //! so the tabs are the kinds and the sources are a switch under the search: Horizon's registry
 //! or Modrinth, CurseForge beside them as coming soon, on the kinds both serve (`switches`):
-//! shader packs are Horizon's registry's only, data packs Modrinth's only, and a Java
+//! shader packs are Horizon's registry's only, and a Java
 //! instance's files always Modrinth's. Modrinth's Java mods are offered to a Horizon instance
 //! too, each marked Works, Partly or Doesn't run in Horizon. Not in the mockup, kept in its
 //! patterns: Show everything, the filters, which instance or world installs go to (under the
@@ -79,15 +79,34 @@ impl Launcher {
                 })),
             );
         }
-        let header = div()
-            .flex()
-            .items_end()
-            .justify_between()
-            .gap(px(20.))
-            .pt(px(40. - crate::glass::CONTENT_INSET))
-            .mb(px(28.))
-            .child(head.min_w_0())
-            .child(tabs);
+        let wide = self.window_width >= crate::glass_home::SIDE_BY_SIDE;
+        let header = if wide {
+            div()
+                .flex()
+                .flex_row()
+                .items_end()
+                .justify_between()
+                .gap(px(20.))
+                .pt(px(40. - crate::glass::CONTENT_INSET))
+                .mb(px(28.))
+                .child(head.min_w_0())
+                .child(tabs)
+        } else {
+            div()
+                .flex()
+                .flex_col()
+                .items_start()
+                .gap(px(16.))
+                .pt(px(40. - crate::glass::CONTENT_INSET))
+                .mb(px(28.))
+                .child(head.w_full().min_w_0())
+                .child(
+                    tabs.id("mods-kind-tabs")
+                        .w_full()
+                        .overflow_x_scroll()
+                        .on_scroll(|_, _, cx| cx.stop_propagation()),
+                )
+        };
 
         // Installation can pause for consent in either view. Keep the notice before
         // the project or results, rather than below a potentially long detail card.
@@ -110,6 +129,11 @@ impl Launcher {
         let java = self.mods.java_for(self.mods.kind).is_some();
         let registry = self.mods.source == SourceId::Horizon && !java;
         let everything = self.mods.everything;
+        let works_on = self.mods.browse.filters.works_on;
+        let instance_name = self
+            .selected_instance()
+            .map(|i| i.name.clone())
+            .unwrap_or_default();
         let extras = div()
             .flex()
             .flex_col()
@@ -139,10 +163,37 @@ impl Launcher {
                         })),
                 )
             })
+            .when(registry, |d| {
+                d.child(
+                    div()
+                        .id("mods-works-on")
+                        .flex()
+                        .items_center()
+                        .gap(px(10.))
+                        .cursor_pointer()
+                        .child(ui::toggle(
+                            "mods-works-on-switch",
+                            works_on,
+                            ui::look().accent,
+                            ui::look().on_accent,
+                            &t,
+                        ))
+                        .child(ui::text(13., FontWeight::NORMAL, 0.7).child(trf(
+                            "Only what works on {instance}",
+                            &[("instance", &instance_name)],
+                        )))
+                        .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                            let filters = &mut this.mods.browse.filters;
+                            filters.works_on = !filters.works_on;
+                            this.mods_search(0);
+                            cx.notify();
+                        })),
+                )
+            })
             .when(switches(self.mods.kind) && !java, |d| {
                 d.child(self.glass_source_switch(cx))
             })
-            .children((!registry).then(|| self.mods_filters(cx)))
+            .child(self.mods_filters(cx))
             .children(self.mods_target_line(cx));
         // The search, and the sort on its right.
         let search = div()
@@ -166,15 +217,15 @@ impl Launcher {
         let detail = self.glass_mod_detail(&instance, cx).map(|d| {
             let down = self.mods_sticky.offset(&self.content_scroll.handle);
             d.flex_none()
-                .w(px(DETAIL))
-                .top(px(down))
+                .when(wide, |d| d.w(px(DETAIL)).top(px(down)))
+                .when(!wide, |d| d.w_full())
                 .child(self.mods_sticky.panel())
         });
         let cards = div()
             .relative()
             .flex()
-            .items_start()
-            .gap(px(10.))
+            .when(wide, |d| d.flex_row().items_start().gap(px(10.)))
+            .when(!wide, |d| d.flex_col().gap(px(10.)))
             .child(self.mods_sticky.row(&self.content_scroll.handle))
             .child(list)
             .children(detail);
@@ -370,16 +421,62 @@ impl Launcher {
                 .child(line);
         }
         let picked = self.mods_picked().map(|p| p.id.clone());
-        let mut list = div().flex().flex_col();
-        for i in 0..self.mods.results.len() {
+        // Registry pages add up behind More: only the rows near the view are built (`cull`).
+        let (rows, scroll) = (
+            self.mods.results_list.clone(),
+            self.content_scroll.handle.clone(),
+        );
+        let total = self.mods.results.len();
+        let row = |i: usize| {
             let p = self.mods.results[i].clone();
             let icon = self.mods_icon(&p, 40.);
             let m = &self.mods;
             let installed = m.entry(&p).is_some();
             let busy = m.busy.as_ref().is_some_and(|b| b.0 == p.id);
+            let checking = m.checking(&p);
+            let can_install =
+                !installed && !checking && m.busy.is_none() && m.support(&p).installable();
+            let action: AnyElement = if installed || busy || checking || m.support(&p).installable()
+            {
+                let label = if installed {
+                    tr("Installed")
+                } else if checking {
+                    tr("Checking…")
+                } else if busy {
+                    tr("Installing…")
+                } else if p.kind == PackKind::Modpack {
+                    tr("Import as an instance")
+                } else {
+                    tr("Install")
+                };
+                let known = p.clone();
+                ui::quiet(
+                    SharedString::from(format!("mods-row-install-{}", p.id)),
+                    label,
+                    32.,
+                    &t,
+                )
+                .flex_none()
+                .when(!can_install, |d| d.opacity(0.5).cursor_default())
+                .when(can_install, |d| {
+                    d.on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                        cx.stop_propagation();
+                        this.mods_install(known.source, known.id.clone(), Some(known.clone()));
+                        cx.notify();
+                    }))
+                })
+                .into_any_element()
+            } else {
+                div().flex_none().w(px(20.)).into_any_element()
+            };
             // The registry's rows end with downloads, the others' with how they run (`compat`).
             let right = if p.source == SourceId::Horizon {
-                ui::text(13., FontWeight::NORMAL, 0.5).child(count(p.downloads).to_uppercase())
+                ui::text(13., FontWeight::NORMAL, 0.5)
+                    .flex()
+                    .items_center()
+                    .gap(px(12.))
+                    .children(super::mods_page::github_stars(&p.id, &t))
+                    .child(count(p.downloads).to_uppercase())
             } else {
                 let support = m.support(&p);
                 let tone = match support {
@@ -392,70 +489,76 @@ impl Launcher {
                     .child(tr(support.label()))
             };
             let id = p.id.clone();
-            list = list.child(
-                ui::row(
-                    SharedString::from(format!("mods-row-{}", p.id)),
-                    picked.as_deref() == Some(p.id.as_str()),
-                    12.,
-                    &t,
-                )
-                .px(px(12.))
-                .py(px(10.))
-                .child(
-                    div()
-                        .flex_none()
-                        .size(px(40.))
-                        .rounded(px(8.))
-                        .overflow_hidden()
-                        .child(icon),
-                )
-                .child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .flex_1()
-                        .min_w_0()
-                        .child(
-                            div()
-                                .flex()
-                                .items_baseline()
-                                .gap(px(8.))
-                                .min_w_0()
-                                .child(
-                                    ui::text(14., FontWeight::MEDIUM, ink::FULL)
-                                        .truncate()
-                                        .child(p.title.clone()),
-                                )
-                                .child(ui::text(13., FontWeight::NORMAL, 0.5).truncate().child(
-                                    match p.kind {
-                                        PackKind::Mod | PackKind::Shader => p.author.clone(),
-                                        _ => tr(kind_name(p.kind)).to_string(),
-                                    },
-                                )),
-                        )
-                        .child(
-                            ui::text(13., FontWeight::NORMAL, 0.6)
-                                .truncate()
-                                .child(p.summary.clone()),
-                        ),
-                )
-                .child(right.flex_none())
-                .child(
-                    div()
-                        .flex()
-                        .flex_none()
-                        .justify_center()
-                        .w(px(20.))
-                        .when(installed, |d| d.child(ui::icon("tick-02", 17., ui::live())))
-                        .when(busy && !installed, |d| d.child(ui::dot(ui::Tone::Busy))),
-                )
-                .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                    this.mods.picked = Some(id.clone());
-                    this.mods.confirm_remove = None;
-                    cx.notify();
-                })),
-            );
-        }
+            ui::row(
+                SharedString::from(format!("mods-row-{}", p.id)),
+                picked.as_deref() == Some(p.id.as_str()),
+                12.,
+                &t,
+            )
+            .px(px(12.))
+            .py(px(10.))
+            .child(
+                div()
+                    .flex_none()
+                    .size(px(40.))
+                    .rounded(px(8.))
+                    .overflow_hidden()
+                    .child(icon),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .flex_1()
+                    .min_w_0()
+                    .child(
+                        div()
+                            .flex()
+                            .items_baseline()
+                            .gap(px(8.))
+                            .min_w_0()
+                            .child(
+                                ui::text(14., FontWeight::MEDIUM, ink::FULL)
+                                    .truncate()
+                                    .child(p.title.clone()),
+                            )
+                            .child(ui::text(13., FontWeight::NORMAL, 0.5).truncate().child(
+                                match p.kind {
+                                    PackKind::Mod | PackKind::Shader => p.author.clone(),
+                                    _ => tr(kind_name(p.kind)).to_string(),
+                                },
+                            )),
+                    )
+                    .child(
+                        ui::text(13., FontWeight::NORMAL, 0.6)
+                            .truncate()
+                            .child(p.summary.clone()),
+                    )
+                    .children(
+                        m.works
+                            .get(&p.id)
+                            .filter(|_| p.source == SourceId::Horizon)
+                            .map(|(works, line)| {
+                                ui::text(12., FontWeight::NORMAL, ink::FULL)
+                                    .truncate()
+                                    .text_color(if *works { ui::live() } else { white(0.4) })
+                                    .child(line.clone())
+                            }),
+                    ),
+            )
+            .child(right.flex_none())
+            .child(action)
+            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                this.mods.picked = Some(id.clone());
+                this.mods.confirm_remove = None;
+                cx.notify();
+            }))
+        };
+        let mut list =
+            div()
+                .flex()
+                .flex_col()
+                .child(rows.column(&scroll, total, 0., |_| false, row));
         if self.mods.more {
             let searching = self.mods.searching;
             let offset = self.mods.results.len();
@@ -512,7 +615,9 @@ impl Launcher {
         if !p.author.is_empty() {
             by.push(trf("by {author}", &[("author", &p.author)]));
         }
-        by.push(trf("from {source}", &[("source", p.source.label())]));
+        if let Some(source) = p.source.shown_for(&p.id) {
+            by.push(trf("from {source}", &[("source", source)]));
+        }
         if !p.license.is_empty() {
             by.push(p.license.clone());
         }

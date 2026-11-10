@@ -16,8 +16,8 @@ struct Globals {
 // `place`): the first pass's first draw, both passes' draw counts (the
 // second's in the high 16 bits), the second pass's first draw. No draws:
 // phase 1 drew it, and the test only tells whether it is still in sight.
-// Then its box's lowest and highest corner around the origin (a section's:
-// -1 and 17, `SECTION_BOX`).
+// Then its box's lowest and highest corner around the origin: a section's
+// padded mesh bounds, or -1 and 17 (`SECTION_BOX`) without mesh bounds.
 struct Test {
     data: vec4<u32>,
     low: vec4<f32>,
@@ -53,8 +53,8 @@ fn corner(origin: vec3<f32>, low: vec3<f32>, high: vec3<f32>, c: u32) -> vec3<f3
     );
 }
 
-// Each tested section's or far tile's box, grown by a block (block models
-// reach one block out of their cell), drawn after phase 1 against its depth
+// Each tested section's or far tile's geometry box, padded by a block,
+// drawn after phase 1 against its depth
 // with back faces culled: a front face fragment that passes the depth test
 // is the box's nearest point on that pixel in front of phase 1's depth, so
 // the section may show there. A box failing everywhere would have every
@@ -114,8 +114,10 @@ fn see(t: u32) {
     }
 }
 
-// Phase 1's depth, where the test runs in the shader (gfx/cull.rs).
-@group(1) @binding(0) var depth: texture_depth_2d;
+// Phase 1's depth, where the test runs in the shader (gfx/cull.rs). A depth
+// view bound as an unfilterable float: naga's GLSL backend cannot `textureLoad`
+// a depth texture, and the texel is the same value.
+@group(1) @binding(0) var depth: texture_2d<f32>;
 
 // The world pass's reversed depth test, greater or equal passing, made here:
 // where it cannot be forced before a shader that writes storage, a fragment
@@ -123,7 +125,7 @@ fn see(t: u32) {
 // runs only for the fragments that pass it.
 @fragment
 fn fs_box(in: Box) {
-    if in.position.z >= textureLoad(depth, vec2<u32>(in.position.xy), 0) {
+    if in.position.z >= textureLoad(depth, vec2<u32>(in.position.xy), 0).r {
         see(in.test);
     }
 }

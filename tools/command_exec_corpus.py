@@ -11,6 +11,10 @@ depend on world generation.
 """
 
 
+# This fixture establishes its own live clock before spawning actors.
+ISOLATED_WOLF_ANGER = frozenset({'wolf anger live writes'})
+
+
 def cmd(command, record=True, expect_result=None, comparison=None):
     op = {'op': 'cmd', 'cmd': command}
     if not record:
@@ -25,6 +29,12 @@ def cmd(command, record=True, expect_result=None, comparison=None):
 def setup(*commands):
     return [cmd(c, False) for c in commands]
 
+
+def weather_predicate_cases():
+    return [('any', None, None), ('rain', True, None), ('dry', False, None),
+            ('thunder', None, True), ('quiet', None, False),
+            ('rain_thunder', True, True), ('rain_quiet', True, False),
+            ('dry_thunder', False, True), ('dry_quiet', False, False)]
 
 def inline_predicate_constants():
     always = {'type': 'minecraft:all_of', 'terms': []}
@@ -43,10 +53,47 @@ def inline_predicate_constants():
 
 def predicate_selector_fixtures(group_names):
     fixtures = {}
+    if 'mob custom name components' in group_names:
+        try:
+            from .mob_name_predicate_corpus import predicates as name_predicates
+        except ImportError:
+            from mob_name_predicate_corpus import predicates as name_predicates
+        fixtures.update(name_predicates())
+    if 'mob effect predicate view' in group_names:
+        try:
+            from .mob_effect_predicate_corpus import predicates as effect_predicates
+        except ImportError:
+            from mob_effect_predicate_corpus import predicates as effect_predicates
+        fixtures.update(effect_predicates())
+    try:
+        from . import player_food_predicate_corpus as player_food
+    except ImportError:
+        import player_food_predicate_corpus as player_food
+    if player_food.GROUP in group_names:
+        fixtures.update(player_food.predicates())
+    if 'named smoke predicates' in group_names:
+        always = {'type': 'minecraft:all_of', 'terms': []}
+        fixtures['command_smoke:always'] = always
+        fixtures['command_smoke:never'] = {'type': 'minecraft:inverted', 'term': always}
+        for name, smokey in [('smokey', True), ('clear', False)]:
+            fixtures['command_smoke:' + name] = {
+                'type': 'minecraft:location_check', 'predicate': {'smokey': smokey}}
     if 'selector missing predicates' in group_names:
         sheep = {'type': 'minecraft:entity_properties', 'entity': 'this',
                  'predicate': {'minecraft:entity_type': 'minecraft:sheep'}}
         fixtures.update({'h124_selector:sheep': sheep, 'minecraft:h124_selector_sheep': sheep})
+    if 'named weather predicates' in group_names:
+        for name, rain, thunder in weather_predicate_cases():
+            condition = {'type': 'minecraft:weather_check'}
+            if rain is not None:
+                condition['raining'] = rain
+            if thunder is not None:
+                condition['thundering'] = thunder
+            fixtures['command_weather:' + name] = condition
+        always = {'type': 'minecraft:all_of', 'terms': []}
+        fixtures['command_weather:always'] = always
+        fixtures['command_weather:never'] = {'type': 'minecraft:inverted', 'term': always}
+
     if 'inline execute predicates' in group_names:
         fixtures.update({f'h286_inline:{name}': value
                          for name, value, _ in inline_predicate_constants()})
@@ -54,6 +101,66 @@ def predicate_selector_fixtures(group_names):
 
 
 BASE = (0, 200, 0)
+
+
+def named_smoke_predicates():
+    """CampfireBlock.isSmokeyPos through named execute predicates, without ticks.
+
+    The two slabs distinguish a blocked fire from the immediate-below-blocker
+    exception. Unlit, absent and soul fires guard state and tag handling.
+    """
+    out = []
+
+    def check(command, result=1):
+        out.append(cmd(command, expect_result=result))
+
+    check('/tick freeze')
+    check('/execute if dimension minecraft:overworld')
+    out.extend(setup('/forceload remove -16 -16 15 15'))
+    check('/forceload add -16 -16 15 15', 4)
+    out.append({'op': 'settle'})
+    for x in [-16, 0]:
+        for z in [-16, 0]:
+            check(f'/execute if loaded {x} 100 {z}')
+    check('/scoreboard objectives add smoke_cmd dummy')
+    out.extend(setup('/execute store result score #start smoke_cmd run time query gametime'))
+    # Seed the region so clearing it has a positive, deterministic acknowledgement.
+    check('/fill -16 94 -16 15 120 15 barrier', 27648)
+    check('/fill -16 94 -16 15 120 15 air', 27648)
+    check('/fill -16 93 -16 15 93 15 stone', 1024)
+    for x, kind, lit in [(0, 'campfire', 'true'), (3, 'campfire', 'true'),
+                         (6, 'campfire', 'false'), (9, 'campfire', 'true'),
+                         (-3, 'soul_campfire', 'true')]:
+        check(f'/setblock {x} 96 0 {kind}[lit={lit}]')
+        check(f'/execute if block {x} 96 0 {kind}[lit={lit}]')
+    for x, y in [(3, 98), (9, 97)]:
+        check(f'/setblock {x} {y} 0 stone_slab[type=bottom]')
+        check(f'/execute if block {x} {y} 0 stone_slab[type=bottom]')
+    for x, y in [(0, 99), (0, 97), (3, 99), (3, 97), (6, 99),
+                 (9, 99), (9, 98), (-3, 99), (12, 96), (12, 99)]:
+        check(f'/execute if block {x} {y} 0 air')
+    check('/execute if predicate command_smoke:always')
+    check('/execute unless predicate command_smoke:never')
+    # Each sign has its own exact feedback and independent result/success reads.
+    for x, smokey in [(0, True), (3, False), (6, False), (9, True),
+                      (12, False), (-3, True)]:
+        for predicate, passes in [('smokey', smokey), ('clear', not smokey)]:
+            out.extend(setup('/scoreboard players set #r smoke_cmd 31',
+                             '/scoreboard players set #s smoke_cmd 17'))
+            check('/scoreboard players get #r smoke_cmd', 31)
+            check('/scoreboard players get #s smoke_cmd', 17)
+            out.append(cmd('/execute store result score #r smoke_cmd '
+                           'store success score #s smoke_cmd run execute '
+                           f'positioned {x + 0.5} 100 0.5 if predicate command_smoke:{predicate}'))
+            check('/scoreboard players get #r smoke_cmd', int(passes))
+            check('/scoreboard players get #s smoke_cmd', int(passes))
+    out.append(cmd('/execute if predicate command_smoke:missing'))
+    out.extend(setup('/execute store result score #clock smoke_cmd run time query gametime'))
+    check('/scoreboard players operation #clock smoke_cmd -= #start smoke_cmd', 0)
+    out.extend(setup('/fill -16 94 -16 15 120 15 air',
+                     '/scoreboard objectives remove smoke_cmd',
+                     '/forceload remove -16 -16 15 15', '/tick unfreeze'))
+    return out
 
 
 def group_setup():
@@ -126,6 +233,76 @@ def allay_pocket_inventory():
             else:
                 ops.append(cmd(f'/execute unless data entity {target} equipment.mainhand', expect_result=1))
     return ops
+
+
+def named_weather_predicates():
+    out = []
+
+    def check(command, result=1):
+        out.append(cmd(command, expect_result=result))
+
+    check('/tick freeze')
+    check('/gamerule minecraft:advance_weather', 0)
+    check('/execute if dimension minecraft:overworld')
+    out.extend(setup('/forceload remove 0 0'))
+    check('/forceload add 0 0')
+    out.append({'op': 'settle'})
+    check('/execute if loaded 8 200 8')
+    check('/weather clear 100t', 100)
+    check('/scoreboard objectives add weather_cmd dummy')
+    out.extend(setup('/execute store result score #start weather_cmd run time query gametime'))
+
+    def clock(ticks):
+        out.extend(setup('/execute store result score #clock weather_cmd run time query gametime'))
+        check('/scoreboard players operation #clock weather_cmd -= #start weather_cmd', ticks)
+
+    def snapshot(name, ticks, rain, thunder, saved):
+        out.append({'op': 'weather_state', 'label': name, 'expect_state': saved})
+        clock(ticks)
+        expected = [(name, (r is None or r == rain) and (t is None or t == thunder))
+                    for name, r, t in weather_predicate_cases()]
+        for predicate, passes in expected + [('always', True), ('never', False)]:
+            out.extend(setup('/scoreboard players set #r weather_cmd 31',
+                             '/scoreboard players set #s weather_cmd 17'))
+            check('/scoreboard players get #r weather_cmd', 31)
+            check('/scoreboard players get #s weather_cmd', 17)
+            out.append(cmd('/execute store result score #r weather_cmd store success score #s weather_cmd '
+                           'run execute if predicate command_weather:' + predicate))
+            check('/scoreboard players get #r weather_cmd', int(passes))
+            check('/scoreboard players get #s weather_cmd', int(passes))
+
+    dry = [0, 0, 100, 0, 0]
+    storm = [1, 1, 0, 100, 100]
+    snapshot('clear_initial', 0, False, False, dry)
+    out.append(cmd('/execute if predicate command_weather:missing'))
+    check('/weather thunder 100t', 100)
+    snapshot('storm_0', 0, False, False, storm)
+    # Fresh Java 26.3 measurements: both levels rise from zero. Thunder
+    # uses their product, rather than the saved flags or raw thunder level.
+    elapsed = 0
+    for at, rain, thunder in [(19, False, False), (20, True, False), (21, True, False),
+                              (90, True, False), (91, True, False), (94, True, False),
+                              (95, True, True), (100, True, True)]:
+        n = at - elapsed
+        check(f'/tick step {n}')
+        out.append({'op': 'tick', 'n': n})
+        snapshot(f'storm_{at}', at, rain, thunder, storm)
+        elapsed = at
+    check('/weather clear 100t', 100)
+    snapshot('fade_0', 100, True, True, dry)
+    elapsed = 0
+    for at, rain, thunder in [(1, True, True), (5, True, True), (6, True, False),
+                              (79, True, False), (80, True, False), (81, False, False),
+                              (100, False, False)]:
+        n = at - elapsed
+        check(f'/tick step {n}')
+        out.append({'op': 'tick', 'n': n})
+        snapshot(f'fade_{at}', 100 + at, rain, thunder, dry)
+        elapsed = at
+    clock(200)
+    out.extend(setup('/scoreboard objectives remove weather_cmd', '/forceload remove 0 0',
+                     '/tick unfreeze'))
+    return out
 
 
 def client_commands():
@@ -484,14 +661,27 @@ def entities():
         cmd('/tp @e[type=minecraft:tnt] 4.5 215 8.5'),
         cmd('/kill @e[type=minecraft:tnt]'),
         cmd('/execute if entity @e[type=minecraft:tnt]'),
+        # A cushion is an entity too (BlockAttachedEntity): found, tagged,
+        # read and killed like a painting, with no drop.
+        cmd('/setblock 4 209 12 minecraft:oak_slab'),
+        cmd('/summon minecraft:cushion 4.5 209.5 12.5 {Tags:["k"]}'),
+        cmd('/execute if entity @e[type=minecraft:cushion]'),
+        cmd('/tag @e[type=minecraft:cushion,limit=1] list'),
+        cmd('/execute if entity @e[type=minecraft:cushion,tag=k]'),
+        cmd('/data get entity @e[type=minecraft:cushion,limit=1] color'),
+        cmd('/kill @e[type=minecraft:cushion]'),
+        cmd('/execute if entity @e[type=minecraft:cushion]'),
+        cmd('/execute if entity @e[type=minecraft:item]'),
         # So is a falling block, named after its block (`getTypeName`).
         cmd('/summon minecraft:falling_block 4.5 210 8.5 {BlockState:{Name:"minecraft:sand"},NoGravity:1b,Tags:["f"]}'),
         cmd('/execute if entity @e[type=minecraft:falling_block,tag=f]'),
-        cmd('/tag @e[type=minecraft:falling_block,limit=1] list'),
-        cmd('/data get entity @e[type=minecraft:falling_block,limit=1] BlockState.Name'),
-        cmd('/tp @e[type=minecraft:falling_block] 4.5 215 8.5'),
-        cmd('/kill @e[type=minecraft:falling_block]'),
-        cmd('/execute if entity @e[type=minecraft:falling_block]'),
+        # Near the fixture only: terrain the Rust side ticks and the oracle never loads has its own
+        # falling gravel (see piglin_pickups).
+        cmd('/tag @e[type=minecraft:falling_block,x=4.5,y=212,z=8.5,distance=..16,limit=1] list'),
+        cmd('/data get entity @e[type=minecraft:falling_block,x=4.5,y=212,z=8.5,distance=..16,limit=1] BlockState.Name'),
+        cmd('/tp @e[type=minecraft:falling_block,x=4.5,y=212,z=8.5,distance=..16] 4.5 215 8.5'),
+        cmd('/kill @e[type=minecraft:falling_block,x=4.5,y=212,z=8.5,distance=..16]'),
+        cmd('/execute if entity @e[type=minecraft:falling_block,x=4.5,y=212,z=8.5,distance=..16]'),
         # A firework rocket, with what `addAdditionalSaveData` writes.
         cmd('/summon minecraft:firework_rocket 4.5 210 8.5 {LifeTime:2000,NoGravity:1b,Tags:["r"]}'),
         cmd('/execute if entity @e[type=minecraft:firework_rocket,tag=r]'),
@@ -759,6 +949,376 @@ def item_command_damage():
     return ops + setup('/kill @e[tag=item_hurt_actor]', '/scoreboard objectives remove item_hurt', '/tick unfreeze')
 
 
+def minecart_numeric_fields():
+    """AbstractMinecart / MinecartTNT / MinecartFurnace / MinecartHopper.readAdditionalSaveData read
+    their fields through ValueInput's numeric getters, which take any NumericTag: getIntOr
+    (fuse, DisplayOffset), getShortOr (Fuel: the low 16 bits), getDoubleOr (PushX, PushZ) and
+    getBooleanOr (FlippedRotation, HasTicked, Enabled: byteValue() != 0). Frozen, so nothing ticks."""
+    ops = setup('/forceload add 0 0 15 15', '/tick freeze')
+    ops += [{'op': 'settle'}]
+    cases = (
+        ('tnt_minecart', '{fuse:20L}', 'fuse'),
+        ('tnt_minecart', '{fuse:20.7f}', 'fuse'),
+        ('tnt_minecart', '{fuse:-2.5d}', 'fuse'),
+        ('tnt_minecart', '{fuse:4294967316L}', 'fuse'),
+        ('tnt_minecart', '{fuse:7b}', 'fuse'),
+        ('minecart', '{DisplayOffset:5L,DisplayState:{Name:"minecraft:stone"}}', 'DisplayOffset'),
+        ('minecart', '{DisplayOffset:3.9f,DisplayState:{Name:"minecraft:stone"}}', 'DisplayOffset'),
+        ('furnace_minecart', '{Fuel:70000}', 'Fuel'),
+        ('furnace_minecart', '{Fuel:300L}', 'Fuel'),
+        ('furnace_minecart', '{Fuel:2.5f}', 'Fuel'),
+        ('furnace_minecart', '{Fuel:100s,PushX:1,PushZ:0.5f}', 'PushX 1000'),
+        ('furnace_minecart', '{Fuel:100s,PushX:1,PushZ:0.5f}', 'PushZ 1000'),
+        ('hopper_minecart', '{Enabled:256}', 'Enabled'),
+        ('hopper_minecart', '{Enabled:0.5f}', 'Enabled'),
+        ('hopper_minecart', '{Enabled:2L}', 'Enabled'),
+        ('minecart', '{FlippedRotation:256}', 'FlippedRotation'),
+        ('minecart', '{FlippedRotation:1.5d}', 'FlippedRotation'),
+        ('minecart', '{HasTicked:2L}', 'HasTicked'),
+    )
+    for i, (kind, nbt, path) in enumerate(cases):
+        tag = f'cart_num_{i}'
+        extra = nbt[1:-1]
+        ops += setup(f'/summon {kind} {2 + (i % 6) * 2}.5 200 {2 + (i // 6) * 2}.5 '
+                     f'{{Tags:["{tag}"],NoGravity:1b,{extra}}}')
+        ops += [cmd(f'/data get entity @e[tag={tag},limit=1] {path}')]
+    return ops + setup(*[f'/kill @e[tag=cart_num_{i}]' for i in range(len(cases))],
+                       '/tick unfreeze', '/forceload remove 0 0 15 15')
+
+
+def rocket_data_merge():
+    """#13083: /data merge and /data modify on a firework rocket run Entity.load over it
+    (FireworkRocketEntity.readAdditionalSaveData: Life, LifeTime, FireworksItem, ShotAtAngle;
+    Entity.load: Motion, Rotation, OnGround, Tags; Projectile: HasBeenShot, 0b until its first tick
+    posts the shot). Frozen, then ticks: an angled rocket keeps its motion, and its Rotation eases
+    toward it (Projectile.updateRotation)."""
+    sel = '@e[tag=rocket_merge,limit=1]'
+    ops = setup('/forceload add 384 384', '/tick freeze',
+                '/summon firework_rocket 384.5 230 384.5 {LifeTime:200,Tags:["rocket_merge"]}')
+    ops += [{'op': 'settle', 'required_chunks': [[24, 24]]}]
+    ops += [cmd(f'/data get entity {sel} HasBeenShot'),
+            cmd(f'/data merge entity {sel} {{LifeTime:77,Life:5,ShotAtAngle:1b,Motion:[0.1d,0.2d,0.3d],OnGround:1b,'
+                'Rotation:[90f,10f]}'),
+            cmd(f'/data modify entity {sel} Life set value 9'),
+            cmd(f'/data merge entity {sel} {{FireworksItem:{{id:"minecraft:firework_rocket",count:3,'
+                'components:{"minecraft:fireworks":{flight_duration:2b}}}}'),
+            cmd(f'/data merge entity {sel} {{Tags:["rocket_merge","rocket_merged"]}}')]
+    for key in ('LifeTime', 'Life', 'ShotAtAngle', 'Motion', 'Rotation', 'OnGround', 'FireworksItem', 'Tags'):
+        ops.append(cmd(f'/data get entity {sel} {key}'))
+    ops += setup('/tick unfreeze')
+    ops.append({'op': 'tick', 'n': 1})
+    ops += [cmd(f'/data get entity {sel} Pos'), cmd(f'/data get entity {sel} Life'),
+            cmd(f'/data get entity {sel} HasBeenShot'), cmd(f'/data get entity {sel} Rotation')]
+    # Projectile.updateRotation eases a fifth of the way toward the motion each tick.
+    for _ in range(2):
+        ops.append({'op': 'tick', 'n': 1})
+        ops.append(cmd(f'/data get entity {sel} Rotation'))
+    return ops + setup('/kill @e[type=minecraft:firework_rocket]', '/forceload remove 384 384')
+
+
+def teleport_lands():
+    """TeleportCommand.performTeleport after a successful teleportTo: unless the target is a living
+    entity that is fall-flying, its vertical motion is zeroed (multiply(1, 0, 1)) and it is on the
+    ground (setOnGround(true)). Frozen, so nothing moves before the read; to a position and to an
+    entity."""
+    ops = setup('/forceload add 320 320 351 351')
+    ops += [{'op': 'settle', 'required_chunks': [[x, z] for x in (20, 21) for z in (20, 21)]}]
+    ops += setup('/tick freeze', '/summon marker 340.5 230 340.5 {Tags:["tp_dest"]}')
+    motion = 'Motion:[0.25d,0.5d,-0.125d],OnGround:0b,NoGravity:1b'
+    cases = (
+        ('zombie', f'{{NoAI:1b,{motion}}}'),
+        ('zombie', f'{{NoAI:1b,FallFlying:1b,{motion}}}'),
+        ('armor_stand', f'{{{motion}}}'),
+        ('item', f'{{Item:{{id:"minecraft:stone",count:1}},PickupDelay:32767,Age:-32768,{motion}}}'),
+        ('experience_orb', f'{{Value:3,{motion}}}'),
+        ('oak_boat', f'{{{motion}}}'),
+        ('minecart', f'{{{motion}}}'),
+        ('tnt', f'{{fuse:32767,{motion}}}'),
+        ('falling_block', f'{{BlockState:{{Name:"minecraft:sand"}},Time:1,{motion}}}'),
+        ('arrow', f'{{pickup:0b,{motion}}}'),
+        ('trident', f'{{pickup:0b,{motion}}}'),
+        ('firework_rocket', f'{{LifeTime:32767,{motion}}}'),
+    )
+    for i, (kind, nbt) in enumerate(cases):
+        tag = f'tp_land_{i}'
+        ops += setup(f'/summon {kind} {322 + i * 2}.5 230 322.5 {{Tags:["{tag}"],{nbt[1:-1]}}}')
+        dest = f'{322 + i * 2}.5 240 324.5' if i % 2 == 0 else '@e[tag=tp_dest,limit=1]'
+        ops += [cmd(f'/tp @e[tag={tag},limit=1] {dest}'),
+                cmd(f'/data get entity @e[tag={tag},limit=1] Motion'),
+                cmd(f'/data get entity @e[tag={tag},limit=1] OnGround')]
+    # The dragon's own flight builds on its motion: /tp stops it too.
+    ops += setup(f'/summon ender_dragon 344.5 230 344.5 {{Tags:["tp_dragon"],NoAI:1b,{motion}}}')
+    ops += [cmd('/tp @e[tag=tp_dragon,limit=1] 344.5 236 344.5'),
+            cmd('/data get entity @e[tag=tp_dragon,limit=1] Motion')]
+    ops += setup('/kill @e[tag=tp_dragon]')
+    # SpreadPlayersCommand.setPlayerPositions calls teleportTo(..., Set.of(), ...) too: the motion
+    # goes, the ground flag stays (where it lands is random, so only the motion is read).
+    ops += setup(f'/summon armor_stand 340.5 230 330.5 {{Tags:["tp_spread"],{motion}}}')
+    ops += [cmd('/spreadplayers 340 330 0 1 false @e[tag=tp_spread]', record=False),
+            cmd('/data get entity @e[tag=tp_spread,limit=1] Motion'),
+            cmd('/data get entity @e[tag=tp_spread,limit=1] OnGround')]
+    return ops + setup(*[f'/kill @e[tag=tp_land_{i}]' for i in range(len(cases))], '/kill @e[tag=tp_spread]',
+                       '/kill @e[tag=tp_dest]', '/tick unfreeze', '/forceload remove 320 320 351 351')
+
+
+def vehicle_saved_ground_and_fall():
+    """Entity.load/saveWithoutId's OnGround and fall_distance on boats and minecarts.
+
+    AbstractBoat.checkFallDamage resets the fall on the ground and adds the drop off it; a cart that loads on
+    the ground slows as one on the ground does. Read after summoning, after one and five ticks, after an
+    unload and reload (frozen, so only the save and the load count), and three ticks later.
+    """
+    x0, y0, z0 = 3264, 300, 3264
+    chunk = [[x0 >> 4, z0 >> 4]]
+    subjects = [('oak_boat', 1, 0, ',OnGround:1b,fall_distance:2.5d'),
+                ('minecart', 4, 0, ',OnGround:1b,fall_distance:2.5d'),
+                ('cherry_boat', 7, 0, ''),
+                ('bamboo_raft', 10, 6, ',Motion:[0d,0d,0d]'),
+                ('minecart', 13, 6, ',Motion:[0d,0d,0d]'),
+                ('command_block_minecart', 1, 0, ',Motion:[0.6d,0d,0d]')]
+    ops = [cmd(f'/forceload add {x0} {z0}', False), {'op': 'wait_chunks', 'chunks': chunk},
+           cmd(f'/fill {x0} {y0 - 1} {z0} {x0 + 15} {y0 - 1} {z0 + 15} stone', expect_result=256)]
+    for n, (kind, dx, dy, body) in enumerate(subjects, 1):
+        z = z0 + (12 if n == len(subjects) else 4)
+        ops.append(cmd(f'/summon {kind} {x0 + dx}.5 {y0 + dy} {z}.5 {{UUID:[I;12517,0,{n},1]{body}}}',
+                       expect_result=1))
+
+    def reads():
+        for n, (kind, _, _, _) in enumerate(subjects, 1):
+            keys = ['OnGround', 'fall_distance'] + (['Motion'] if kind == 'command_block_minecart' else [])
+            for key in keys:
+                ops.append(cmd(f'/data get entity 000030e5-0000-0000-0000-{n:04x}00000001 {key}'))
+
+    reads()
+    ops.append({'op': 'tick', 'n': 1})
+    reads()
+    ops.append({'op': 'tick', 'n': 4})
+    reads()
+    ops += [cmd('/tick freeze', False), cmd(f'/forceload remove {x0} {z0}', False), {'op': 'tick', 'n': 60},
+            cmd(f'/execute unless loaded {x0} {y0} {z0}', expect_result=1),
+            cmd(f'/forceload add {x0} {z0}', False), {'op': 'wait_chunks', 'chunks': chunk}]
+    reads()
+    ops += [cmd('/tick unfreeze', False), {'op': 'tick', 'n': 3}]
+    reads()
+    return ops + setup(f'/kill @e[type=!player,x={x0},y={y0 - 8},z={z0},dx=16,dy=24,dz=16]',
+                       f'/fill {x0} {y0 - 1} {z0} {x0 + 15} {y0 - 1} {z0 + 15} air',
+                       f'/forceload remove {x0} {z0}')
+
+
+def ravager_saved_movement_speed():
+    """Ravager.aiStep sets the movement_speed base to 0.0 while biting, stunned or roaring, then lerps it back
+    toward 0.3. The instance exists only from that first aiStep (AttributeMap.getInstance makes it lazily), and
+    AttributeMap.pack saves it with the current base, so a reloaded ravager keeps its speed. Read after
+    summoning, after one and five ticks, after an unload and reload (frozen), and two ticks later.
+    """
+    x0, y0, z0 = 3904, 300, 3904
+    chunk = [[x0 >> 4, z0 >> 4]]
+    subjects = ['RoarTick:7', 'RoarTick:1', 'StunTick:3', 'AttackTick:5', 'AttackTick:0']
+    ops = [cmd(f'/forceload add {x0} {z0}', False), {'op': 'wait_chunks', 'chunks': chunk},
+           cmd(f'/fill {x0} {y0 - 1} {z0} {x0 + 15} {y0 - 1} {z0 + 15} stone', expect_result=256)]
+    for n, body in enumerate(subjects):
+        ops.append(cmd(f'/summon ravager {x0 + 2 + 3 * n}.5 {y0} {z0 + 8}.5 '
+                       f'{{Tags:["rav_speed_{n}"],PersistenceRequired:1b,{body}}}', expect_result=1))
+
+    def reads():
+        for n in range(len(subjects)):
+            ops.append(cmd(f'/data get entity @e[tag=rav_speed_{n},limit=1] attributes'))
+
+    reads()
+    ops.append({'op': 'tick', 'n': 1})
+    reads()
+    ops.append({'op': 'tick', 'n': 4})
+    reads()
+    ops += [cmd('/tick freeze', False), cmd(f'/forceload remove {x0} {z0}', False), {'op': 'tick', 'n': 60},
+            cmd(f'/execute unless loaded {x0} {y0} {z0}', expect_result=1),
+            cmd(f'/forceload add {x0} {z0}', False), {'op': 'wait_chunks', 'chunks': chunk}]
+    reads()
+    ops += [cmd('/tick unfreeze', False), {'op': 'tick', 'n': 2}]
+    reads()
+    return ops + setup(f'/kill @e[type=!player,x={x0},y={y0 - 8},z={z0},dx=16,dy=24,dz=16]',
+                       f'/fill {x0} {y0 - 1} {z0} {x0 + 15} {y0 - 1} {z0 + 15} air',
+                       f'/forceload remove {x0} {z0}')
+
+
+def vehicle_ground_and_fall():
+    """Entity.load reads OnGround (getBooleanOr) and fall_distance (getDoubleOr) for every entity,
+    and Entity.saveWithoutId writes the live values: boats, rafts and minecarts keep both. Frozen
+    first (the loaded values as they are), then live: a boat at rest on stone is on the ground, and
+    a falling boat (AbstractBoat.checkFallDamage) or minecart counts its fall."""
+    ops = setup('/forceload add 256 256 287 287', '/fill 256 199 256 287 199 287 minecraft:stone')
+    ops += [{'op': 'settle', 'required_chunks': [[x, z] for x in (16, 17) for z in (16, 17)]}]
+    ops += setup('/tick freeze')
+    cases = (
+        ('oak_boat', '{OnGround:1b,fall_distance:2.5d}'),
+        ('cherry_chest_boat', '{OnGround:1b,fall_distance:2.5d}'),
+        ('bamboo_raft', '{OnGround:2b,fall_distance:7.25f}'),
+        ('minecart', '{OnGround:1b,fall_distance:2.5d}'),
+        ('command_block_minecart', '{OnGround:1b,fall_distance:1L}'),
+        ('hopper_minecart', '{OnGround:0.5f,fall_distance:2.5d}'),
+        ('tnt_minecart', '{OnGround:1b,fall_distance:2.5d}'),
+    )
+    for i, (kind, nbt) in enumerate(cases):
+        tag = f'veh_fall_{i}'
+        ops += setup(f'/summon {kind} {258 + i * 3}.5 230 258.5 '
+                     f'{{Tags:["{tag}"],NoGravity:1b,{nbt[1:-1]}}}')
+        ops += [cmd(f'/data get entity @e[tag={tag},limit=1] OnGround'),
+                cmd(f'/data get entity @e[tag={tag},limit=1] fall_distance')]
+    ops += setup(*[f'/kill @e[tag=veh_fall_{i}]' for i in range(len(cases))], '/tick unfreeze')
+    # Live: at rest on the stone, falling from 12 blocks up, and floating (NoGravity: no move
+    # down, so the loaded fall stays; Entity.checkFallDamage counts only a drop).
+    ops += setup('/summon oak_boat 260.5 200 270.5 {Tags:["veh_rest"]}',
+                 '/summon minecart 264.5 200 270.5 {Tags:["veh_rest"]}',
+                 '/summon oak_boat 268.5 212 270.5 {Tags:["veh_drop"]}',
+                 '/summon minecart 272.5 212 270.5 {Tags:["veh_drop"]}',
+                 '/summon oak_boat 276.5 220 270.5 {Tags:["veh_float"],NoGravity:1b,fall_distance:2.5d}',
+                 '/summon minecart 280.5 220 270.5 {Tags:["veh_float"],NoGravity:1b,fall_distance:2.5d}')
+    ops += [{'op': 'tick', 'n': 3}]
+    for sel, x0 in (('veh_rest', 260), ('veh_drop', 268), ('veh_float', 276)):
+        for n in (0, 1):
+            target = f'@e[tag={sel},limit=1,sort=nearest,x={x0 + 4 * n}.5,y=200,z=270.5]'
+            ops += [cmd(f'/data get entity {target} OnGround'),
+                    cmd(f'/data get entity {target} fall_distance')]
+    # A boat dropped into a pool: Entity.baseTick's updateFluidInteraction resets the fall in water.
+    ops += setup('/fill 282 200 280 286 202 284 minecraft:water',
+                 '/summon oak_boat 284.5 209 282.5 {Tags:["veh_pool"]}')
+    ops += [{'op': 'tick', 'n': 30},
+            cmd('/data get entity @e[tag=veh_pool,limit=1] fall_distance')]
+    return ops + setup('/kill @e[tag=veh_rest]', '/kill @e[tag=veh_drop]', '/kill @e[tag=veh_float]',
+                       '/kill @e[tag=veh_pool]', '/fill 282 200 280 286 202 284 minecraft:air',
+                       '/fill 256 199 256 287 199 287 minecraft:air', '/forceload remove 256 256 287 287')
+
+
+def enderman_command_damage():
+    """DamageCommand -> Enderman.hurtServer: with no living entity behind the damage,
+    random.nextInt(10) != 0 teleports the enderman then and there (teleport()), also when
+    the hurt cooldown refuses the hit. The world is frozen, so no AI step does it later. The
+    enderman floats (NoGravity) 32 blocks over a stone floor, so its teleport lands on it."""
+    ops = setup('/forceload add 128 128 223 223', '/fill 144 199 144 208 199 208 minecraft:stone')
+    # Every chunk a target can land in holds its entities (else @e no longer sees it there).
+    ops += [{'op': 'settle', 'required_chunks': [[x, z] for x in range(9, 14) for z in range(9, 14)]}]
+    ops += setup('/tick freeze')
+    ender = '@e[tag=hurt_tp,limit=1]'
+    ops += setup('/summon enderman 176.5 232 176.5 {Tags:["hurt_tp"],NoGravity:1b,PersistenceRequired:1b}')
+    ops += [cmd(f'/execute if entity {ender}', expect_result=1)]
+    # Nine draws in ten teleport. Hit again only while it is still where it was (a second
+    # teleport from the floor could leave it): four leave it in place one time in 10^4.
+    origin = '/execute positioned 176.5 232 176.5 as @e[tag=hurt_tp,distance=..0.5] run '
+    ops += [cmd(f'/damage {ender} 1')]
+    ops += setup(*[origin + 'damage @s 1'] * 3)
+    ops += [cmd(f'/execute if entity {ender}', expect_result=1),
+            cmd('/execute if entity @e[tag=hurt_tp,x=144,y=200,z=144,dx=64,dy=0,dz=64]', expect_result=1),
+            cmd('/execute positioned 176.5 232 176.5 unless entity @e[tag=hurt_tp,distance=..0.5]',
+                expect_result=1)]
+    ops += setup('/kill @e[tag=hurt_tp]', '/fill 144 199 144 208 199 208 minecraft:air',
+                 '/forceload remove 128 128 223 223', '/tick unfreeze')
+    return ops
+
+
+def shulker_command_damage():
+    """DamageCommand -> Shulker.hurtServer: below half health, random.nextInt(4) == 0 teleports
+    the shulker then and there (teleportSomewhere()). The world is frozen, so no AI step does it
+    later. 32 shulkers cling to stone walls between two-block air gaps, where a shell has room
+    to open (canStayAt), so nearly every teleportSomewhere finds a place: one shulker in four
+    moves, and none of the 32 does one time in 10^4."""
+    ops = setup('/forceload add 144 144 207 207', '/fill 159 203 159 192 221 183 minecraft:stone')
+    ops += setup(*[f'/fill {x} 204 160 {x + 1} 220 182 minecraft:air' for x in range(160, 192, 3)])
+    ops += [{'op': 'settle', 'required_chunks': [[x, z] for x in range(9, 13) for z in range(9, 12)]}]
+    ops += setup('/tick freeze', *[f'/scoreboard objectives add sd_{k} dummy' for k in ('x', 'y', 'z', 'x2', 'y2', 'z2')])
+    # Each on the west wall of its gap (AttachFace west), its shell opening east into the gap.
+    # Fixed UUIDs: the shulkers stay score holders after the kill (the bodies are
+    # unloaded, never removed), and a later `/scoreboard players list` names them.
+    spots = [(x, z) for x in range(163, 185, 3) for z in (168, 170, 172, 174)]
+    ops += setup(*[f'/summon shulker {x}.5 212 {z}.5 {{UUID:[I;12185,0,0,{n}],Tags:["sd"],AttachFace:4b,PersistenceRequired:1b}}'
+                   for n, (x, z) in enumerate(spots)])
+    ops += [cmd('/execute if entity @e[tag=sd]', expect_result=32)]
+    def store(suffix):
+        return [f'/execute as @e[tag=sd] store result score @s sd_{k}{suffix} run data get entity @s Pos[{i}] 10'
+                for i, k in enumerate('xyz')]
+    ops += setup(*store(''))
+    ops += setup('/execute as @e[tag=sd] run damage @s 20')
+    ops += setup(*store('2'), *[f'/execute as @e[tag=sd] unless score @s sd_{k} = @s sd_{k}2 run tag @s add sd_moved'
+                                 for k in 'xyz'])
+    ops += [cmd('/execute if entity @e[tag=sd]', expect_result=32),
+            cmd('/execute if entity @e[tag=sd_moved,limit=1]', expect_result=1)]
+    ops += setup('/kill @e[tag=sd]', *[f'/scoreboard objectives remove sd_{k}' for k in ('x', 'y', 'z', 'x2', 'y2', 'z2')],
+                 '/fill 159 203 159 192 221 183 minecraft:air', '/forceload remove 144 144 207 207', '/tick unfreeze')
+    return ops
+
+
+def snbt_trailing_commas():
+    """SnbtGrammar: a compound, a list and a typed array may end with a comma; an empty one
+    may not hold only a comma, and two commas in a row are an error."""
+    ops = []
+    for value in ('{a:1b,}', '{a:1b,b:"x",}', '[1,2,]', '["a",]', '[{},]', '[I;1,2,]', '[B;1b,]', '[L;1L,]',
+                  '{a:[1,],b:{c:2,},}', '{,}', '[,]', '[I;,]', '{a:1b,,}', '[1,,2]', '{a:1b,}x'):
+        ops += [cmd(f'/data modify storage horizon:snbt v set value {value}'),
+                cmd('/data get storage horizon:snbt v')]
+    # A text component argument reads the same grammar.
+    ops += [cmd('/tellraw @s {text:"comma",color:"red",}'), cmd('/tellraw @s ["a",{text:"b",},]')]
+    ops += [cmd('/summon minecraft:marker 0 200 0 {Tags:["snbt_comma",],}'),
+            cmd('/data get entity @e[type=minecraft:marker,tag=snbt_comma,limit=1] Tags'),
+            cmd('/kill @e[type=minecraft:marker,tag=snbt_comma]'),
+            cmd('/data remove storage horizon:snbt v')]
+    return ops
+
+
+def dragon_command_damage():
+    """DamageCommand -> EnderDragon.hurtServer (the body: a quarter plus up to 1, health only
+    with a player behind it or #is_explosion, success either way) and EndCrystal.hurtServer
+    (removed unless invulnerable, fire or the dragon's; generic_kill bypasses Invulnerable)."""
+    ops = setup('/forceload add 0 0 63 47', '/tick freeze')
+    ops += [{'op': 'settle'}]
+    dragon = '@e[tag=dmg_dragon,limit=1]'
+    ops += setup('/summon ender_dragon 8.5 160 8.5 {Tags:["dmg_actor","dmg_dragon"],NoAI:1b,DragonPhase:0}')
+    ops += [cmd(f'/execute if entity {dragon}', expect_result=1),
+            cmd(f'/data get entity {dragon} Health', expect_result=200)]
+    for damage, health in (
+        ('8', 200),                         # no player, not an explosion: lands, no health
+        ('8 minecraft:explosion', 197),     # 8 / 4 + 1
+        ('40 minecraft:generic by @s', 189),  # 11 within the cooldown: only the excess over 3
+        ('4 minecraft:in_fire by @s', 189),  # reallyHurt refuses fire; hurt still succeeds
+        ('0', 189),                         # under 0.01: refused, invulnerable
+    ):
+        ops += [cmd(f'/damage {dragon} {damage}'),
+                cmd(f'/data get entity {dragon} Health', expect_result=health)]
+    for i, (label, nbt, hits) in enumerate((
+        ('blast', '', (('1', False),)),
+        ('explosion', '', (('1 minecraft:explosion', False),)),
+        ('fire', '', (('1 minecraft:in_fire', True),)),
+        ('shield', ',Invulnerable:1b', (('1', True), ('1 minecraft:generic_kill', False))),
+        ('by_dragon', '', ((f'1 minecraft:generic by {dragon}', True), ('1', False))),
+    )):
+        crystal = f'@e[tag=dmg_{label},limit=1]'
+        x, z = (40, 56, 40, 56, 40)[i], (8, 8, 24, 24, 40)[i]
+        ops += setup(f'/summon end_crystal {x}.5 160 {z}.5 {{Tags:["dmg_actor","dmg_{label}"],ShowBottom:0b{nbt}}}')
+        ops += [cmd(f'/execute if entity {crystal}', expect_result=1)]
+        for damage, stays in hits:
+            ops += [cmd(f'/damage {crystal} {damage}'),
+                    cmd(f'/execute {"if" if stays else "unless"} entity {crystal}', expect_result=1)]
+    # The dragons are summoned holding their pattern (0): a summoned dragon hovers (10), which
+    # is sitting, and Horizon summons it holding (a separate gap).
+    # One dragon at a time from here. dealDefaultKnockback: fireworks are #is_explosion (the
+    # hit counts) and not #no_knockback, so the dragon is pushed away from the `at` position.
+    knock = '@e[tag=dmg_knock,limit=1]'
+    ops += setup('/kill @e[tag=dmg_dragon]',
+                 '/summon ender_dragon 24.5 160 40.5 {Tags:["dmg_actor","dmg_knock"],NoAI:1b,DragonPhase:0}')
+    ops += [cmd(f'/damage {knock} 10 minecraft:fireworks at 44.5 160 40.5'),
+            cmd(f'/data get entity {knock} Health', expect_result=196),
+            cmd(f'/data get entity {knock} Motion[0] 1000'),
+            cmd(f'/data get entity {knock} Motion[2] 1000')]
+    # AbstractDragonSittingPhase.onHurt: a perched dragon takes nothing from a direct arrow,
+    # so the hit is under 0.01 and refused.
+    perch = '@e[tag=dmg_perch,limit=1]'
+    ops += setup('/kill @e[tag=dmg_knock]',
+                 '/summon ender_dragon 8.5 160 40.5 {Tags:["dmg_actor","dmg_perch"],NoAI:1b,DragonPhase:6}',
+                 '/summon arrow 8.5 170 40.5 {Tags:["dmg_actor","dmg_arrow"],NoGravity:1b}')
+    ops += [cmd(f'/damage {perch} 10 minecraft:arrow by @e[tag=dmg_arrow,limit=1] from @s'),
+            cmd(f'/data get entity {perch} Health', expect_result=200),
+            cmd(f'/damage {perch} 10 minecraft:arrow by @s'),
+            cmd(f'/data get entity {perch} Health', expect_result=196)]  # 196.5
+    return ops + setup('/kill @e[tag=dmg_actor]', '/tick unfreeze', '/forceload remove all')
+
+
 def execute():
     return [
         *setup('/scoreboard objectives add exec dummy', '/scoreboard players set @s exec 4', '/scoreboard players set fake exec 9'),
@@ -811,7 +1371,9 @@ def execute():
         cmd('/execute facing 0 230 0 run tp @s ~ ~ ~ ~ ~'),
         cmd('/execute facing entity @e[tag=ex,limit=1] feet run tp @s ~ ~ ~ ~ ~'),
         cmd('/execute in minecraft:the_nether run setblock 0 200 0 minecraft:stone'),
-        cmd('/execute in minecraft:the_end if block 0 64 0 minecraft:air'),
+        # Far from the End's centre: the oracle's settles keep their tickets for the rest of the run, so a
+        # group that settles in the End (gateway passengers) leaves 0 64 0 loaded on the Java side only.
+        cmd('/execute in minecraft:the_end if block 1000 64 1000 minecraft:air'),
         cmd('/execute in minecraft:the_end run say elsewhere'),
         cmd('/execute in minecraft:nowhere run say nowhere'),
         cmd('/execute in minecraft:overworld run setblock 5 210 5 minecraft:dirt'),
@@ -1031,6 +1593,39 @@ def loot_set_damage():
     return ops + setup('/setblock 2 220 2 minecraft:air')
 
 
+def loot_set_name_and_components():
+    """SetNameFunction and SetComponentsFunction in /loot's items engine."""
+    import json
+    cases = [
+        ('minecraft:stone', {'type': 'minecraft:set_name', 'name': 'Rock'}),
+        ('minecraft:stone', {'type': 'minecraft:set_name', 'target': 'item_name',
+                             'name': {'text': 'Old Rock', 'italic': False, 'color': 'gold'}}),
+        # No name: the stack stays as it was.
+        ('minecraft:stone', {'type': 'minecraft:set_name'}),
+        ('minecraft:paper', {'type': 'minecraft:set_components', 'components': {
+            'minecraft:lore': [{'text': 'A torn page', 'color': 'gray'}],
+            'minecraft:custom_data': {'page': 3}}}),
+        # The contents make it a potion of swiftness: the feedback names it so.
+        ('minecraft:potion', {'type': 'minecraft:set_components', 'components': {
+            'minecraft:potion_contents': {'potion': 'minecraft:swiftness'}}}),
+        ('minecraft:potion', [
+            {'type': 'minecraft:set_components', 'components': {'minecraft:potion_contents': {
+                'custom_effects': [{'id': 'minecraft:speed', 'duration': 600}]}}},
+            {'type': 'minecraft:set_name', 'name': {'text': 'Potion of Escape', 'italic': False}}]),
+        # A removal patch drops a component the item has by default.
+        ('minecraft:apple', {'type': 'minecraft:set_components', 'components': {'!minecraft:food': {}}}),
+    ]
+    ops = setup('/setblock 2 220 2 minecraft:chest')
+    for item, modifier in cases:
+        table = {'pools': [{'rolls': 1, 'entries': [
+            {'type': 'minecraft:item', 'name': item, 'modifier': modifier}]}]}
+        ops += [
+            cmd('/loot replace block 2 220 2 container.0 loot ' + json.dumps(table)),
+            cmd('/data get block 2 220 2 Items'),
+        ]
+    return ops + setup('/setblock 2 220 2 minecraft:air')
+
+
 def items_and_loot():
     return [
         *setup('/clear @s', '/gamemode survival'),
@@ -1119,6 +1714,49 @@ def items_and_loot():
     ]
 
 
+def loot_world_pack_tables():
+    """ResourceOrIdArgument looks loot tables up in the server's registries: a world pack's
+    table (advancement_loot_fixtures) is named by /loot and by a function of the pack."""
+    return [
+        *setup('/clear @s', '/setblock 2 220 2 minecraft:chest'),
+        cmd('/loot give @s loot parity:pack_loot'),
+        cmd('/clear @s minecraft:emerald 0'),
+        cmd('/loot replace block 2 220 2 container.0 loot parity:pack_loot'),
+        cmd('/data get block 2 220 2 Items'),
+        cmd('/function parity:pack_loot_give'),
+        cmd('/clear @s minecraft:emerald 0'),
+        cmd('/loot give @s loot parity:missing'),
+        *setup('/clear @s', '/setblock 2 220 2 minecraft:air'),
+    ]
+
+
+def loot_give_full_inventory():
+    """LootCommand.playerGive: `Inventory.add` keeps what fits and throws nothing out. A drop
+    counts only when all of it went in, and always for a player with infinite materials
+    (creative)."""
+    import json
+    two_dirt = {'pools': [{'rolls': 1, 'entries': [{'type': 'minecraft:item', 'name': 'minecraft:dirt',
+                                                     'modifier': {'type': 'minecraft:set_count', 'count': 2}}]}]}
+    give = '/loot give @s loot ' + json.dumps(two_dirt)
+    dropped = '/execute if entity @e[type=minecraft:item,distance=..8]'
+    ops = setup('/clear @s', '/gamemode survival', '/kill @e[type=minecraft:item]',
+                *[f'/item replace entity @s container.{i} with minecraft:stone 64' for i in range(35)],
+                '/item replace entity @s container.35 with minecraft:dirt 63')
+    return ops + [
+        # One of the two fits: it stays, the other is lost, and the drop doesn't count.
+        cmd(give),
+        cmd('/clear @s minecraft:dirt 0'),
+        cmd(dropped),
+        # None fits.
+        cmd(give),
+        cmd(dropped),
+        *setup('/gamemode creative'),
+        cmd(give),
+        cmd(dropped),
+        *setup('/clear @s', '/kill @e[type=minecraft:item]'),
+    ]
+
+
 def aquatic_from_bucket():
     """Saved bucket flags default false, except the always-true tadpole (#7763)."""
     ops = []
@@ -1139,6 +1777,49 @@ def aquatic_from_bucket():
                     cmd(f'/data get entity {target} FromBucket')]
             ops += setup(f'/kill {target}')
     return ops
+
+
+def dispensed_spawn_egg_persistence():
+    """`SpawnEggItemBehavior.execute` spawns with `EntitySpawnReason.DISPENSER`
+    and never calls `Mob.setPersistenceRequired`: the mob saves
+    `PersistenceRequired: 0b`, as one from a spawn egg used by hand does. So
+    `Mob.checkDespawn` removes the zombie at once, far from every player,
+    while the pig, which is never removed when far away, stays. The elder
+    guardian's and copper golem's constructors require persistence (1b)."""
+    x, z, y = 5312, 5120, 300
+    # (dispenser x, mob, saved PersistenceRequired, or None once despawned)
+    eggs = [(x + 2, 'zombie', None), (x + 6, 'pig', 0), (x + 10, 'elder_guardian', 1),
+            (x + 14, 'copper_golem', 1)]
+    ops = [*setup(f'/forceload add {x} {z} {x + 15} {z + 15}'),
+           {'op': 'wait_chunks', 'chunks': [[x >> 4, z >> 4]]},
+           *setup(f'/fill {x} {y - 1} {z} {x + 15} {y - 1} {z + 15} minecraft:stone')]
+    for bx, kind, _ in eggs:
+        ops += [cmd(f'/setblock {bx} {y} {z + 4} minecraft:dispenser[facing=south]'
+                    f'{{Items:[{{Slot:0b,id:"minecraft:{kind}_spawn_egg",count:1}}]}}', expect_result=1),
+                cmd(f'/setblock {bx} {y + 1} {z + 4} minecraft:redstone_block', expect_result=1)]
+    ops.append({'op': 'tick', 'n': 6})
+
+    def reads():
+        out = []
+        for _, kind, saved in eggs:
+            mob = f'@e[type=minecraft:{kind},x={x},y={y - 8},z={z},dx=16,dy=24,dz=16,limit=1]'
+            if saved is None:
+                out.append(cmd(f'/execute unless entity {mob}', expect_result=1))
+            else:
+                out += [cmd(f'/execute if entity {mob}', expect_result=1),
+                        cmd(f'/data get entity {mob} PersistenceRequired', expect_result=saved)]
+        return out
+
+    ops += reads()
+    # Unload the chunk (saving its mobs), then load it again.
+    ops += [*setup(f'/forceload remove {x} {z} {x + 15} {z + 15}'), {'op': 'tick', 'n': 60},
+            cmd(f'/execute unless loaded {x} {y} {z}', expect_result=1),
+            *setup(f'/forceload add {x} {z} {x + 15} {z + 15}'),
+            {'op': 'wait_chunks', 'chunks': [[x >> 4, z >> 4]]}]
+    ops += reads()
+    return ops + setup(f'/kill @e[type=!minecraft:player,x={x},y={y - 8},z={z},dx=16,dy=24,dz=16]',
+                       f'/fill {x} {y - 1} {z} {x + 15} {y + 1} {z + 15} minecraft:air',
+                       f'/forceload remove {x} {z} {x + 15} {z + 15}')
 
 
 
@@ -1586,6 +2267,16 @@ def world_misc():
     ]
 
 
+def template_container_loot_table():
+    """A template's chest keeps its loot table (`RandomizableContainer.tryLoadLootTable`)."""
+    return [
+        *setup('/forceload add 0 0 15 15'),
+        cmd('/place template minecraft:village/plains/houses/plains_small_house_7 0 200 0'),
+        cmd('/data get block 4 201 5 LootTable'),
+        *setup('/fill 0 200 0 15 215 15 minecraft:air', '/forceload remove 0 0 15 15'),
+    ]
+
+
 def progression():
     return [
         *setup('/gamemode survival', '/experience set @s 0 levels', '/experience set @s 0 points'),
@@ -1638,12 +2329,110 @@ def progression():
     ]
 
 
-def function_return_fixtures(group_names):
-    if 'function return feedback' not in group_names:
+def advancement_reward_fixtures(group_names):
+    if 'crafting recipe priority' in group_names:
+        return {f'h295:{name}': {'criteria': {'crafted': {
+                    'trigger': 'minecraft:crafter_recipe_crafted', 'conditions': {'recipes': recipe}}}}
+                for name, recipe in [('custom_crafted', 'parity:aaa_star'), ('wrong_recipe', 'parity:zzz_star')]}
+    if 'advancement reward functions' not in group_names:
         return {}
-    return {'parity:fail': 'return fail\n', 'parity:zero': 'return 0\n',
-            'parity:value': 'return 7\n', 'parity:empty': '# no commands\n',
-            'parity:add': 'scoreboard players add #count audit 1\n'}
+    def advancement(function=None):
+        value = {'criteria': {'never': {'trigger': 'minecraft:impossible'}}}
+        if function is not None:
+            value['rewards'] = {'function': function}
+        return value
+    return {'h291:reward': advancement('h291:reward'),
+            'h291:no_function': advancement(),
+            'h291:missing_function': advancement('h291:missing'),
+            'h291:alias': advancement('h291_alias')}
+
+
+def function_return_fixtures(group_names):
+    functions = {}
+    if 'fork function feedback' in group_names:
+        try:
+            from .fork_function_feedback_corpus import functions as fork_functions
+        except ImportError:
+            from fork_function_feedback_corpus import functions as fork_functions
+        functions.update(fork_functions())
+    if 'function condition fallthrough' in group_names:
+        try:
+            from .function_condition_corpus import functions as condition_functions
+        except ImportError:
+            from function_condition_corpus import functions as condition_functions
+        functions.update(condition_functions())
+    if any(name.startswith('wolf anger ') for name in group_names):
+        try:
+            from .wolf_anger_corpus import functions as anger_functions
+        except ImportError:
+            from wolf_anger_corpus import functions as anger_functions
+        functions.update(anger_functions())
+    if 'macro source type error' in group_names:
+        functions.update({'command_macro:apply': '$scoreboard players add #hits macro_error $(amount)\n',
+                          'command_macro:admit': 'scoreboard players add #admit macro_error 1\n',
+                          'command_macro:fail': 'return fail\n',
+                          'command_macro:zero': 'return 0\n'})
+    if 'loot world pack tables' in group_names:
+        functions['parity:pack_loot_give'] = 'loot give @s loot parity:pack_loot\n'
+    if 'function return feedback' in group_names:
+        functions.update({'parity:fail': 'return fail\n', 'parity:zero': 'return 0\n',
+                          'parity:value': 'return 7\n', 'parity:empty': '# no commands\n',
+                          'parity:add': 'scoreboard players add #count audit 1\n'})
+    if 'advancement reward functions' in group_names:
+        # Explicit return must not replace the enclosing advancement callback.
+        functions.update({'h291:reward': 'scoreboard players add @s reward_hits 1\n'
+                          'tag @s add h291_rewarded\n'
+                          'execute if block ~ ~-1 ~ stone run scoreboard players add @s reward_origin 1\n'
+                          'function h291:nested\nreturn 9\n',
+                          'h291:nested': 'scoreboard players add @s reward_nested 1\n',
+                          'minecraft:h291_alias': 'scoreboard players add @s reward_alias 1\n'})
+    return functions
+
+
+def macro_source_type_error():
+    ops = [cmd('/tick freeze'), cmd('/datapack list enabled'),
+           cmd('/scoreboard objectives add macro_error dummy', expect_result=1),
+           cmd('/scoreboard players set #hits macro_error 0', expect_result=0),
+           cmd('/scoreboard players set #admit macro_error 0', expect_result=0),
+           cmd('/data modify storage command_macro:args number set value 7', expect_result=1),
+           cmd('/data modify storage command_macro:args text set value "seven"', expect_result=1),
+           cmd('/data modify storage command_macro:args valid set value {amount:2}', expect_result=1),
+           cmd('/data get storage command_macro:args number', expect_result=7),
+           cmd('/data get storage command_macro:args text', expect_result=5),
+           cmd('/execute if data storage command_macro:args {number:7,text:"seven",valid:{amount:2}}', expect_result=1),
+           cmd('/function command_macro:admit'),
+           cmd('/scoreboard players get #admit macro_error', expect_result=1)]
+    ops += setup('/execute store result score #clock macro_error run time query gametime')
+    count = 0
+    for path in ['valid', 'number', 'text', 'missing']:
+        call = f'function command_macro:apply with storage command_macro:args {path}'
+        direct = cmd('/' + call)
+        if path != 'valid':
+            direct['expect_callback'] = [False, 0]
+        ops.append(direct)
+        count += 2 if path == 'valid' else 0
+        ops += [cmd('/scoreboard players get #hits macro_error', expect_result=count),
+                cmd('/scoreboard players set #r macro_error 31', expect_result=31),
+                cmd('/scoreboard players set #s macro_error 17', expect_result=17),
+                cmd('/execute store result score #r macro_error store success score #s macro_error run ' + call),
+                # Independently measured: no return leaves sentinels; errors store failure.
+                cmd('/scoreboard players get #r macro_error', expect_result=31 if path == 'valid' else 0),
+                cmd('/scoreboard players get #s macro_error', expect_result=17 if path == 'valid' else 0)]
+        count += 2 if path == 'valid' else 0
+        ops.append(cmd('/scoreboard players get #hits macro_error', expect_result=count))
+    for name in ['fail', 'zero']:
+        call = cmd(f'/function command_macro:{name}')
+        call['expect_callback'] = [name == 'zero', 0]
+        ops += [call,
+                cmd('/scoreboard players set #r macro_error 31', expect_result=31),
+                cmd('/scoreboard players set #s macro_error 17', expect_result=17),
+                cmd(f'/execute store result score #r macro_error store success score #s macro_error run function command_macro:{name}'),
+                cmd('/scoreboard players get #r macro_error', expect_result=0),
+                cmd('/scoreboard players get #s macro_error', expect_result=int(name == 'zero')),
+                cmd('/scoreboard players get #hits macro_error', expect_result=count)]
+    ops += setup('/execute store result score #elapsed macro_error run time query gametime',
+                 '/scoreboard players operation #elapsed macro_error -= #clock macro_error')
+    return ops + [cmd('/scoreboard players get #elapsed macro_error', expect_result=0)]
 
 
 def function_return_feedback():
@@ -1675,6 +2464,22 @@ def function_return_feedback():
                   cmd('/execute if score #clock audit = #after audit', expect_result=1),
                   cmd('/scoreboard objectives remove audit')])
     return lines
+
+
+def fork_function_feedback_cases():
+    try:
+        from .fork_function_feedback_corpus import cases
+    except ImportError:
+        from fork_function_feedback_corpus import cases
+    return cases(cmd)
+
+
+def function_condition_fallthrough():
+    try:
+        from .function_condition_corpus import conditions
+    except ImportError:
+        from function_condition_corpus import conditions
+    return conditions()
 
 
 def functions_and_packs():
@@ -2168,6 +2973,48 @@ def ender_dragon():
     ]
 
 
+def summoned_dragon_hovers():
+    """EnderDragon's constructor sets EnderDragonPhase.HOVERING; only EnderDragonFight.createNewDragon
+    moves its dragon to the holding pattern. A dragon from /summon hovers where it was put: the
+    hover phase's target is its own position, and no fight takes it on outside the End."""
+    dragon = '@e[tag=hover_dragon,limit=1]'
+    ops = setup('/forceload add 0 0 31 31')
+    ops += [{'op': 'settle'}]
+    ops += setup('/summon ender_dragon 16.5 160 16.5 {Tags:["hover_dragon"]}')
+    ops += [cmd(f'/data get entity {dragon} DragonPhase', expect_result=10)]
+    for _ in range(6):
+        ops += [{'op': 'tick', 'n': 20},
+                cmd(f'/data get entity {dragon} DragonPhase'),
+                *[cmd(f'/data get entity {dragon} Pos[{i}] 100') for i in range(3)]]
+    # DragonHoverPhase.getFlySpeed is 1: a hovering dragon thrown upwards climbs back to its
+    # target at up to 0.01 a tick (ydd / horizontal distance clamped to the fly speed).
+    rise = '@e[tag=hover_rise,limit=1]'
+    ops += setup('/kill @e[tag=hover_dragon]',
+                 '/summon ender_dragon 16.5 160 16.5 {Tags:["hover_rise"],DragonPhase:10,Motion:[0.0d,0.5d,0.0d]}')
+    for _ in range(4):
+        ops += [{'op': 'tick', 'n': 10},
+                *[cmd(f'/data get entity {rise} Pos[{i}] 1000') for i in range(3)]]
+    return ops + setup('/kill @e[tag=hover_rise]', '/forceload remove all')
+
+
+def dragon_scanning_turn():
+    """DragonSittingScanningPhase: the dragon turns towards the player only while they are more
+    than 10 degrees off its heading. Summoned 6 blocks south of a survival player with yaw 0
+    (looking towards -z, at them), it holds still; one with yaw 90 turns. Its parts are at the
+    origin until its first aiStep, so its first turn aims from there (far away: a small step)."""
+    ops = setup('/gamemode survival', '/execute at @s run forceload add ~-32 ~-32 ~32 ~32')
+    ops += [{'op': 'settle'}]
+    for label, yaw in (('facing', 0), ('away', 90)):
+        dragon = f'@e[tag=scan_{label},limit=1]'
+        ops += setup(f'/execute at @s run summon ender_dragon ~ ~ ~6 {{Tags:["scan_{label}"],DragonPhase:6,Rotation:[{yaw}.0f,0.0f]}}')
+        for _ in range(3):
+            ops += [{'op': 'tick', 'n': 2},
+                    cmd(f'/data get entity {dragon} Rotation[0] 1000'),
+                    cmd(f'/data get entity {dragon} DragonPhase')]
+        ops += setup(f'/kill {dragon}')
+    return ops + setup('/gamemode creative', '/forceload remove all')
+
+
 def place_structure():
     """`/place structure` (PlaceCommand.placeStructure): the id is resolved, a
     `StructureStart` is generated for the position's chunk with vanilla's
@@ -2184,6 +3031,18 @@ def place_structure():
         # One chest between y 0 and 120 of chunk (0, 0): the piece's column is
         # inside that chunk whatever height its dig reached.
         cmd('/fill 0 0 0 15 120 15 minecraft:air replace minecraft:chest'),
+    ]
+
+
+def forceload_loads_the_chunk():
+    """`ServerLevel.setChunkForced` loads a newly forced chunk before the next command."""
+    return [
+        cmd('/execute if loaded 4000 200 4000'),
+        cmd('/forceload add 4000 4000'),
+        cmd('/execute if loaded 4000 200 4000'),
+        cmd('/setblock 4000 200 4000 minecraft:stone'),
+        cmd('/execute if block 4000 200 4000 minecraft:stone'),
+        *setup('/setblock 4000 200 4000 minecraft:air', '/forceload remove 4000 4000'),
     ]
 
 
@@ -2249,6 +3108,32 @@ def experience_orb_fall():
     ]
 
 
+def shulker_box_empty_items():
+    """`ShulkerBoxBlockEntity.saveAdditional`: `saveAllItems(output, items,
+    false)` leaves `Items` out for an empty box, placed empty or emptied, and
+    through a chunk unload and reload. A chest (two-argument overload) always
+    writes the list. A box with a loot table keeps it until opened, even one
+    that rolls nothing."""
+    x, z, y = 5184, 5120, 300
+    blocks = [(x, 'shulker_box'), (x + 2, 'red_shulker_box{Items:[{Slot:0b,id:"minecraft:stone",count:1}]}'),
+              (x + 4, 'chest'), (x + 6, 'shulker_box{LootTable:"minecraft:empty"}')]
+
+    def reads():
+        return [cmd(f'/data get block {bx} {y} {z + 8}') for bx, _ in blocks]
+
+    ops = [*setup(f'/forceload add {x} {z}'), {'op': 'wait_chunks', 'chunks': [[x >> 4, z >> 4]]}]
+    ops += [cmd(f'/setblock {bx} {y} {z + 8} {block}', expect_result=1) for bx, block in blocks]
+    ops += reads()
+    ops += [cmd(f'/data remove block {x + 2} {y} {z + 8} Items', expect_result=1)]
+    ops += reads()
+    # Unload the chunk (saving its block entities), then load it again.
+    ops += [*setup(f'/forceload remove {x} {z}'), {'op': 'tick', 'n': 60},
+            cmd(f'/execute unless loaded {x} {y} {z}', expect_result=1),
+            *setup(f'/forceload add {x} {z}'), {'op': 'wait_chunks', 'chunks': [[x >> 4, z >> 4]]}]
+    ops += reads()
+    return ops + setup(f'/fill {x} {y} {z + 8} {x + 6} {y} {z + 8} minecraft:air', f'/forceload remove {x} {z}')
+
+
 def creative_shulker_drops():
     """ShulkerBoxBlock.playerWillDestroy: Creative keeps a filled box as one item,
     even with block_drops off. Empty boxes and survival use the ordinary drop rules."""
@@ -2282,6 +3167,10 @@ def creative_shulker_drops():
 
 def piglin_pickups():
     """PiglinAi.pickUpItem/stopHoldingOffHandItem: babies keep admired gold, adults barter it."""
+    # The item checks look in the pen only: the Rust side block-ticks a wider ring of terrain than the
+    # oracle loads, where generated kelp breaks and gravel falls into flooded caves (as vanilla's own
+    # would once ticked), and those drops are no piglin's.
+    PEN = 'x=4.5,y=210,z=4.5,distance=..16'
     ops = [*setup('/fill 2 209 2 6 212 6 minecraft:glass hollow',
                   '/fill 3 209 3 5 209 5 minecraft:stone')]
     for baby, held in ((False, "crossbow"), (True, None), (True, "golden_sword"),
@@ -2302,15 +3191,15 @@ def piglin_pickups():
                    '{PickupDelay:0s,Item:{id:"minecraft:gold_ingot",count:1}}'),
             {'op': 'tick', 'n': 40},
             cmd('/execute if items entity @e[tag=barter,limit=1] weapon.offhand minecraft:gold_ingot'),
-            cmd('/execute if entity @e[type=minecraft:item]'),
+            cmd(f'/execute if entity @e[type=minecraft:item,{PEN}]'),
             {'op': 'tick', 'n': 140},
             cmd('/execute if items entity @e[tag=barter,limit=1] weapon.offhand *'),
             cmd('/execute if items entity @e[tag=barter,limit=1] weapon.mainhand minecraft:gold_ingot'),
             # A baby drops nothing. What an adult's barter throws comes from the level's random (vanilla's is
             # unseeded), and the piglin picks some of it back up, so only the gold's fate is fixed: none of it lies
             # on the ground.
-            cmd('/execute if entity @e[type=minecraft:item]' if baby
-                else '/execute if items entity @e[type=minecraft:item] contents minecraft:gold_ingot'),
+            cmd(f'/execute if entity @e[type=minecraft:item,{PEN}]' if baby
+                else f'/execute if items entity @e[type=minecraft:item,{PEN}] contents minecraft:gold_ingot'),
         ]
         if baby:
             ops.append(cmd('/execute if data entity @e[tag=barter,limit=1] Inventory[{id:"minecraft:golden_sword"}]'))
@@ -2325,7 +3214,7 @@ def piglin_pickups():
                    '/summon minecraft:item 4.5 210 4.5 '
                    '{PickupDelay:0s,Item:{id:"minecraft:leather",count:1}}'),
             {'op': 'tick', 'n': 40},
-            cmd('/execute if entity @e[type=minecraft:item]'),
+            cmd(f'/execute if entity @e[type=minecraft:item,{PEN}]'),
             cmd('/execute if items entity @e[tag=barter,limit=1] weapon.mainhand minecraft:leather'),
         ]
     ops += [*setup('/kill @e[type=!player]'), {'op': 'tick', 'n': 25},
@@ -2359,6 +3248,37 @@ def experience_orb_stuck():
         *setup('/kill @e[type=minecraft:experience_orb]', '/fill 30 214 20 36 216 26 minecraft:air'),
         {'op': 'tick', 'n': 5},
     ]
+
+
+def experience_orb_saved_value():
+    """`ExperienceOrb.readAdditionalSaveData`: `getShortOr("Value", 0)` with no
+    clamp, saved back as `(short) getValue()`. A missing Value is 0, and 0 or
+    a negative Value stays as given, through a chunk unload and reload too. The
+    orbs are far from the player and float in place (NoGravity, no motion)."""
+    x, z, y = 5120, 5120, 300
+    # Read as NumericTag.shortValue: a float floors, an int keeps its low 16 bits.
+    orbs = [(1, None, 0), (2, '0s', 0), (3, '-5s', -5), (4, '7s', 7), (5, '-0.5f', -1), (6, '70000', 4464)]
+
+    def reads():
+        return [cmd(f'/data get entity 0000c0de-0000-0000-0000-00000000000{n} Value', expect_result=v)
+                for n, _, v in orbs]
+
+    ops = [*setup(f'/forceload add {x} {z}'), {'op': 'wait_chunks', 'chunks': [[x >> 4, z >> 4]]},
+           *setup(f'/fill {x} {y - 1} {z} {x + 15} {y - 1} {z + 15} minecraft:stone')]
+    for n, value, _ in orbs:
+        tag = '' if value is None else f',Value:{value}'
+        ops.append(cmd(f'/summon minecraft:experience_orb {x + 2 * n}.5 {y} {z + 8}.5 '
+                       f'{{UUID:[I;49374,0,0,{n}],NoGravity:1b,Motion:[0d,0d,0d]{tag}}}', expect_result=1))
+    ops += reads()
+    # Unload the chunk (saving its entities), then load it again.
+    ops += [*setup(f'/forceload remove {x} {z}'), {'op': 'tick', 'n': 60},
+            cmd(f'/execute unless loaded {x} {y} {z}', expect_result=1),
+            *setup(f'/forceload add {x} {z}'), {'op': 'wait_chunks', 'chunks': [[x >> 4, z >> 4]]},
+            {'op': 'tick', 'n': 2}]
+    ops += reads()
+    return ops + setup(f'/kill @e[type=minecraft:experience_orb,x={x},y={y - 8},z={z},dx=16,dy=24,dz=16]',
+                       f'/fill {x} {y - 1} {z} {x + 15} {y - 1} {z + 15} minecraft:air',
+                       f'/forceload remove {x} {z}')
 
 
 def summoned_potions():
@@ -2431,6 +3351,57 @@ def summoned_potions():
     ]
     ops += [*setup('/kill @e[type=!player]'), {'op': 'tick', 'n': 25}]
     return ops
+
+
+def potion_contents_names():
+    """`PotionItem.getName` and `TippedArrowItem.getName`: a potion or a tipped arrow is
+    named by its contents (`PotionContents.getName`: their own `custom_name`, the potion,
+    else `empty`), over its `item_name`; without contents it takes the item's own name, and a
+    custom name still wins."""
+    stacks = [
+        'minecraft:potion[minecraft:item_name="Bottle",minecraft:potion_contents={potion:"minecraft:long_swiftness"}]',
+        'minecraft:potion',
+        'minecraft:splash_potion[minecraft:potion_contents={custom_effects:[{id:"minecraft:speed",duration:600}]}]',
+        'minecraft:lingering_potion[minecraft:item_name="Cloud",minecraft:potion_contents={potion:"minecraft:poison"}]',
+        'minecraft:tipped_arrow[minecraft:item_name="Dart",minecraft:potion_contents={potion:"minecraft:poison"}]',
+        'minecraft:potion[minecraft:potion_contents={potion:"minecraft:water",custom_name:"swiftness"}]',
+        'minecraft:potion[!minecraft:potion_contents,minecraft:item_name="Bottle"]',
+        'minecraft:potion[minecraft:custom_name="Mine",minecraft:potion_contents={potion:"minecraft:swiftness"}]',
+    ]
+    return [*setup('/clear @s'), *[cmd(f'/give @s {s}') for s in stacks], *setup('/clear @s')]
+
+
+def ominous_spawner_saved_motion():
+    """`Entity.load` reads `Motion` (a component above 10 loads as 0) and
+    `Entity.saveWithoutId` writes `getDeltaMovement()`. `OminousItemSpawner.tick`
+    never moves the spawner, so its motion stays as given, through a chunk
+    unload and reload too. Its item is far in the future."""
+    x, z, y = 5248, 5120, 300
+    spawners = [(1, 'Motion:[0.6d,0.0d,-0.25d]'), (2, 'Motion:[11.0d,-0.5d,0.0d]'), (3, '')]
+
+    def reads():
+        out = []
+        for n, _ in spawners:
+            target = f'0000c0df-0000-0000-0000-00000000000{n}'
+            out += [cmd(f'/data get entity {target} {field}') for field in ('Motion', 'Pos')]
+        return out
+
+    ops = [*setup(f'/forceload add {x} {z}'), {'op': 'wait_chunks', 'chunks': [[x >> 4, z >> 4]]}]
+    for n, fields in spawners:
+        extra = f',{fields}' if fields else ''
+        ops.append(cmd(f'/summon minecraft:ominous_item_spawner {x + 3 * n}.5 {y} {z + 8}.5 '
+                       f'{{UUID:[I;49375,0,0,{n}],spawn_item_after_ticks:100000L,'
+                       f'item:{{id:"minecraft:stone",count:1}}{extra}}}', expect_result=1))
+    ops += reads()
+    ops.append({'op': 'tick', 'n': 5})
+    ops += reads()
+    # Unload the chunk (saving its entities), then load it again.
+    ops += [*setup(f'/forceload remove {x} {z}'), {'op': 'tick', 'n': 60},
+            cmd(f'/execute unless loaded {x} {y} {z}', expect_result=1),
+            *setup(f'/forceload add {x} {z}'), {'op': 'wait_chunks', 'chunks': [[x >> 4, z >> 4]]}]
+    ops += reads()
+    return ops + setup(f'/kill @e[type=minecraft:ominous_item_spawner,x={x},y={y - 8},z={z},dx=16,dy=24,dz=16]',
+                       f'/forceload remove {x} {z}')
 
 
 def trial_spawner_passengers():
@@ -2788,6 +3759,59 @@ def setblock_destroy_air():
                  '/setblock 23 219 10 minecraft:air strict',
                  '/setblock 24 219 11 minecraft:air strict',
                  '/scoreboard objectives remove destroy_air', '/tick unfreeze')
+    return out
+
+
+def block_predicate_nbt():
+    """A block predicate's `{...}` partially matches the block entity's full
+    saved data (BlockPredicateArgument, NbtUtils.compareNbt) (#12030)."""
+    named, plain, stone = '26 220 30', '27 220 30', '28 220 30'
+    out = setup('/tick freeze', '/fill 26 220 30 29 220 32 minecraft:air strict',
+                f'/setblock {named} minecraft:chest{{CustomName:"expected",Items:['
+                '{Slot:0b,id:"minecraft:apple",count:3},{Slot:2b,id:"minecraft:stone",count:1}]}',
+                f'/setblock {plain} minecraft:chest', f'/setblock {stone} minecraft:stone')
+    for kind in ('if', 'unless'):
+        for pos, predicate in [
+            (named, 'minecraft:chest'),
+            (named, 'minecraft:chest{}'),
+            (named, 'minecraft:chest{CustomName:"expected"}'),
+            (named, 'minecraft:chest{CustomName:"different"}'),
+            (named, 'minecraft:chest{CustomName:"\\u0065xpected"}'),
+            (named, 'minecraft:chest[type=single]{CustomName:"expected"}'),
+            (named, 'minecraft:chest[type=left]{CustomName:"expected"}'),
+            (named, 'minecraft:chest{id:"minecraft:chest",x:26,y:220,z:30}'),
+            (named, 'minecraft:chest{x:27}'),
+            (named, 'minecraft:chest{Items:[{id:"minecraft:stone"}]}'),
+            (named, 'minecraft:chest{Items:[{id:"minecraft:stone"},{id:"minecraft:apple"}]}'),
+            (named, 'minecraft:chest{Items:[{id:"minecraft:diamond"}]}'),
+            (named, 'minecraft:chest{Items:[{Slot:0b,count:3}]}'),
+            (named, 'minecraft:chest{Items:[{Slot:0b,count:3b}]}'),
+            (named, 'minecraft:chest{Items:[]}'),
+            (named, 'minecraft:barrel{CustomName:"expected"}'),
+            (named, '#minecraft:guarded_by_piglins{CustomName:"expected"}'),
+            (named, '#minecraft:guarded_by_piglins{CustomName:"different"}'),
+            (plain, 'minecraft:chest{}'),
+            (plain, 'minecraft:chest{CustomName:"expected"}'),
+            (plain, 'minecraft:chest{Items:[]}'),
+            (stone, 'minecraft:stone'),
+            (stone, 'minecraft:stone{}'),
+            (stone, '#minecraft:base_stone_overworld{}'),
+        ]:
+            out.append(cmd(f'/execute {kind} block {pos} {predicate}'))
+    # FillCommand and CloneCommands test the same predicate at each position.
+    out += [cmd('/clone 26 220 30 27 220 30 26 220 32 filtered minecraft:chest{CustomName:"expected"}'),
+            cmd('/execute if block 26 220 32 minecraft:chest{CustomName:"expected"}'),
+            cmd('/execute if block 27 220 32 minecraft:air')]
+    # (no items to spill: the fill cases test only which blocks the filter takes)
+    out += setup('/data remove block 26 220 30 Items')
+    out += [cmd('/fill 26 220 30 28 220 30 minecraft:barrel replace minecraft:chest{CustomName:"expected"}'),
+            cmd('/execute if block 26 220 30 minecraft:barrel'),
+            cmd('/execute if block 27 220 30 minecraft:chest'),
+            cmd('/fill 26 220 30 28 220 30 minecraft:barrel replace #minecraft:guarded_by_piglins{}'),
+            cmd('/execute if block 27 220 30 minecraft:barrel'),
+            cmd('/fill 26 220 30 28 220 30 minecraft:barrel replace minecraft:stone{}')]
+    out += setup('/kill @e[type=minecraft:item]', '/fill 26 220 30 29 220 32 minecraft:air strict',
+                 '/tick unfreeze')
     return out
 
 
@@ -3409,7 +4433,7 @@ def allay_invalid_brain_retention():
             ops.append(cmd('/scoreboard players get success h226', expect_result=success))
     ops += setup('/execute store result score after h226 run time query gametime')
     ops.append(cmd('/execute if score after h226 = before h226', expect_result=1))
-    return ops
+    return ops + setup('/scoreboard objectives remove h226')
 
 
 def large_fireball_fire():
@@ -3498,7 +4522,8 @@ def mob_partial_block_suffocation():
             ops += setup(f'/kill @e[tag={eye}]')
         ops += setup(f'/kill {target}')
         ops.append({'op': 'tick', 'n': 25})
-    return ops
+    # Later groups run with the world's rules: piglins pick nothing up without mob_griefing.
+    return ops + setup('/gamerule mob_griefing true', '/gamerule random_tick_speed 3')
 
 
 
@@ -3547,7 +4572,7 @@ def mob_baby_attribute_reads():
     reads(subject, False)
     ops.extend(setup('/execute store result score after h227 run time query gametime'))
     ops.append(cmd('/execute if score after h227 = before h227', expect_result=1))
-    return ops
+    return ops + setup('/scoreboard objectives remove h227')
 
 
 
@@ -3577,6 +4602,37 @@ def cube_saved_age():
         ops.append(cmd(f'/data get entity {pig} Age', expect_result=37 - tick))
     return ops
 
+
+
+def villager_gossip_decay():
+    """Villager.tick decays gossip with or without AI (#13619)."""
+    # A negative LastGossipDecay is due on the first tick at any game time.
+    cases = [
+        ('noai_new', 'NoAI:1b', None),
+        ('noai_pos', 'NoAI:1b,LastGossipDecay:-30000L', ('minor_positive', 25, 24)),
+        ('noai_neg', 'NoAI:1b,LastGossipDecay:-30000L', ('minor_negative', 100, 80)),
+        ('ai_pos', 'LastGossipDecay:-30000L', ('minor_positive', 25, 24)),
+    ]
+    ops = setup('/scoreboard objectives add h13619 dummy')
+    for i, (name, fields, gossip) in enumerate(cases):
+        if gossip:
+            fields += f',Gossips:[{{Target:[I;1,2,3,4],Type:"{gossip[0]}",Value:{gossip[1]}}}]'
+        ops += setup(f'/summon villager {2.5 + 3 * i} 200 2.5 {{UUID:[I;13619,0,0,{i + 1}],'
+                     f'Tags:["h13619_{name}"],NoGravity:1b,PersistenceRequired:1b,{fields}}}')
+    ops.append({'op': 'tick', 'n': 1})
+    for name, fields, gossip in cases:
+        target = f'@e[tag=h13619_{name},limit=1]'
+        ops.append(cmd(f'/execute if entity {target}', expect_result=1))
+        # maybeDecayGossip stamps this tick's game time.
+        ops += setup('/execute store result score #now h13619 run time query gametime',
+                     f'/execute store result score #decay h13619 run data get entity {target} LastGossipDecay')
+        ops.append(cmd('/execute if score #now h13619 = #decay h13619', expect_result=1))
+        if gossip:
+            ops.append(cmd(f'/data get entity {target} Gossips'))
+            ops.append(cmd(f'/execute if entity @e[tag=h13619_{name},nbt={{Gossips:[{{Type:"{gossip[0]}",Value:{gossip[2]}}}]}}]',
+                           expect_result=1))
+    ops += setup('/kill @e[type=villager]', '/scoreboard objectives remove h13619')
+    return ops
 
 
 def villager_wake_rotation():
@@ -3648,6 +4704,127 @@ def awake_villager_saved_position():
 
 
 
+def mob_saved_pickup_loot():
+    """Valid boolean inputs only; full bodies retain unrelated save diagnostics."""
+    ops = [cmd('/tick freeze'), cmd('/forceload add 160 160 175 175'),
+           {'op': 'wait_chunks', 'chunks': [[10, 10]]},
+           cmd('/fill 160 199 160 175 199 175 stone', expect_result=256),
+           cmd('/execute if loaded 164 200 164', expect_result=1),
+           cmd('/execute if block 164 199 164 stone', expect_result=1),
+           cmd('/scoreboard objectives add pickup_save dummy', expect_result=1)]
+    ops += setup('/execute store result score start pickup_save run time query gametime')
+    for species, name in enumerate(['pig', 'allay', 'sulfur_cube']):
+        for value, supplied in enumerate(['', ',CanPickUpLoot:0b', ',CanPickUpLoot:1b']):
+            n = 1 + species * 3 + value
+            uuid = f'0000002e-0000-0000-0000-{n:012x}'
+            array = f'[I;46,0,0,{n}]'
+            tag = f'pickup_save_{n}'
+            body = 'Pos:[164.5d,200d,164.5d],Motion:[0d,0d,0d],NoAI:1b,NoGravity:1b,Silent:1b,PersistenceRequired:1b,Health:4f'
+            expected = int(name == 'sulfur_cube' or (name == 'pig' and value == 2))
+            ops += [cmd(f'/summon minecraft:{name} 164.5 200 164.5 {{UUID:{array},Tags:["{tag}"],{body}{supplied}}}', expect_result=1),
+                    cmd(f'/execute as {uuid} if entity @s[type=minecraft:{name},tag={tag}]', expect_result=1),
+                    cmd(f'/execute if data entity {uuid} {{UUID:{array},{body}}}', expect_result=1)]
+            for _ in range(2):
+                ops += setup('/scoreboard players set value pickup_save 317',
+                             '/scoreboard players set success pickup_save 17')
+                ops += [cmd(f'/data get entity {uuid} CanPickUpLoot', expect_result=expected),
+                        cmd(f'/execute store result score value pickup_save store success score success pickup_save run data get entity {uuid} CanPickUpLoot', expect_result=expected),
+                        cmd('/scoreboard players get value pickup_save', expect_result=expected),
+                        cmd('/scoreboard players get success pickup_save', expect_result=1),
+                        cmd(f'/execute if data entity {uuid} {{CanPickUpLoot:{expected}b}}', expect_result=1)]
+            full = cmd(f'/data get entity {uuid}', record=False)
+            full['trace'] = True
+            ops.append(full)
+    ops += setup('/execute store result score elapsed pickup_save run time query gametime',
+                 '/scoreboard players operation elapsed pickup_save -= start pickup_save')
+    return ops + [cmd('/scoreboard players get elapsed pickup_save', expect_result=0)]
+
+
+def orb_saved_uuid():
+    """Zero-tick identity gate; complete entity bodies remain raw diagnostics."""
+    ops = [cmd('/tick freeze'), cmd('/forceload add 160 160 175 175'),
+           {'op': 'wait_chunks', 'chunks': [[10, 10]]},
+           cmd('/fill 160 199 160 175 199 175 stone', expect_result=256),
+           cmd('/execute if loaded 164 200 164', expect_result=1),
+           cmd('/execute if block 164 199 164 stone', expect_result=1),
+           cmd('/scoreboard objectives add orb_identity dummy', expect_result=1)]
+    ops += setup('/execute store result score start orb_identity run time query gametime')
+    for kind, target, array, x, fields in [
+        ('experience_orb', '00000000-0000-0000-0000-000000000002', '[I;0,0,0,2]', 164.5,
+         'Value:1s,Age:0s,Health:5s'),
+        ('pig', '0000000b-0000-000c-0000-000d0000000e', '[I;11,12,13,14]', 166.5,
+         'Health:10f,NoAI:1b,Silent:1b,PersistenceRequired:1b'),
+    ]:
+        tag = f'orb_identity_{kind}'
+        body = f'Pos:[{x}d,200d,164.5d],Motion:[0d,0d,0d],NoGravity:1b,{fields}'
+        ops += [cmd(f'/summon minecraft:{kind} {x} 200 164.5 {{UUID:{array},Tags:["{tag}"],{body}}}', expect_result=1),
+                # No saved-UUID predicate in admission: that is the defect under test.
+                cmd(f'/execute as {target} if entity @s[type=minecraft:{kind},tag={tag}]', expect_result=1),
+                cmd(f'/execute if data entity {target} {{{body}}}', expect_result=1)]
+        for _ in range(3):
+            ops += setup('/scoreboard players set value orb_identity 317',
+                         '/scoreboard players set success orb_identity 17')
+            ops += [cmd(f'/data get entity {target} UUID', expect_result=4),
+                    cmd(f'/execute store result score value orb_identity store success score success orb_identity run data get entity {target} UUID', expect_result=4),
+                    cmd('/scoreboard players get value orb_identity', expect_result=4),
+                    cmd('/scoreboard players get success orb_identity', expect_result=1),
+                    cmd(f'/execute if data entity {target} {{UUID:{array}}}', expect_result=1),
+                    cmd(f'/execute as {target} if entity @s[type=minecraft:{kind},tag={tag}]', expect_result=1)]
+            full = cmd(f'/data get entity {target}', record=False)
+            full['trace'] = True
+            ops.append(full)
+    ops += setup('/execute store result score elapsed orb_identity run time query gametime',
+                 '/scoreboard players operation elapsed orb_identity -= start orb_identity')
+    return ops + [cmd('/scoreboard players get elapsed orb_identity', expect_result=0)]
+
+
+def stand_saved_fall():
+    """Five real tick boundaries; whole bodies remain separate raw diagnostics."""
+    ops = [cmd('/tick freeze'), cmd('/forceload add 0 0 15 15'),
+           {'op': 'settle', 'required_chunks': [[0, 0]]},
+           {'op': 'wait_chunks', 'chunks': [[0, 0]]},
+           cmd('/fill 0 199 0 15 199 15 stone', expect_result=256),
+           cmd('/fill 0 200 0 15 210 15 air'),
+           cmd('/execute if loaded 4 205 4', expect_result=1),
+           cmd('/scoreboard objectives add stand_fall dummy', expect_result=1)]
+    actors = [('0000001c-0000-0000-0000-000000000001', '[I;28,0,0,1]', 4.5, 0),
+              ('0000001c-0000-0000-0000-000000000002', '[I;28,0,0,2]', 12.5, 1)]
+    for uuid, array, x, gravity in actors:
+        cell = int(x)
+        ops += [cmd(f'/execute if block {cell} 199 4 stone', expect_result=1),
+                cmd(f'/execute if block {cell} 205 4 air', expect_result=1),
+                cmd(f'/execute if block {cell} 206 4 air', expect_result=1),
+                cmd(f'/summon armor_stand {x} 205 4.5 {{UUID:{array},Tags:["stand_fall_{gravity}"],Health:20f,NoGravity:{gravity}b,Motion:[0d,0d,0d]}}', expect_result=1),
+                cmd(f'/execute if data entity {uuid} {{Pos:[{x}d,205d,4.5d],Motion:[0d,0d,0d]}}', expect_result=1)]
+    ops += setup('/execute store result score start stand_fall run time query gametime')
+    for ticks, step in [(0, 0), (1, 1), (2, 1), (3, 1), (5, 2)]:
+        if step:
+            ops.append(cmd(f'/tick step {step}'))
+            ops.append({'op': 'tick', 'n': step})
+        ops += setup('/execute store result score elapsed stand_fall run time query gametime',
+                     '/scoreboard players operation elapsed stand_fall -= start stand_fall')
+        ops.append(cmd('/scoreboard players get elapsed stand_fall', expect_result=ticks))
+        for uuid, array, x, gravity in actors:
+            ops += [cmd(f'/execute as {uuid} if entity @s[type=minecraft:armor_stand,tag=stand_fall_{gravity}]', expect_result=1),
+                    cmd(f'/execute if data entity {uuid} {{UUID:{array},Health:20f}}', expect_result=1),
+                    cmd(f'/data get entity {uuid} Pos', expect_result=3),
+                    cmd(f'/data get entity {uuid} Motion', expect_result=3),
+                    cmd(f'/data get entity {uuid} fall_distance', expect_result=0),
+                    cmd(f'/data get entity {uuid} OnGround', expect_result=0)]
+            if gravity:
+                ops.append(cmd(f'/execute if data entity {uuid} {{NoGravity:1b,Pos:[{x}d,205d,4.5d],Motion:[0d,0d,0d],fall_distance:0d}}', expect_result=1))
+            else:
+                ops.append(cmd(f'/execute unless data entity {uuid} {{NoGravity:1b}}', expect_result=1))
+                # Independently measured on Java 26.3; the suffix also checks Double type.
+                distance = {0: '0.0', 1: '0.0', 2: '0.07840000092983246',
+                            3: '0.23363199830055237', 5: '0.7684761881828308'}[ticks]
+                ops.append(cmd(f'/execute if data entity {uuid} {{fall_distance:{distance}d}}', expect_result=1))
+            full = cmd(f'/data get entity {uuid}', record=False)
+            full['trace'] = True
+            ops.append(full)
+    return ops
+
+
 def projectile_saved_uuid():
     """Direct identity guards are separate from repeated saved UUID views."""
     from uuid import UUID
@@ -3687,6 +4864,84 @@ def projectile_saved_uuid():
                  '/scoreboard objectives remove h240')
     return ops
 
+
+
+def entity_ticking_gate():
+    """#12769: thrown potions, experience orbs, rockets and area effect clouds
+    freeze in a loaded chunk that no longer ticks entities, as it unloads."""
+    x0, y0, z0 = 3392, 300, 3392
+    chunk = [[x0 >> 4, z0 >> 4]]
+    subjects = [
+        ('splash_potion', 'Motion:[0.05d,0d,0d],Item:{id:"minecraft:splash_potion",count:1}', 'Pos'),
+        ('lingering_potion', 'Motion:[0.05d,0d,0d],Item:{id:"minecraft:lingering_potion",count:1}', 'Pos'),
+        ('experience_orb', 'Value:1s', 'Age'),
+        ('firework_rocket', 'LifeTime:100000', 'Life'),
+        ('area_effect_cloud', 'Duration:100000,Radius:0.5f', 'Age'),
+        ('area_effect_cloud', 'Duration:100000,Radius:0.5f,potion_contents:{potion:"minecraft:regeneration"}', 'Age'),
+    ]
+    ops = [cmd(f'/forceload add {x0} {z0}', False), {'op': 'wait_chunks', 'chunks': chunk}]
+    for n, (kind, body, _) in enumerate(subjects, 1):
+        ops += setup(f'/summon {kind} {x0 + 1}.5 {y0 + 2} {z0 + n * 2}.5 '
+                     f'{{UUID:[I;12769,0,{n},1],NoGravity:1b,{body}}}')
+
+    def reads():
+        for n, (_, _, key) in enumerate(subjects, 1):
+            ops.append(cmd(f'/data get entity 000031e1-0000-0000-0000-{n:04x}00000001 {key}'))
+
+    ops.append({'op': 'tick', 'n': 2})
+    reads()
+    # The chunk stays loaded for a while after it stops ticking entities.
+    ops += [cmd(f'/forceload remove {x0} {z0}', False), {'op': 'tick', 'n': 60},
+            cmd(f'/execute unless loaded {x0} {y0} {z0}', expect_result=1),
+            cmd(f'/forceload add {x0} {z0}', False), {'op': 'wait_chunks', 'chunks': chunk}]
+    reads()
+    ops.append({'op': 'tick', 'n': 3})
+    reads()
+    return ops + setup(f'/kill @e[type=!player,x={x0},y={y0 - 8},z={z0},dx=16,dy=24,dz=16]',
+                       f'/forceload remove {x0} {z0}')
+
+
+def summoned_eye_of_ender():
+    """#12807: a summoned or loaded eye of ender flies by its Motion (no target, no
+    gravity), saves its Item, and shatters after 80 ticks; its life is not saved."""
+    x0, y0, z0 = 3520, 300, 3520
+    chunk = [[x0 >> 4, z0 >> 4]]
+    subjects = [
+        'Motion:[0.05d,0d,0d]',
+        '',
+        'Motion:[0d,0.1d,-0.02d],Item:{id:"minecraft:stone",count:5}',
+        'Motion:[11d,0d,0.03d]',
+    ]
+    uuid = [f'00003207-0000-0000-0000-{n:04x}00000001' for n in range(1, len(subjects) + 2)]
+    ops = [cmd(f'/forceload add {x0} {z0}', False), {'op': 'wait_chunks', 'chunks': chunk}]
+    for n, body in enumerate(subjects, 1):
+        sep = ',' if body else ''
+        ops += setup(f'/summon eye_of_ender {x0 + 1}.5 {y0 + 2} {z0 + n * 2}.5 '
+                     f'{{UUID:[I;12807,0,{n},1]{sep}{body}}}')
+    ops.append({'op': 'tick', 'n': 2})
+    for u in uuid[:len(subjects)]:
+        ops.append(cmd(f'/data get entity {u}'))
+    ops.append({'op': 'tick', 'n': 78})
+    for u in uuid[:len(subjects)]:
+        ops.append(cmd(f'/execute if entity {u}', expect_result=1))
+    ops.append({'op': 'tick', 'n': 1})
+    for u in uuid[:len(subjects)]:
+        ops.append(cmd(f'/execute unless entity {u}', expect_result=1))
+    # A loaded eye starts its life again: EyeOfEnder saves only its Item.
+    last = uuid[len(subjects)]
+    ops += setup(f'/summon eye_of_ender {x0 + 8}.5 {y0 + 2} {z0 + 8}.5 '
+                 f'{{UUID:[I;12807,0,{len(subjects) + 1},1],Motion:[0d,0d,0.01d]}}')
+    ops.append({'op': 'tick', 'n': 50})
+    ops += [cmd(f'/forceload remove {x0} {z0}', False), {'op': 'tick', 'n': 60},
+            cmd(f'/execute unless loaded {x0} {y0} {z0}', expect_result=1),
+            cmd(f'/forceload add {x0} {z0}', False), {'op': 'wait_chunks', 'chunks': chunk}]
+    ops.append(cmd(f'/data get entity {last} Pos'))
+    ops.append({'op': 'tick', 'n': 80})
+    ops.append(cmd(f'/execute if entity {last}', expect_result=1))
+    ops.append({'op': 'tick', 'n': 1})
+    ops.append(cmd(f'/execute unless entity {last}', expect_result=1))
+    return ops + setup(f'/kill @e[type=eye_of_ender,x={x0},y={y0 - 8},z={z0},dx=16,dy=24,dz=16]',
+                       f'/forceload remove {x0} {z0}')
 
 
 def sulfur_cube_loaded_health():
@@ -3910,6 +5165,129 @@ def sulfur_cube_fuse_ticks(immediate_power=False):
 
 
 
+def mob_nbt_damage_cooldown():
+    """Unrelated NBT edits retain a live mob's internal damage protection."""
+    objective = 'rewrite_hit'
+    out = setup('/gamerule minecraft:spawn_mobs false', '/forceload remove 0 0 31 15')
+
+    def check(command, result=1):
+        out.append(cmd(command, expect_result=result))
+
+    def action(command, accepted=1):
+        check(f'/scoreboard players set #r {objective} 31', 31)
+        check(f'/scoreboard players set #s {objective} 17', 17)
+        out.append(cmd(f'/execute store result score #r {objective} '
+                       f'store success score #s {objective} run {command.lstrip("/")}'))
+        check(f'/scoreboard players get #r {objective}', accepted)
+        check(f'/scoreboard players get #s {objective}', accepted)
+
+    def state(health, hurt, custom='before', silent=False):
+        # Identity and actual values precede every rejected-hit observation.
+        check(f'/execute as {uid} if entity @s[type=minecraft:pig,tag=rewrite_hit_{serial}]')
+        check(f'/execute if data entity {uid} {{UUID:[I;294,0,0,{serial}],'
+              f'Health:{health}f,HurtTime:{hurt}s,Pos:[{x}d,200d,10.5d],'
+              f'NoAI:1b,NoGravity:1b,PersistenceRequired:1b,CustomName:"{custom}"}}')
+        check(f'/data get entity {uid} Health', health)
+        check(f'/data get entity {uid} HurtTime', hurt)
+        check(f'/data get entity {uid} CustomName', len(custom))
+        check(f'/execute as {uid} {"if" if silent else "unless"} entity @s[nbt={{Silent:1b}}]')
+        out.extend(setup(f'/execute store result score #clock {objective} run time query gametime'))
+        check(f'/scoreboard players operation #clock {objective} -= #before {objective}', elapsed)
+
+    check('/tick freeze')
+    check('/gamerule minecraft:spawn_mobs', 0)
+    check('/forceload add 0 0 31 15', 2)
+    out.append({'op': 'settle'})
+    check('/execute if loaded 0 200 0')
+    check('/execute if loaded 31 200 15')
+    out.extend(setup('/kill @e[type=!player]', '/fill 0 199 0 31 203 15 air'))
+    check(f'/scoreboard objectives add {objective} dummy')
+    cases = ['no_write', 'name', 'silent', 'unchanged', 'stronger', 'expiry',
+             'fresh_write', 'health_write', 'hurt_write']
+    for serial, case in enumerate(cases, 1):
+        x = 2.5 + 3 * (serial - 1)
+        uid = f'00000126-0000-0000-0000-{serial:012x}'
+        elapsed = 0
+        check(f'/execute if block {int(x)} 200 10 air')
+        check(f'/setblock {int(x)} 199 10 stone')
+        check(f'/execute if block {int(x)} 199 10 stone')
+        out.extend(setup(f'/execute store result score #before {objective} run time query gametime'))
+        check(f'/summon pig {x} 200 10.5 {{UUID:[I;294,0,0,{serial}],'
+              f'Tags:["rewrite_hit","rewrite_hit_{serial}"],NoAI:1b,NoGravity:1b,'
+              'Silent:0b,PersistenceRequired:1b,Health:10f,CustomName:"before"}')
+        check(f'/data get entity {uid} UUID', 4)
+        check(f'/data get entity {uid} Pos', 3)
+        state(10, 0)
+        if case == 'fresh_write':
+            action(f'/data merge entity {uid} {{CustomName:"after"}}')
+            state(10, 0, 'after')
+            action(f'/damage {uid} 1 generic')
+            state(9, 10, 'after')
+            action(f'/damage {uid} 1 generic', 0)
+            state(9, 10, 'after')
+        else:
+            action(f'/damage {uid} 1 generic')
+            state(9, 10)
+            action(f'/damage {uid} 1 generic', 0)
+            state(9, 10)
+            custom, silent, health, hurt = 'before', False, 9, 10
+            if case != 'no_write':
+                changes = {'name': 'CustomName:"after"', 'silent': 'Silent:1b',
+                           'unchanged': 'CustomName:"before"', 'stronger': 'Silent:1b',
+                           'expiry': 'CustomName:"after"', 'health_write': 'Health:6f,Silent:1b',
+                           'hurt_write': 'HurtTime:0s,CustomName:"after"'}[case]
+                action(f'/data merge entity {uid} {{{changes}}}', int(case != 'unchanged'))
+                if case in ('name', 'expiry', 'hurt_write'):
+                    custom = 'after'
+                if case in ('silent', 'stronger', 'health_write'):
+                    silent = True
+                if case == 'health_write':
+                    health = 6
+                if case == 'hurt_write':
+                    hurt = 0
+                state(health, hurt, custom, silent)
+            if case == 'expiry':
+                check('/tick step 9')
+                out.append({'op': 'tick', 'n': 9})
+                elapsed = 9
+                state(9, 1, custom)
+                action(f'/damage {uid} 1 generic', 0)
+                state(9, 1, custom)
+                check('/tick step 1')
+                out.append({'op': 'tick', 'n': 1})
+                elapsed = 10
+                state(9, 0, custom)
+                action(f'/damage {uid} 1 generic')
+                state(8, 10, custom)
+            elif case == 'stronger':
+                action(f'/damage {uid} 2 generic')
+                state(8, 10, custom, silent)
+                action(f'/damage {uid} 2 generic', 0)
+                state(8, 10, custom, silent)
+            else:
+                action(f'/damage {uid} 1 generic', 0)
+                state(health, hurt, custom, silent)
+                if case == 'no_write':
+                    action(f'/damage {uid} 2 generic')
+                    state(8, 10)
+                    # Prove ordinary expiry independently of any NBT rewrite.
+                    check('/tick step 9')
+                    out.append({'op': 'tick', 'n': 9})
+                    elapsed = 9
+                    state(8, 1)
+                    action(f'/damage {uid} 2 generic', 0)
+                    state(8, 1)
+                    check('/tick step 1')
+                    out.append({'op': 'tick', 'n': 1})
+                    elapsed = 10
+                    state(8, 0)
+                    action(f'/damage {uid} 2 generic')
+                    state(6, 10)
+        out.extend(setup(f'/kill {uid}'))
+    return out + setup(f'/scoreboard objectives remove {objective}',
+                       '/fill 0 199 0 31 203 15 air', '/forceload remove 0 0 31 15', '/tick unfreeze')
+
+
 def mob_full_resistance_hits():
     lines = [cmd('/forceload add 0 0 31 31'), {'op': 'settle'}]
     for x, z in [(0, 0), (16, 0), (0, 16), (16, 16)]:
@@ -4087,6 +5465,8 @@ def nautilus_saved_sitting():
     out += setup('/kill @e[type=!player]', '/forceload add 0 0 15 15')
     out.append({'op': 'settle'})
     check('/execute if loaded 0 200 0')
+    # /fill counts changed blocks; prior groups may already have stone here.
+    out += setup('/fill 0 199 0 15 199 15 air')
     check('/fill 0 199 0 15 199 15 stone', 256)
     out += setup('/execute store result score #before saved_sit run time query gametime')
     serial = 0
@@ -4155,6 +5535,8 @@ def zombie_nautilus_ignored_age():
     out += setup('/kill @e[type=!player]', '/forceload add 0 0 15 15')
     out.append({'op': 'settle'})
     check('/execute if loaded 0 200 0')
+    # /fill counts changed blocks; prior groups may already have stone here.
+    out += setup('/fill 0 199 0 15 199 15 air')
     check('/fill 0 199 0 15 199 15 stone', 256)
     out += setup('/execute store result score #before ignored_age run time query gametime')
     for serial, age in enumerate((None, -24000, 0, 37), 1):
@@ -4198,6 +5580,30 @@ def zombie_nautilus_ignored_age():
                  '/forceload remove 0 0 15 15')
     return out
 
+
+
+def boat_passenger_tree_cases(original_full=False):
+    try:
+        from .boat_passenger_tree_corpus import cases
+    except ImportError:
+        from boat_passenger_tree_corpus import cases
+    return cases(cmd, original_full)
+
+
+def effective_component_presence_cases():
+    try:
+        from .effective_component_presence_corpus import cases
+    except ImportError:
+        from effective_component_presence_corpus import cases
+    return cases(cmd)
+
+
+def jukebox_saved_clock_cases():
+    try:
+        from .jukebox_saved_clock_corpus import cases
+    except ImportError:
+        from jukebox_saved_clock_corpus import cases
+    return cases(cmd)
 
 
 def structured_item_slots():
@@ -4476,22 +5882,1575 @@ def mining_efficiency_9021():
 
 
 
+def crafter_map_extension():
+    """Actual empty-map use, then scheduled crafter matching and saved-map derivation."""
+    def map_state(id, value):
+        return {'op': 'map_state', 'id': id, 'expect_map': value}
+    ops = setup('/forceload add 0 0 15 15', '/fill 0 199 0 15 199 15 stone',
+                '/tp @s 8.5 200 8.5 0 0', '/gamemode survival', '/clear @s',
+                '/item replace entity @s weapon.mainhand with minecraft:map',
+                '/scoreboard objectives add crafter_map dummy',
+                '/data modify storage h298:identity uuid set from entity @s UUID')
+    ops += [cmd('/execute if loaded 4 200 4', expect_result=1),
+            cmd('/execute if entity @s[type=player,nbt={Pos:[8.5d,200d,8.5d],Health:20f}]', expect_result=1),
+            cmd('/data get entity @s SelectedItem'),
+            map_state(0, 'missing'), {'op': 'use_item'},
+            cmd('/data get entity @s SelectedItem'),
+            cmd('/execute if items entity @s weapon.mainhand minecraft:filled_map[minecraft:map_id=0]', expect_result=1),
+            map_state(0, 'scale=0,locked=false,center=0,0'),
+            {'op': 'crafter_max_map_fixture'},
+            map_state(31, 'scale=4,locked=false,center=960,960'),
+            map_state(99, 'missing')]
+    ops += setup('/clear @s')
+    for case, map_id in [('extend', 0), ('missing', 99), ('max_scale', 31), ('ordinary', None)]:
+        ops += setup('/setblock 4 200 5 air', '/setblock 4 200 4 air', '/setblock 4 200 3 air',
+                     '/setblock 4 200 3 chest[facing=south]',
+                     '/setblock 4 200 4 crafter[orientation=north_up]')
+        for i in range(9):
+            item = ('minecraft:oak_log' if i == 0 else 'minecraft:air') if map_id is None else (
+                f'minecraft:filled_map[minecraft:map_id={map_id}]' if i == 4 else 'minecraft:paper')
+            ops += setup(f'/item replace block 4 200 4 container.{i} with {item}')
+        ops += [cmd('/execute if block 4 200 4 minecraft:crafter[orientation=north_up,triggered=false]', expect_result=1),
+                cmd('/execute if block 4 199 4 minecraft:stone', expect_result=1),
+                cmd('/execute if block 4 200 3 minecraft:chest[facing=south]', expect_result=1),
+                cmd('/data get block 4 200 4 id'), cmd('/data get block 4 200 4 Items'),
+                cmd('/data get block 4 200 4 disabled_slots'), cmd('/data get block 4 200 3 Items')]
+        ops += setup('/execute store result score start crafter_map run time query gametime')
+        ops += [cmd('/setblock 4 200 5 redstone_block'),
+                cmd('/execute if block 4 200 4 minecraft:crafter[triggered=true]', expect_result=1),
+                {'op': 'tick', 'n': 10},
+                cmd('/data get block 4 200 4 Items'), cmd('/data get block 4 200 3 Items')]
+        if case == 'extend':
+            ops += [cmd('/execute if items block 4 200 3 container.0 minecraft:filled_map[minecraft:map_id=1]', expect_result=1),
+                    cmd('/execute unless data block 4 200 3 Items[0].components."minecraft:map_post_processing"', expect_result=1),
+                    map_state(1, 'scale=1,locked=false,center=64,64')]
+        ops += [map_state(0, 'scale=0,locked=false,center=0,0'),
+                map_state(31, 'scale=4,locked=false,center=960,960')]
+        ops += setup('/execute store result score elapsed crafter_map run time query gametime',
+                     '/scoreboard players operation elapsed crafter_map -= start crafter_map')
+        ops += [cmd('/scoreboard players get elapsed crafter_map', expect_result=10)]
+    ops += setup('/execute store success score identity_changed crafter_map run data modify storage h298:identity uuid set from entity @s UUID')
+    ops += [cmd('/scoreboard players get identity_changed crafter_map', expect_result=0),
+            cmd('/execute if entity @s[type=player,nbt={Pos:[8.5d,200d,8.5d],Health:20f}]', expect_result=1)]
+    # Later groups build on the setup's empty, creative world: take the room, its floor and its chunk back.
+    return ops + setup('/setblock 4 200 3 air', '/setblock 4 200 4 air', '/setblock 4 200 5 air',
+                       '/fill 0 199 0 15 199 15 air', '/gamemode creative', '/clear @s',
+                       '/scoreboard objectives remove crafter_map', '/forceload remove 0 0 15 15')
+
+
+def advancement_loot_fixtures(group_names):
+    advancements, tables = {}, {}
+    if 'advancement world loot rewards' in group_names:
+        criteria = {'never': {'trigger': 'minecraft:impossible'}}
+        advancements = {'parity:loot_reward': {'criteria': criteria,
+                                             'rewards': {'loot': ['parity:reward']}},
+                        'parity:no_loot': {'criteria': criteria}}
+        tables['parity:reward'] = {'type': 'minecraft:advancement_reward',
+                                  'pools': [{'rolls': 1, 'entries': [
+                                      {'type': 'minecraft:item', 'name': 'minecraft:diamond'}]}]}
+    if 'advancement empty loot reference' in group_names:
+        tables['parity:empty_reward'] = {'type': 'minecraft:advancement_reward', 'pools': []}
+    if 'loot world pack tables' in group_names:
+        tables['parity:pack_loot'] = {'type': 'minecraft:chest', 'pools': [{'rolls': 1, 'entries': [
+            {'type': 'minecraft:item', 'name': 'minecraft:emerald',
+             'modifier': {'type': 'minecraft:set_count', 'count': 3}}]}]}
+    try:
+        from . import player_food_predicate_corpus as player_food
+    except ImportError:
+        import player_food_predicate_corpus as player_food
+    if player_food.GROUP in group_names:
+        advancements.update(player_food.advancements())
+    return advancements, tables
+
+
+def advancement_world_loot_rewards(named_table=False, include_missing_ack=False):
+    """One world-only, modifier-free reward table; no XP, recipe or function reward."""
+    ops = setup('/forceload add 0 0 15 15', '/setblock 8 229 8 stone',
+                '/tp @s 8.5 230 8.5 0 0', '/clear @s',
+                '/scoreboard objectives add reward_loot dummy')
+    ops += [cmd('/execute if loaded 8 230 8', expect_result=1),
+            cmd('/execute if entity @s[type=player,nbt={Pos:[8.5d,230d,8.5d],Health:20f}]', expect_result=1),
+            cmd('/data get entity @s Inventory')]
+    ops += setup('/data modify storage h292:identity value set from entity @s UUID',
+                 '/execute store result score clock reward_loot run time query gametime')
+    def reference(table):
+        return ('{type:"minecraft:advancement_reward",pools:[{rolls:1,entries:['
+                '{type:"minecraft:loot_table",value:"' + table + '"}]}]}')
+    target = 'parity:reward' if named_table else reference('parity:reward')
+    if not named_table:
+        # Same reference shape with a missing key must leave the inventory empty.
+        # Only its three codec/ACK rows are excluded from focused97; full100
+        # records them unchanged. Both Inventory guards always remain recorded.
+        ops += setup('/scoreboard players set missing_result reward_loot -99',
+                     '/scoreboard players set missing_success reward_loot -99')
+        ops += [cmd('/scoreboard players get missing_result reward_loot', expect_result=-99),
+                cmd('/scoreboard players get missing_success reward_loot', expect_result=-99),
+                cmd('/execute store result score missing_result reward_loot store success score missing_success reward_loot run loot give @s loot ' + reference('parity:missing_reward'), record=include_missing_ack),
+                cmd('/scoreboard players get missing_result reward_loot', record=include_missing_ack),
+                cmd('/scoreboard players get missing_success reward_loot', record=include_missing_ack),
+                cmd('/data get entity @s Inventory', expect_result=0),
+                cmd('/execute unless data entity @s Inventory[]', expect_result=1)]
+    # A reference, never an inline diamond definition, proves the world-only table.
+    ops += [cmd('/loot give @s loot ' + target, expect_result=1),
+            cmd('/data get entity @s Inventory'),
+            cmd('/execute if entity @s[nbt={Inventory:[{Slot:0b,id:"minecraft:diamond",count:1}]}]', expect_result=1),
+            cmd('/clear @s', expect_result=1),
+            cmd('/data get entity @s Inventory')]
+    cases = [('grant', 'parity:loot_reward', 1, 1, True),
+             ('grant', 'parity:loot_reward', 0, 1, True),
+             ('revoke', 'parity:loot_reward', 1, 1, False),
+             ('grant', 'parity:loot_reward', 1, 2, True),
+             ('grant', 'parity:no_loot', 1, 2, True),
+             ('grant', 'parity:no_loot', 0, 2, True),
+             ('revoke', 'parity:no_loot', 1, 2, False),
+             ('grant', 'parity:no_loot', 1, 2, True)]
+    for verb, advancement, changed, count, complete in cases:
+        ops += [cmd('/execute if entity @s[type=player,nbt={Pos:[8.5d,230d,8.5d],Health:20f}]', expect_result=1)]
+        ops += setup('/scoreboard players set result reward_loot -99',
+                     '/scoreboard players set success reward_loot -99')
+        ops += [cmd('/scoreboard players get result reward_loot', expect_result=-99),
+                cmd('/scoreboard players get success reward_loot', expect_result=-99),
+                cmd(f'/execute store result score result reward_loot store success score success reward_loot run advancement {verb} @s only {advancement}'),
+                cmd('/scoreboard players get result reward_loot', expect_result=changed),
+                cmd('/scoreboard players get success reward_loot', expect_result=changed),
+                cmd('/data get entity @s Inventory'),
+                cmd(f'/execute if entity @s[nbt={{Inventory:[{{Slot:0b,id:"minecraft:diamond",count:{count}}}]}}]', expect_result=1)]
+        ops += setup('/execute store result score count reward_loot run clear @s minecraft:diamond 0')
+        ops += [cmd('/scoreboard players get count reward_loot', expect_result=count),
+                cmd(f'/execute {"if" if complete else "unless"} entity @s[advancements={{{advancement}=true}}]', expect_result=1)]
+    ops += [cmd('/loot give @s loot ' + target, expect_result=1),
+            cmd('/data get entity @s Inventory'),
+            cmd('/execute if entity @s[nbt={Inventory:[{Slot:0b,id:"minecraft:diamond",count:3}]}]', expect_result=1)]
+    ops += setup('/execute store success score identity_changed reward_loot run data modify storage h292:identity value set from entity @s UUID',
+                 '/execute store result score elapsed reward_loot run time query gametime',
+                 '/scoreboard players operation elapsed reward_loot -= clock reward_loot')
+    ops += [cmd('/scoreboard players get identity_changed reward_loot', expect_result=0),
+            cmd('/scoreboard players get elapsed reward_loot', expect_result=0)]
+    return ops + setup('/scoreboard objectives remove reward_loot', '/clear @s',
+                       '/forceload remove 0 0 15 15')
+
+
+def advancement_empty_loot_reference():
+    """Separate valid-empty table control: success with zero output, not a missing reference."""
+    reference = '{type:"minecraft:advancement_reward",pools:[{rolls:1,entries:[{type:"minecraft:loot_table",value:"parity:empty_reward"}]}]}'
+    ops = setup('/forceload add 0 0 15 15', '/setblock 8 229 8 stone',
+                '/tp @s 8.5 230 8.5 0 0', '/clear @s',
+                '/scoreboard objectives add empty_loot dummy')
+    ops += [cmd('/execute if loaded 8 230 8', expect_result=1),
+            cmd('/execute if entity @s[type=player,nbt={Pos:[8.5d,230d,8.5d],Health:20f}]', expect_result=1),
+            cmd('/data get entity @s Inventory', expect_result=0)]
+    ops += setup('/data modify storage h292:empty_identity value set from entity @s UUID',
+                 '/execute store result score clock empty_loot run time query gametime',
+                 '/scoreboard players set result empty_loot -99',
+                 '/scoreboard players set success empty_loot -99')
+    ops += [cmd('/scoreboard players get result empty_loot', expect_result=-99),
+            cmd('/scoreboard players get success empty_loot', expect_result=-99),
+            cmd('/execute store result score result empty_loot store success score success empty_loot run loot give @s loot ' + reference, expect_result=0),
+            cmd('/scoreboard players get result empty_loot', expect_result=0),
+            cmd('/scoreboard players get success empty_loot', expect_result=1),
+            cmd('/data get entity @s Inventory', expect_result=0),
+            cmd('/execute unless data entity @s Inventory[]', expect_result=1)]
+    ops += setup('/execute store success score identity_changed empty_loot run data modify storage h292:empty_identity value set from entity @s UUID',
+                 '/execute store result score elapsed empty_loot run time query gametime',
+                 '/scoreboard players operation elapsed empty_loot -= clock empty_loot')
+    ops += [cmd('/scoreboard players get identity_changed empty_loot', expect_result=0),
+            cmd('/scoreboard players get elapsed empty_loot', expect_result=0)]
+    return ops + setup('/scoreboard objectives remove empty_loot', '/forceload remove 0 0 15 15')
+
+
+def bell_server_glow():
+    """Actual world ticks: near raiders trigger resonance that reaches farther raiders."""
+    # Centre the harness owner's loading area so settle explicitly awaits entity ticking
+    # in every actor chunk, including the witch at z=48 (outside the old centre).
+    ops = setup('/tp @s 8.5 230 24.5', '/forceload add 0 0 31 63') + [{'op': 'settle'}]
+    ops += [cmd('/execute if loaded 8 200 48', expect_result=1)]
+    ops += setup('/fill 0 199 0 31 199 63 stone',
+                 '/fill 0 200 0 31 205 63 air', '/scoreboard objectives add bell_clock dummy')
+    # Let newly forced chunks acquire entity-ticking readiness before actors exist.
+    ops += [{'op': 'tick', 'n': 20}]
+    for scene in range(3):
+        if scene:
+            ops += setup('/kill @e[tag=h288_bell]') + [{'op': 'tick', 'n': 25}]
+            ops += setup('/setblock 9 200 8 air', '/setblock 8 200 8 air')
+            ops += [{'op': 'tick', 'n': 70}]
+        ops += setup('/setblock 8 200 8 bell[attachment=floor,facing=north]')
+        actors = [('witch', '8.5 200 48.5', 1), ('zombie', '13.5 200 8.5', 2)]
+        if scene != 1:
+            actors.append(('pillager', '18.5 200 8.5', 3))
+        for kind, pos, serial in actors:
+            tag = f'h288_{scene}_{kind}'
+            fields = f'UUID:[I;288,{scene},0,{serial}],Tags:["h288_bell","{tag}"],NoAI:1b,Silent:1b,PersistenceRequired:1b'
+            ops += setup(f'/summon {kind} {pos} {{{fields}}}')
+            guard = f'@e[type={kind},tag={tag},nbt={{UUID:[I;288,{scene},0,{serial}],NoAI:1b,Pos:[{pos.replace(" ", "d,")}d]}}]'
+            ops += [cmd(f'/execute if entity {guard}', expect_result=1),
+                    cmd(f'/data get entity @e[tag={tag},limit=1] Health',
+                        expect_result={'witch': 26, 'zombie': 20, 'pillager': 24}[kind]),
+                    cmd(f'/execute unless data entity @e[tag={tag},limit=1] active_effects[{{id:"minecraft:glowing"}}]', expect_result=1)]
+        ops += [{'op': 'tick', 'n': 2}]
+        ops += setup('/setblock 9 200 8 redstone_block')
+        if scene == 2:
+            # Destroy a resonating bell, tick while absent, then ring its replacement.
+            ops += [{'op': 'tick', 'n': 10}]
+            ops += setup('/setblock 9 200 8 air', '/setblock 8 200 8 air')
+            ops += [{'op': 'tick', 'n': 1}]
+            ops += setup('/setblock 8 200 8 bell[attachment=floor,facing=north]',
+                         '/setblock 9 200 8 redstone_block')
+        ops += [cmd('/execute if block 8 199 8 stone', expect_result=1),
+                cmd('/execute if block 8 200 8 bell[attachment=floor,facing=north,powered=true]', expect_result=1),
+                cmd('/execute if block 9 200 8 redstone_block', expect_result=1)]
+        ops += setup('/execute store result score start bell_clock run time query gametime')
+        elapsed = 0
+        for sample in (41, 43, 44, 45, 46, 47, 48, 49):
+            ops += [{'op': 'tick', 'n': sample - elapsed}]
+            elapsed = sample
+            ops += setup('/execute store result score elapsed bell_clock run time query gametime',
+                         '/scoreboard players operation elapsed bell_clock -= start bell_clock')
+            ops += [cmd('/scoreboard players get elapsed bell_clock', expect_result=sample)]
+            for kind, pos, serial in actors:
+                tag = f'h288_{scene}_{kind}'
+                guard = f'@e[type={kind},tag={tag},nbt={{UUID:[I;288,{scene},0,{serial}],NoAI:1b,Pos:[{pos.replace(" ", "d,")}d]}}]'
+                ops += [cmd(f'/execute if entity {guard}', expect_result=1)]
+                ops += setup(f'/execute store result score health bell_clock run data get entity @e[tag={tag},limit=1] Health 1000')
+                ops += [cmd('/execute if score health bell_clock matches 1..', expect_result=1)]
+                sign = 'if' if scene != 1 and sample >= 45 and kind != 'zombie' else 'unless'
+                ops += [cmd(f'/execute {sign} data entity @e[tag={tag},limit=1] active_effects[{{id:"minecraft:glowing"}}]', expect_result=1)]
+            if scene != 1 and sample == 49:
+                ops += [cmd(f'/data get entity @e[tag=h288_{scene}_witch,limit=1] active_effects[{{id:"minecraft:glowing"}}].duration', expect_result=56)]
+    return ops + setup('/scoreboard objectives remove bell_clock')
+
+
+def crafting_priority_recipes(group_names):
+    if 'crafting recipe priority' not in group_names:
+        return {}
+    def recipe(inputs, item, count=1):
+        return {'type': 'minecraft:crafting_shapeless', 'ingredients': ['minecraft:' + x for x in inputs],
+                'result': {'id': 'minecraft:' + item, 'count': count}}
+    # Write deliberately out of selection order; resource registration decides priority.
+    return {'parity:zzz_star': recipe(['gunpowder', 'red_dye'], 'emerald'),
+            'parity:aaa_star': recipe(['gunpowder', 'blue_dye'], 'diamond'),
+            'a_priority:z_h295_pick': recipe(['gold_nugget', 'paper'], 'diamond'),
+            'z_priority:a_h295_pick': recipe(['gold_nugget', 'paper'], 'emerald'),
+            'z_priority:h295_equal': recipe(['coal', 'paper'], 'emerald'),
+            'a_priority:h295_equal': recipe(['coal', 'paper'], 'gold_nugget', 3),
+            'parity:h295_resource': recipe(['clay_ball', 'paper'], 'brick'),
+            'parity:h295_resource-early': recipe(['clay_ball', 'paper'], 'nether_brick'),
+            'minecraft:oak_planks': recipe(['oak_log'], 'gold_ingot', 2),
+            'parity:zzzz_h295_unique': recipe(['apple', 'amethyst_shard'], 'quartz', 5)}
+
+
+def crafting_recipe_priority(world=True):
+    """Fresh natural crafters distinguish world selection, resource order and ID replacement."""
+    ops = setup('/forceload add 0 0 15 15', '/fill 0 199 0 15 199 15 stone',
+                '/tp @s 8.5 200 8.5 0 0', '/clear @s', '/recipe take @s *',
+                '/scoreboard objectives add recipe_order dummy',
+                '/data modify storage h295:identity uuid set from entity @s UUID')
+    ops += [cmd('/execute if loaded 4 200 4', expect_result=1),
+            cmd('/execute if entity @s[type=player,nbt={Pos:[8.5d,200d,8.5d],Health:20f}]', expect_result=1)]
+    if world:
+        for id in crafting_priority_recipes(['crafting recipe priority']):
+            ops += [cmd('/recipe give @s ' + id, expect_result=1)]
+        cases = [('early', ['gunpowder', 'blue_dye'], 'diamond', 1),
+                 ('late', ['gunpowder', 'red_dye'], 'firework_star', 1),
+                 ('path_before_namespace', ['gold_nugget', 'paper'], 'emerald', 1),
+                 ('same_path_namespace', ['coal', 'paper'], 'gold_nugget', 3),
+                 ('resource_file_prefix', ['clay_ball', 'paper'], 'nether_brick', 1),
+                 ('base_id_replacement', ['oak_log'], 'gold_ingot', 2),
+                 ('late_world_only', ['apple', 'amethyst_shard'], 'quartz', 5),
+                 ('ordinary', ['birch_log'], 'birch_planks', 4)]
+    else:
+        cases = [('base_star', ['gunpowder', 'blue_dye'], 'firework_star', 1),
+                 ('base_planks', ['oak_log'], 'oak_planks', 4),
+                 ('ordinary', ['birch_log'], 'birch_planks', 4)]
+    for label, inputs, output, count in cases:
+        ops += setup('/setblock 4 200 5 air', '/setblock 4 200 4 air', '/setblock 4 200 3 air',
+                     '/setblock 4 200 3 chest[facing=south]', '/setblock 4 200 4 crafter[orientation=north_up]')
+        for i, item in enumerate(inputs):
+            ops += setup(f'/item replace block 4 200 4 container.{i} with minecraft:{item} 1')
+        ops += [cmd('/execute if entity @s[type=player,nbt={Pos:[8.5d,200d,8.5d],Health:20f}]', expect_result=1),
+                cmd('/execute if block 4 199 4 stone', expect_result=1),
+                cmd('/execute if block 4 200 4 crafter[orientation=north_up,triggered=false]', expect_result=1),
+                cmd('/execute if block 4 200 3 chest[facing=south]', expect_result=1),
+                cmd('/data get block 4 200 4 id'), cmd('/data get block 4 200 4 Items'),
+                cmd('/data get block 4 200 4 disabled_slots'), cmd('/data get block 4 200 3 Items')]
+        for i, item in enumerate(inputs):
+            ops += [cmd(f'/execute if items block 4 200 4 container.{i} minecraft:{item}', expect_result=1)]
+        ops += setup('/execute store result score start recipe_order run time query gametime')
+        ops += [cmd('/setblock 4 200 5 redstone_block'),
+                cmd('/execute if block 4 200 4 crafter[triggered=true]', expect_result=1),
+                {'op': 'tick', 'n': 10}, cmd('/data get block 4 200 4 Items'),
+                cmd('/execute unless data block 4 200 4 Items[]', expect_result=1),
+                cmd('/data get block 4 200 3 Items'),
+                cmd(f'/execute if items block 4 200 3 container.0 minecraft:{output}', expect_result=count),
+                cmd(f'/execute if data block 4 200 3 Items[{{Slot:0b,id:"minecraft:{output}",count:{count}}}]', expect_result=1)]
+        ops += setup('/execute store result score elapsed recipe_order run time query gametime',
+                     '/scoreboard players operation elapsed recipe_order -= start recipe_order')
+        ops += [cmd('/scoreboard players get elapsed recipe_order', expect_result=10)]
+    if world:
+        # Open-air ejection exercises the existing trigger route, independently
+        # of insertion into a chest. The wrong recipe is a negative control.
+        for advancement in ['h295:custom_crafted', 'h295:wrong_recipe']:
+            ops += [cmd('/advancement grant @s only ' + advancement, expect_result=1),
+                    cmd('/advancement revoke @s only ' + advancement, expect_result=1),
+                    cmd('/execute unless entity @s[advancements={' + advancement + '=true}]', expect_result=1)]
+        ops += setup('/kill @e[type=item]', '/setblock 4 200 5 air', '/setblock 4 200 4 air',
+                     '/setblock 4 200 3 air', '/setblock 4 200 4 crafter[orientation=north_up]',
+                     '/item replace block 4 200 4 container.0 with gunpowder 1',
+                     '/item replace block 4 200 4 container.1 with blue_dye 1')
+        ops += [cmd('/execute if entity @s[type=player,nbt={Pos:[8.5d,200d,8.5d],Health:20f}]', expect_result=1),
+                cmd('/execute if block 4 199 4 stone', expect_result=1),
+                cmd('/execute if block 4 200 3 air', expect_result=1),
+                cmd('/execute if block 4 200 4 crafter[orientation=north_up,triggered=false]', expect_result=1),
+                cmd('/execute if items block 4 200 4 container.0 gunpowder', expect_result=1),
+                cmd('/execute if items block 4 200 4 container.1 blue_dye', expect_result=1)]
+        ops += setup('/execute store result score start recipe_order run time query gametime')
+        # Invoke the real block tick in the connected owner's context. Ordinary
+        # server ticks have no acting player in this harness; recipient dispatch
+        # is a separate route and is not repaired by recipe-ID normalization.
+        ops += [cmd('/setblock 4 200 5 redstone_block'),
+                {'op': 'crafter_tick', 'pos': [4, 200, 4]}, {'op': 'tick', 'n': 10},
+                cmd('/execute unless data block 4 200 4 Items[]', expect_result=1),
+                cmd('/execute if entity @e[type=item,nbt={Item:{id:"minecraft:diamond",count:1}}]', expect_result=1),
+                cmd('/execute if entity @s[advancements={h295:custom_crafted=true}]', expect_result=1),
+                cmd('/execute unless entity @s[advancements={h295:wrong_recipe=true}]', expect_result=1)]
+        ops += setup('/execute store result score elapsed recipe_order run time query gametime',
+                     '/scoreboard players operation elapsed recipe_order -= start recipe_order')
+        ops += [cmd('/scoreboard players get elapsed recipe_order', expect_result=10)]
+    ops += setup('/execute store success score identity_changed recipe_order run data modify storage h295:identity uuid set from entity @s UUID')
+    ops += [cmd('/scoreboard players get identity_changed recipe_order', expect_result=0)]
+    return ops + setup('/setblock 4 200 5 air', '/scoreboard objectives remove recipe_order')
+
+
+def advancement_reward_functions():
+    """Function-only impossible advancements isolate reward dispatch from triggers and XP/loot."""
+    ops = setup('/forceload add 0 0 15 15', '/setblock 8 229 8 stone',
+                '/tp @s 8.5 230 8.5 0 0', '/scoreboard objectives add reward_hits dummy',
+                '/scoreboard objectives add reward_origin dummy',
+                '/scoreboard objectives add reward_nested dummy',
+                '/scoreboard objectives add reward_alias dummy',
+                '/scoreboard objectives add reward_audit dummy')
+    ops += [cmd('/execute if loaded 8 230 8', expect_result=1),
+            cmd('/execute if entity @s[type=player,nbt={Pos:[8.5d,230d,8.5d],Health:20f}]', expect_result=1)]
+    # Snapshot the entire actual UUID; the final no-change write checks identity without
+    # assuming the two harnesses choose the same offline player UUID.
+    ops += setup('/data modify storage h291:identity value set from entity @s UUID',
+                 '/execute store result score clock reward_audit run time query gametime')
+    for objective in ('reward_hits', 'reward_origin', 'reward_nested', 'reward_alias'):
+        ops += setup(f'/scoreboard players set @s {objective} 0')
+    ops += [cmd('/function h291:reward')]
+    ops += [cmd('/scoreboard players get @s reward_hits', expect_result=1),
+            cmd('/scoreboard players get @s reward_origin', expect_result=1),
+            cmd('/scoreboard players get @s reward_nested', expect_result=1),
+            cmd('/execute if entity @s[tag=h291_rewarded]', expect_result=1)]
+    ops += setup('/scoreboard players set @s reward_hits 0',
+                 '/scoreboard players set @s reward_origin 0',
+                 '/scoreboard players set @s reward_nested 0', '/tag @s remove h291_rewarded')
+    # Reward uses the player's own position, not the granting execute source's position.
+    cases = [('execute positioned 40 240 40 run advancement grant @s only h291:reward', 1, 1, 1, True),
+             ('advancement grant @s only h291:reward', 0, 1, 1, True),
+             ('advancement revoke @s only h291:reward', 1, 1, 1, False),
+             ('advancement grant @s only h291:reward', 1, 2, 2, True),
+             ('advancement grant @s only h291:no_function', 1, 2, 2, True),
+             ('advancement grant @s only h291:no_function', 0, 2, 2, True),
+             ('advancement grant @s only h291:missing_function', 1, 2, 2, True),
+             ('advancement grant @s only h291:alias', 1, 2, 2, True)]
+    for operation, changed, hits, nested, completed in cases:
+        ops += [cmd('/execute if entity @s[type=player,nbt={Pos:[8.5d,230d,8.5d],Health:20f}]', expect_result=1)]
+        ops += setup('/scoreboard players set result reward_audit -99',
+                     '/scoreboard players set success reward_audit -99')
+        ops += [cmd('/scoreboard players get result reward_audit', expect_result=-99),
+                cmd('/scoreboard players get success reward_audit', expect_result=-99),
+                cmd('/execute store result score result reward_audit store success score success reward_audit run ' + operation),
+                cmd('/scoreboard players get result reward_audit', expect_result=changed),
+                cmd('/scoreboard players get success reward_audit', expect_result=changed),
+                cmd('/scoreboard players get @s reward_hits', expect_result=hits),
+                cmd('/scoreboard players get @s reward_origin', expect_result=hits),
+                cmd('/scoreboard players get @s reward_nested', expect_result=nested),
+                cmd('/execute if entity @s[tag=h291_rewarded]', expect_result=1)]
+        advancement = operation.split(' only ')[1]
+        sign = 'if' if completed else 'unless'
+        ops += [cmd(f'/execute {sign} entity @s[advancements={{{advancement}=true}}]', expect_result=1)]
+    ops += [cmd('/scoreboard players get @s reward_alias', expect_result=1),
+            cmd('/function h291:reward'),
+            cmd('/scoreboard players get @s reward_hits', expect_result=3),
+            cmd('/scoreboard players get @s reward_nested', expect_result=3)]
+    ops += setup('/execute store success score identity_changed reward_audit run data modify storage h291:identity value set from entity @s UUID',
+                 '/execute store result score elapsed reward_audit run time query gametime',
+                 '/scoreboard players operation elapsed reward_audit -= clock reward_audit')
+    ops += [cmd('/scoreboard players get identity_changed reward_audit', expect_result=0),
+            cmd('/scoreboard players get elapsed reward_audit', expect_result=0)]
+    for objective in ('reward_hits', 'reward_origin', 'reward_nested', 'reward_alias', 'reward_audit'):
+        ops += setup(f'/scoreboard objectives remove {objective}')
+    return ops
+
+
+def moving_piston_presentation_diagnostic():
+    try:
+        from .moving_piston_data_corpus import moving_piston_presentation
+    except ImportError:
+        from moving_piston_data_corpus import moving_piston_presentation
+    return moving_piston_presentation(cmd, setup)
+
+
+def piston_mob_bounce():
+    try:
+        from .piston_bounce_corpus import piston_bounce
+    except ImportError:
+        from piston_bounce_corpus import piston_bounce
+    return piston_bounce(cmd, setup)
+
+
+def piston_entity_tick_order():
+    """#9337: entities travel before moving pistons push them, not afterward."""
+    ops = []
+    for block in ('stone', 'slime_block'):
+        ops += setup('/kill @e[type=!player]', '/fill 0 200 0 5 215 5 air',
+                     '/setblock 1 200 1 piston[facing=up]',
+                     f'/setblock 1 201 1 {block}',
+                     '/summon wither_skeleton 1.5 202 1.5 '
+                     '{PersistenceRequired:1b,Tags:["piston_rider"]}',
+                     '/attribute @e[tag=piston_rider,limit=1] movement_speed base set 0',
+                     '/setblock 2 200 1 redstone_block')
+        for _ in range(6):
+            ops.append({'op': 'tick', 'n': 1})
+            ops.append(cmd('/data get entity @e[tag=piston_rider,limit=1] Pos'))
+            ops.append(cmd('/data get entity @e[tag=piston_rider,limit=1] Motion'))
+    ops += setup('/kill @e[type=!player]', '/fill 0 200 0 5 215 5 air')
+    return ops
+
+
+def item_block_escape():
+    """#12018: an item inside a block falls before it is pushed towards the open side."""
+    ops = setup('/kill @e[type=!player]', '/fill 0 200 0 5 215 5 air',
+                '/fill 0 200 1 2 200 1 stone', '/fill 1 200 0 1 200 2 stone',
+                '/setblock 1 201 1 stone', '/setblock 0 200 1 stone',
+                '/setblock 2 200 1 air',
+                '/summon item 1.5 200.25 1.5 {Item:{id:"minecraft:diamond",count:1},'
+                'PickupDelay:32767s,Tags:["escape"],Motion:[0.0d,0.2d,0.0d]}')
+    item = '@e[tag=escape,limit=1]'
+    # The east speed is random, but for two ticks the item's middle stays in
+    # the stone whatever it is: it escapes east both times, so its height and
+    # vertical motion are exact.
+    for _ in range(2):
+        ops.append({'op': 'tick', 'n': 1})
+        ops.append(cmd(f'/data get entity {item} Pos[1]'))
+        ops.append(cmd(f'/data get entity {item} Motion[1]'))
+    ops += setup('/kill @e[type=!player]', '/fill 0 200 0 5 215 5 air')
+    return ops
+
+
+def scheduled_item_birth():
+    """#12017: an item a scheduled block tick drops ticks in that tick's entity pass;
+    one an entity's block contact drops does not."""
+    ops = []
+    for front in ('air', 'powder_snow'):
+        ops += setup('/kill @e[type=!player]', '/fill 0 200 0 5 215 5 air',
+                     '/setblock 1 200 1 dropper[facing=up]{Items:[{Slot:0b,id:"minecraft:stone",count:1}]}',
+                     f'/setblock 1 201 1 {front}',
+                     '/setblock 2 200 1 redstone_block')
+        item = '@e[type=item,x=1.5,y=201.5,z=1.5,distance=..3,limit=1]'
+        # The dropper's tick is due 4 ticks after it was powered.
+        for _ in range(6):
+            ops.append({'op': 'tick', 'n': 1})
+            ops.append(cmd(f'/execute if entity {item}'))
+            ops.append(cmd(f'/data get entity {item} Age'))
+    # A boat breaks a lily pad in its own tick (`applyEffectsFromBlocks`), inside
+    # the entity pass: that drop waits for the next tick.
+    ops += setup('/kill @e[type=!player]', '/fill 0 200 0 5 215 5 air',
+                 '/fill 0 200 0 2 200 2 water', '/setblock 1 201 1 lily_pad',
+                 '/summon oak_boat 1.5 201 1.5 {NoGravity:1b}')
+    item = '@e[type=item,x=1.5,y=201.5,z=1.5,distance=..3,limit=1]'
+    for _ in range(3):
+        ops.append({'op': 'tick', 'n': 1})
+        ops.append(cmd('/execute if block 1 201 1 lily_pad'))
+        ops.append(cmd(f'/execute if entity {item}'))
+        ops.append(cmd(f'/data get entity {item} Age'))
+    ops += setup('/kill @e[type=!player]', '/fill 0 200 0 5 215 5 air')
+    return ops
+
+
+def projectile_saved_ground():
+    """Entity.load/saveWithoutId's OnGround on projectiles and falling blocks.
+
+    Summoned frozen with OnGround:1b (and once with 0b), a projectile or falling block saves what it
+    loaded; unfrozen over stone, the ones that fall are read again after they come down.
+    """
+    x0, y0, z0 = 3520, 300, 3520
+    chunk = [[x0 >> 4, z0 >> 4]]
+    kinds = [('arrow', ''), ('spectral_arrow', ''), ('trident', ''), ('snowball', ''), ('egg', ''),
+             ('ender_pearl', ''), ('experience_bottle', ''),
+             ('splash_potion', ',Item:{id:"minecraft:splash_potion",count:1}'),
+             ('fireball', ''), ('small_fireball', ''), ('dragon_fireball', ''), ('wither_skull', ''),
+             ('wind_charge', ''), ('breeze_wind_charge', ''), ('firework_rocket', ''), ('llama_spit', ''),
+             ('shulker_bullet', ''), ('falling_block', ',BlockState:{Name:"minecraft:sand"},Time:1')]
+    ops = [cmd(f'/forceload add {x0} {z0}', False), {'op': 'wait_chunks', 'chunks': chunk},
+           cmd('/tick freeze', False),
+           cmd(f'/fill {x0} {y0 - 1} {z0} {x0 + 15} {y0 - 1} {z0 + 15} stone', expect_result=256)]
+    for n, (kind, body) in enumerate(kinds, 1):
+        for g in (1, 0):
+            ops.append(cmd(f'/summon {kind} {x0 + 0.5 + (n % 8) * 2} {y0 + 3 + g * 4} {z0 + 0.5 + (n // 8) * 4} '
+                           f'{{UUID:[I;12900,{g},{n},1],Motion:[0d,0d,0d],OnGround:{g}b{body}}}',
+                           expect_result=1))
+    # FireworkRocketEntity.tick moves by Entity.move: one shot at an angle lands and stays on the
+    # stone; one that rises lands too, then its climb (+0.04 a tick) lifts it off again.
+    for n, body in enumerate(('ShotAtAngle:1b,Motion:[0d,-0.4d,0d]', 'Motion:[0d,-1d,0d]'), 1):
+        ops.append(cmd(f'/summon firework_rocket {x0 + 2.5 + n * 4} {y0 + 3} {z0 + 13.5} '
+                       f'{{UUID:[I;12900,2,{n},1],LifeTime:400,{body}}}', expect_result=1))
+
+    def reads():
+        for n, _ in enumerate(kinds, 1):
+            for g in (1, 0):
+                ops.append(cmd(f'/data get entity 00003264-0000-000{g}-0000-{n:04x}00000001 OnGround'))
+        for n in (1, 2):
+            ops.append(cmd(f'/data get entity 00003264-0000-0002-0000-{n:04x}00000001 OnGround'))
+
+    reads()
+    # Only the arrows, the trident and the falling block fall; the rest hang or fly on.
+    ops += [cmd('/tick unfreeze', False), {'op': 'tick', 'n': 10}, cmd('/tick freeze', False)]
+    ops += [cmd(f'/data get entity 00003264-0000-0002-0000-{n:04x}00000001 OnGround') for n in (1, 2)]
+    ops += [cmd('/tick unfreeze', False), {'op': 'tick', 'n': 30}, cmd('/tick freeze', False)]
+    reads()
+    return ops + setup('/tick unfreeze', f'/kill @e[type=!player,x={x0},y={y0 - 8},z={z0},dx=16,dy=24,dz=16]',
+                       f'/fill {x0} {y0 - 1} {z0} {x0 + 15} {y0 + 3} {z0 + 15} air',
+                       f'/forceload remove {x0} {z0}')
+
+
+def piston_push_ground():
+    """#12029, #12100: `Entity.move(MoverType.PISTON)` ends in `setOnGroundWithMovement`
+    on the server, so a push sets an item's, primed TNT's or experience orb's OnGround to whether
+    its downward part was blocked: a sideways push off the stone it rests on
+    clears it, and so does a free push down. The entity ticks before the piston
+    moves it (#9337), so the reading after each tick is the push's. Only
+    OnGround is compared: the float air drags (#11794) shift Motion."""
+    ops = []
+    both = ('sideways', 'down')
+    # Projectiles and a falling block only go down, loaded on the ground (#12898): a free push clears it,
+    # and so does one toward stone that stops short of it. A falling block's own move clears it first.
+    # Off the ground sideways they would fall or fly on.
+    down = ('down', 'onto')
+    for kind, fields, cases in (('item', 'Item:{id:"minecraft:diamond",count:1},PickupDelay:32767s', both),
+                                ('tnt', 'fuse:200s', both), ('experience_orb', 'Value:1s', both),
+                                ('arrow', 'pickup:0b,OnGround:1b', down), ('trident', 'pickup:0b,OnGround:1b', down),
+                                ('snowball', 'Motion:[0d,0d,0d],OnGround:1b', down),
+                                ('small_fireball', 'Motion:[0d,0d,0d],OnGround:1b', down),
+                                ('firework_rocket', 'ShotAtAngle:1b,LifeTime:200,Motion:[0d,0d,0d],OnGround:1b', down),
+                                ('falling_block', 'BlockState:{Name:"minecraft:sand"},Time:1,OnGround:1b', down)):
+        selector = f'@e[type=minecraft:{kind},tag=piston_ground,limit=1]'
+        for case in cases:
+            ops += setup('/kill @e[type=!player]', '/fill 28 208 28 36 218 34 air',
+                         '/fill 28 209 28 36 209 34 stone')
+            if case == 'sideways':
+                ops += setup('/setblock 30 210 31 piston[facing=east]', '/setblock 31 210 31 stone',
+                             f'/summon minecraft:{kind} 32.25 210 31.5 '
+                             f'{{{fields},Motion:[-0.05d,0.0d,0.0d],Tags:["piston_ground"]}}')
+                power = '/setblock 30 211 31'
+            else:
+                if case == 'onto':
+                    ops += setup('/setblock 32 212 31 stone')
+                ops += setup('/setblock 32 216 31 piston[facing=down]', '/setblock 32 215 31 stone',
+                             f'/summon minecraft:{kind} 32.5 213.9 31.5 '
+                             f'{{{fields},NoGravity:1b,Tags:["piston_ground"]}}')
+                power = '/setblock 32 217 31'
+            ops.append({'op': 'tick', 'n': 1})
+            ops.append(cmd(f'/data get entity {selector} OnGround'))
+            ops += setup(f'{power} redstone_block')
+            for _ in range(3):
+                ops.append({'op': 'tick', 'n': 1})
+                ops.append(cmd(f'/data get entity {selector} OnGround'))
+    ops += setup('/kill @e[type=!player]', '/fill 28 208 28 36 218 34 air')
+    return ops
+
+
+def falling_block_in_moving_piston():
+    """#13793: `FallingBlockEntity.tick` neither places, drops nor discards a block that comes down
+    where a piston is extending (the block there `is(Blocks.MOVING_PISTON)`), before its `cancelDrop`
+    check: it stays a falling block, the piston pushes it on, and it lands a block further a tick
+    later. The piston fires in the tick's block events, before the entity lands. A sideways motion
+    shows the landing's slowdown (0.7) and the air drag it keeps."""
+    ops = []
+    selector = '@e[type=minecraft:falling_block,tag=piston_falling,limit=1]'
+    for piston, fields in (('sticky_piston', ''), ('piston', ''), ('sticky_piston', ',CancelDrop:1b'),
+                           ('piston', ',Motion:[0.0d,0.0d,0.05d]')):
+        ops += setup('/kill @e[type=!player]', '/fill 28 208 28 36 218 34 air',
+                     '/fill 28 209 28 36 209 34 stone', f'/setblock 31 210 31 {piston}[facing=east]',
+                     '/summon minecraft:falling_block 32.5 210 31.5 '
+                     f'{{BlockState:{{Name:"minecraft:sand"}},Tags:["piston_falling"]{fields}}}',
+                     '/setblock 30 210 31 redstone_block')
+        for _ in range(3):
+            ops.append({'op': 'tick', 'n': 1})
+            ops.append(cmd(f'/data get entity {selector} Pos'))
+            ops.append(cmd(f'/data get entity {selector} Motion'))
+            ops.append(cmd('/execute if block 33 210 31 minecraft:sand'))
+            ops.append(cmd('/execute if entity @e[type=minecraft:item,x=28,y=208,z=28,dx=8,dy=10,dz=6]'))
+    ops += setup('/kill @e[type=!player]', '/fill 28 208 28 36 218 34 air')
+    return ops
+
+
+def primed_tnt_box():
+    """#12020: `EntityTypes.TNT` is sized 0.98F, so its box is half 0.49F wide
+    and 0.98F tall, both widened from float: TNT stopped by a wall ends 0.49F
+    short of it and TNT stopped by a ceiling 0.98F below it, not at 0.49 and
+    0.98. NoGravity keeps the stops independent of gravity and drag."""
+    ops = []
+    for case, motion, blocks in (('wall', '0.6d,0.0d,0.0d', '/fill 33 209 30 33 213 33 stone'),
+                                 ('ceiling', '0.0d,0.6d,0.0d', '/fill 30 212 30 33 212 33 stone')):
+        ops += setup('/kill @e[type=!player]', '/fill 28 208 28 36 218 36 air', blocks,
+                     '/summon minecraft:tnt 31.5 210 31.5 '
+                     f'{{fuse:200s,NoGravity:1b,Motion:[{motion}],Tags:["tnt_box"]}}')
+        for _ in range(3):
+            ops.append({'op': 'tick', 'n': 1})
+            ops.append(cmd('/data get entity @e[type=minecraft:tnt,tag=tnt_box,limit=1] Pos'))
+    ops += setup('/kill @e[type=!player]', '/fill 28 208 28 36 218 36 air')
+    return ops
+
+
+def piston_tnt_effects():
+    """#12023: `Entity.move(MoverType.PISTON)` uses up primed TNT's pending
+    stuck multiplier without scaling the push, adds to its fall and resets it
+    on landing, and applies the block speed factor (soul sand); then
+    `moveEntityByPiston` runs `applyEffectsFromBlocks`, so powder snow it is
+    pushed into makes it stuck before its next move and slime under it slows
+    it. After a fall over 2.5, powder snow stops the push. The TNT ticks before
+    the piston moves it (#9337). Positions are read to a tenth: the float box
+    (#12020) moves a stopped push by 1e-8."""
+    sel = '@e[type=minecraft:tnt,tag=piston_tnt,limit=1]'
+    east = ('/setblock 30 210 31 piston[facing=east]',)
+    down = ('/setblock 32 212 31 piston[facing=down]',)
+    ops = []
+    # blocks, summon x and y, TNT fields, power
+    for blocks, at, fields, power in (
+            (east + ('/setblock 32 210 31 powder_snow',), '31.5 210',
+             'Motion:[0.0d,0.1d,0.0d]', '/setblock 30 211 31'),
+            (east + ('/setblock 32 210 31 powder_snow',), '31.5 210',
+             'fall_distance:3.0d', '/setblock 30 211 31'),
+            (east + ('/fill 30 209 31 34 209 31 soul_sand',), '31.5 210',
+             'Motion:[0.0d,0.0d,0.05d]', '/setblock 30 211 31'),
+            (down + ('/setblock 32 210 31 stone',), '32.5 211',
+             'fall_distance:3.0d', '/setblock 32 213 31'),
+            (down + ('/setblock 32 210 31 slime_block',), '32.5 211',
+             'fall_distance:3.0d,Motion:[0.0d,0.0d,0.05d]', '/setblock 32 213 31'),
+            # Two pistons push it in one tick: the second finds the tick's
+            # 0.51 spent, but `moveEntityByPiston` still runs the slime's stepOn.
+            (down + ('/setblock 33 212 31 piston[facing=down]', '/fill 32 210 31 33 210 31 slime_block'),
+             '33.0 211', 'Motion:[0.0d,0.0d,0.05d]', '/fill 32 213 31 33 213 31'),
+            # Onto slime beside a rising bubble column: `stepOn` slows it before
+            # the column lifts it (`applyEffectsFromBlocks` order).
+            (down + ('/setblock 32 210 31 slime_block', '/setblock 33 210 31 soul_sand',
+                     '/setblock 33 211 31 bubble_column[drag=false]'),
+             '32.6 211', 'Motion:[0.0d,0.0d,0.05d]', '/setblock 32 213 31')):
+        ops += setup('/kill @e[type=!player]', '/fill 28 208 28 36 218 34 air', *blocks,
+                     f'/summon minecraft:tnt {at} 31.5 '
+                     f'{{fuse:200s,NoGravity:1b,{fields},Tags:["piston_tnt"]}}')
+        for tick in range(5):
+            if tick == 1:
+                ops += setup(f'{power} redstone_block')
+            ops.append({'op': 'tick', 'n': 1})
+            for path in ('Pos[0] 10', 'Pos[1] 10', 'Motion', 'fall_distance'):
+                ops.append(cmd(f'/data get entity {sel} {path}'))
+    ops += setup('/kill @e[type=!player]', '/fill 28 208 28 36 218 34 air')
+    return ops
+
+
+def primed_tnt_fall():
+    """#12021: primed TNT is an `Entity`: `checkFallDamage` adds each step down,
+    narrowed to a float, to its double `fall_distance`, which it saves and
+    `/data` reads and writes. `PowderSnowBlock` holds it on a top 0.9 high
+    once that is over 2.5 (`getCollisionShape`), and otherwise makes it stuck
+    (`entityInside` -> `makeStuckInBlock`, 0.9F/1.5/0.9F), so it sinks; a
+    cobweb makes it stuck the same way (0.25/0.05F/0.25)."""
+    sel = '@e[type=minecraft:tnt,tag=tnt_fall,limit=1]'
+    ops = []
+
+    def track(ticks):
+        out = []
+        for _ in range(ticks):
+            out.append({'op': 'tick', 'n': 1})
+            for path in ('Pos', 'Motion', 'fall_distance'):
+                out.append(cmd(f'/data get entity {sel} {path}'))
+        return out
+
+    # block at 32 210 32, summon y, fields, ticks recorded
+    for block, y, fields, ticks in (
+            ('air', 216, 'Motion:[0.0d,-1.0d,0.0d]', 3),
+            ('stone', 211.1, 'fall_distance:3.0d,Motion:[0.0d,-1.0d,0.0d]', 2),
+            ('powder_snow', 216, 'Motion:[0.0d,-1.0d,0.0d]', 8),
+            ('powder_snow', 210.75, 'Motion:[0.0d,0.0d,0.0d]', 4),
+            # It passes a fall of 2.5 just above the snow: its 0.9-high top
+            # only counts once the TNT reaches it.
+            ('powder_snow', 213.86, 'Motion:[0.0d,0.0d,0.0d]', 14),
+            ('powder_snow', 211.1, 'fall_distance:3.0d,Motion:[0.0d,-1.0d,0.0d]', 4),
+            ('cobweb', 212, 'Motion:[0.0d,-0.5d,0.0d]', 5)):
+        ops += setup('/kill @e[type=!player]', '/fill 28 205 28 36 220 36 air',
+                     '/fill 30 209 30 34 209 34 stone', f'/setblock 32 210 32 {block}',
+                     f'/summon minecraft:tnt 32.5 {y} 32.5 {{fuse:200s,{fields},Tags:["tnt_fall"]}}')
+        ops += track(ticks)
+    # /data writes the field the next fall adds to.
+    ops += setup('/kill @e[type=!player]', '/fill 28 205 28 36 220 36 air',
+                 '/fill 30 209 30 34 209 34 stone',
+                 '/summon minecraft:tnt 32.5 216 32.5 {fuse:200s,NoGravity:1b,Tags:["tnt_fall"]}')
+    ops.append(cmd(f'/data modify entity {sel} fall_distance set value 2.25d'))
+    ops.append(cmd(f'/data get entity {sel} fall_distance'))
+    ops.append(cmd(f'/data merge entity {sel} {{NoGravity:0b,Motion:[0.0d,-0.5d,0.0d]}}'))
+    ops += track(2)
+    ops += setup('/kill @e[type=!player]', '/fill 28 205 28 36 220 36 air')
+    return ops
+
+
+def item_fall_distance():
+    """#13203: a dropped item is an `Entity`: `checkFallDamage` adds each step down,
+    narrowed to a float, to its double `fall_distance` outside water, the ground and water
+    reset it, and `Entity.save` / `load` keep it. A fast fall past a vine on a wall resets it
+    (`Entity.move`'s FALLDAMAGE_RESETTING cast) and a cobweb makes it stuck, which resets it."""
+    sel = '@e[type=minecraft:item,tag=item_fall,limit=1]'
+    ops = [cmd('/forceload add 32 32', False), {'op': 'wait_chunks', 'chunks': [[2, 2]]}]
+
+    def track(ticks):
+        out = []
+        for _ in range(ticks):
+            out.append({'op': 'tick', 'n': 1})
+            for path in ('Pos', 'Motion', 'fall_distance'):
+                out.append(cmd(f'/data get entity {sel} {path}'))
+        return out
+
+    item = 'Item:{id:"minecraft:stone",count:1},PickupDelay:32767,Tags:["item_fall"]'
+    # block at 32 210 32, summon y, fields, ticks recorded. The landing is read once: the
+    # resting item's next Motion still differs (a separate gap).
+    for block, y, fields, ticks in (
+            ('air', 216, 'Motion:[0.0d,-0.3d,0.0d]', 4),
+            ('stone', 211.1, 'fall_distance:3.0d,Motion:[0.0d,-1.0d,0.0d]', 1),
+            ('water', 213, 'fall_distance:2.0d,Motion:[0.0d,-0.5d,0.0d]', 6),
+            ('cobweb', 212, 'Motion:[0.0d,-0.5d,0.0d]', 5)):
+        ops += setup('/kill @e[type=!player]', '/fill 28 205 28 36 220 36 air',
+                     '/fill 30 209 30 34 209 34 stone', f'/setblock 32 210 32 {block}',
+                     f'/summon minecraft:item 32.5 {y} 32.5 {{{fields},{item}}}')
+        ops += track(ticks)
+    # Fast past a vine on the wall beside it: the cast of the move resets the fall first.
+    ops += setup('/kill @e[type=!player]', '/fill 28 205 28 36 220 36 air',
+                 '/fill 30 209 30 34 209 34 stone', '/fill 31 212 32 31 219 32 stone',
+                 '/setblock 32 215 32 vine[west=true]',
+                 f'/summon minecraft:item 32.5 218 32.5 {{fall_distance:5.0d,Motion:[0.0d,-1.5d,0.0d],{item}}}')
+    ops += track(3)
+    # Load and /data write the field; a frozen item keeps it.
+    ops += setup('/kill @e[type=!player]', '/fill 28 205 28 36 220 36 air',
+                 f'/summon minecraft:item 32.5 216 32.5 {{fall_distance:4.5f,NoGravity:1b,{item}}}')
+    ops.append(cmd(f'/data get entity {sel} fall_distance'))
+    ops.append(cmd(f'/data modify entity {sel} fall_distance set value 2.25d'))
+    ops.append(cmd(f'/data get entity {sel} fall_distance'))
+    ops.append(cmd(f'/data merge entity {sel} {{NoGravity:0b,Motion:[0.0d,-0.5d,0.0d]}}'))
+    ops += track(2)
+    return ops + setup('/kill @e[type=!player]', '/fill 28 205 28 36 220 36 air', '/forceload remove 32 32')
+
+
+
+def loaded_dead_mob():
+    """#13199: `LivingEntity.readAdditionalSaveData` reads `Health` through `setHealth`, which
+    clamps a negative value to 0 and keeps the body: a mob summoned dead is there, `/data` reads
+    it, and `tickDeath` removes it once `DeathTime` reaches 20."""
+    x0, y0, z0 = 3712, 260, 3648
+    ops = [cmd(f'/forceload add {x0} {z0}', False), {'op': 'wait_chunks', 'chunks': [[x0 >> 4, z0 >> 4]]},
+           cmd(f'/fill {x0} {y0 - 1} {z0} {x0 + 15} {y0 - 1} {z0 + 15} stone', False)]
+    subjects = [('ocelot', 'Health:0.0f,PersistenceRequired:1b'), ('mannequin', 'Health:-1.0f'),
+                ('zombie', 'Health:0.0f,DeathTime:5s')]
+    uuids = []
+    for n, (kind, fields) in enumerate(subjects, 1):
+        uuid = f'000033cf-0000-0000-0000-{n:04x}00000001'
+        uuids.append(uuid)
+        ops.append(cmd(f'/summon {kind} {x0 + 3 * n}.5 {y0} {z0 + 4}.5 {{UUID:[I;13263,0,{n},1],{fields}}}',
+                       expect_result=1))
+
+    def reads():
+        for uuid in uuids:
+            ops.append(cmd(f'/execute if entity {uuid}'))
+            ops.append(cmd(f'/data get entity {uuid} Health'))
+            ops.append(cmd(f'/data get entity {uuid} DeathTime'))
+
+    reads()
+    for ticks in (1, 13, 5, 1):
+        ops.append({'op': 'tick', 'n': ticks})
+        reads()
+    return ops + setup(f'/kill @e[type=!player,x={x0},y={y0 - 8},z={z0},dx=16,dy=32,dz=16]',
+                       f'/fill {x0} {y0 - 1} {z0} {x0 + 15} {y0 - 1} {z0 + 15} air',
+                       f'/forceload remove {x0} {z0}')
+def falling_block_fall_float():
+    """#13701: `Entity.checkFallDamage` adds each step down narrowed to a float (`fallDistance -= (float)ya`);
+    a falling block never runs `baseTick`, so it is never in water and every step counts."""
+    x0, y0, z0 = 4096 - 64, 260, 3648
+    ops = [cmd(f'/forceload add {x0} {z0}', False), {'op': 'wait_chunks', 'chunks': [[x0 >> 4, z0 >> 4]]},
+           cmd(f'/fill {x0} {y0 - 1} {z0} {x0 + 15} {y0 - 1} {z0 + 15} stone', False)]
+    sel = '@e[type=minecraft:falling_block,tag=fb_fall,limit=1]'
+    for block, y in (('sand', y0 + 6.5), ('anvil', y0 + 3.5)):
+        ops.append(cmd(f'/summon falling_block {x0 + 8}.5 {y} {z0 + 8}.5 '
+                       f'{{BlockState:{{Name:"minecraft:{block}"}},Time:1,Tags:["fb_fall"]}}', expect_result=1))
+        for _ in range(6):
+            ops.append({'op': 'tick', 'n': 1})
+            ops.append(cmd(f'/data get entity {sel} fall_distance'))
+            ops.append(cmd(f'/data get entity {sel} Pos[1]'))
+        ops.append(cmd(f'/kill @e[type=minecraft:falling_block,tag=fb_fall]', False))
+        ops.append(cmd(f'/fill {x0} {y0} {z0} {x0 + 15} {y0 + 8} {z0 + 15} air', False))
+    return ops + setup(f'/fill {x0} {y0 - 1} {z0} {x0 + 15} {y0 + 8} {z0 + 15} air', f'/forceload remove {x0} {z0}')
+
+
+def explosion_infested_blocks():
+    """#11330: `Block.onExplosionHit` calls `spawnAfterBreak` before the drops, so a blast lets an
+    infested block's silverfish out (`InfestedBlock.spawnInfestation`) while `block_drops` is on. The
+    difficulty is not peaceful, where the silverfish would despawn on their first tick. The blast without
+    drops goes first: the explosion's rays draw from the level's random, and a mob's spawn draws differ."""
+    x0, y0, z0 = 3968, 260, 3648
+    ops = [cmd(f'/forceload add {x0} {z0}', False), {'op': 'wait_chunks', 'chunks': [[x0 >> 4, z0 >> 4]]},
+           cmd('/difficulty normal', False)]
+    for drops in ('false', 'true'):
+        ops += [cmd(f'/gamerule block_drops {drops}', False),
+                cmd(f'/fill {x0} {y0 - 1} {z0} {x0 + 15} {y0 + 6} {z0 + 15} air', False),
+                cmd(f'/fill {x0} {y0 - 1} {z0} {x0 + 15} {y0 - 1} {z0 + 15} bedrock', False),
+                # Four blocks right under the TNT, which every ray breaks: how many edge blocks resist
+                # depends on each ray's random intensity.
+                cmd(f'/fill {x0 + 7} {y0} {z0 + 7} {x0 + 8} {y0} {z0 + 7} infested_stone', expect_result=2),
+                cmd(f'/fill {x0 + 7} {y0} {z0 + 8} {x0 + 8} {y0} {z0 + 8} infested_cobblestone', expect_result=2),
+                cmd(f'/summon tnt {x0 + 8} {y0 + 1} {z0 + 8} {{fuse:0}}', expect_result=1),
+                cmd(f'/execute if entity @e[type=tnt,x={x0},y={y0 - 2},z={z0},dx=16,dy=12,dz=16]'),
+                {'op': 'tick', 'n': 1},
+                cmd(f'/execute if entity @e[type=tnt,x={x0},y={y0 - 2},z={z0},dx=16,dy=12,dz=16]'),
+                cmd(f'/execute if entity @e[type=silverfish,x={x0},y={y0 - 2},z={z0},dx=16,dy=12,dz=16]'),
+                cmd(f'/execute if block {x0 + 7} {y0} {z0 + 7} infested_stone'),
+                {'op': 'tick', 'n': 3},
+                cmd(f'/execute if entity @e[type=silverfish,x={x0},y={y0 - 2},z={z0},dx=16,dy=12,dz=16]'),
+                cmd(f'/kill @e[type=!player,x={x0},y={y0 - 2},z={z0},dx=16,dy=12,dz=16]', False)]
+    return ops + setup('/gamerule block_drops true',
+                       f'/fill {x0} {y0 - 1} {z0} {x0 + 15} {y0 + 6} {z0 + 15} air', f'/forceload remove {x0} {z0}')
+
+
+def jigsaw_default_joint():
+    """#13654: `JigsawBlockEntity.loadAdditional` reads `joint`, else `StructureTemplate.getDefaultJointType`:
+    `aligned` when the block's front faces sideways, `rollable` when it faces up or down."""
+    x0, y0, z0 = 4096 - 32, 260, 3648
+    ops = [cmd(f'/forceload add {x0} {z0}', False), {'op': 'wait_chunks', 'chunks': [[x0 >> 4, z0 >> 4]]}]
+    cases = [('north_up', '{selection_priority:0}'), ('up_east', '{selection_priority:0}'),
+             ('down_south', '{}'), ('west_up', '{joint:"rollable"}'), ('east_up', '{}')]
+    for n, (orientation, data) in enumerate(cases):
+        x = x0 + 2 + 2 * n
+        ops += [cmd(f'/setblock {x} {y0} {z0 + 4} jigsaw[orientation={orientation}]{data}', expect_result=1),
+                cmd(f'/data get block {x} {y0} {z0 + 4} joint')]
+    # /data merge without joint loads the block's data again.
+    ops += [cmd(f'/data merge block {x0 + 2} {y0} {z0 + 4} {{selection_priority:3}}'),
+            cmd(f'/data get block {x0 + 2} {y0} {z0 + 4} joint')]
+    return ops + setup(f'/fill {x0} {y0} {z0} {x0 + 15} {y0} {z0 + 15} air', f'/forceload remove {x0} {z0}')
+
+
+def command_block_auto_load():
+    """#13075: `CommandBlockEntity.loadAdditional` ends with `setAutomatic`, which (with a level:
+    `/setblock`, `/data merge block`) schedules the first tick of a block that turned automatic,
+    is not powered and is no chain block (`scheduleTick`: `markConditionMet`, then a tick)."""
+    x0, y0, z0 = 3840, 260, 3648
+    ops = [cmd(f'/forceload add {x0} {z0}', False), {'op': 'wait_chunks', 'chunks': [[x0 >> 4, z0 >> 4]]},
+           cmd('/scoreboard objectives add cb_auto dummy', False), cmd('/tick freeze', False)]
+    run = 'Command:"scoreboard players add @p cb_auto 1"'
+    blocks = [('command_block', f'{{auto:1b,{run}}}'),
+              ('repeating_command_block', f'{{auto:1b,{run}}}'),
+              ('chain_command_block', f'{{auto:1b,{run}}}'),
+              ('command_block', f'{{auto:1b,powered:1b,{run}}}'),
+              ('command_block', f'{{auto:0b,{run}}}')]
+    at = [(x0 + 2 + 3 * n, y0, z0 + 4) for n in range(len(blocks))]
+    for (block, data), (x, y, z) in zip(blocks, at):
+        ops.append(cmd(f'/setblock {x} {y} {z} minecraft:{block}{data}', expect_result=1))
+
+    def reads():
+        for x, y, z in at:
+            for key in ('conditionMet', 'SuccessCount'):
+                ops.append(cmd(f'/data get block {x} {y} {z} {key}'))
+        ops.append(cmd('/scoreboard players get @p cb_auto'))
+
+    reads()
+    ops += [cmd('/tick unfreeze', False), {'op': 'tick', 'n': 3}, cmd('/tick freeze', False)]
+    reads()
+    # /data merge turns the last one automatic.
+    x, y, z = at[-1]
+    ops.append(cmd(f'/data merge block {x} {y} {z} {{auto:1b}}'))
+    reads()
+    ops += [cmd('/tick unfreeze', False), {'op': 'tick', 'n': 3}, cmd('/tick freeze', False)]
+    reads()
+    return ops + setup('/tick unfreeze', f'/fill {x0} {y0} {z0} {x0 + 15} {y0} {z0 + 15} air',
+                       '/scoreboard objectives remove cb_auto', f'/forceload remove {x0} {z0}')
+
+
+def beacon_levels_load():
+    """#13653: `BeaconBlockEntity.saveAdditional` writes `Levels` but `loadAdditional` never reads them:
+    a beacon placed with data reads 0 levels until `updateBase` (every 80 game ticks) sets them."""
+    x0, y0, z0 = 4032, 260, 3648
+    ops = [cmd(f'/forceload add {x0} {z0}', False), {'op': 'wait_chunks', 'chunks': [[x0 >> 4, z0 >> 4]]},
+           cmd('/tick freeze', False)]
+    for n, levels in enumerate(('-1', '3', '7')):
+        x = x0 + 3 + 3 * n
+        ops += [cmd(f'/setblock {x} {y0} {z0 + 4} beacon{{Levels:{levels}}}', expect_result=1),
+                cmd(f'/data get block {x} {y0} {z0 + 4} Levels'),
+                cmd(f'/data merge block {x} {y0} {z0 + 4} {{Levels:{levels}}}'),
+                cmd(f'/data get block {x} {y0} {z0 + 4} Levels')]
+    return ops + setup('/tick unfreeze', f'/fill {x0} {y0} {z0} {x0 + 15} {y0} {z0 + 15} air',
+                       f'/forceload remove {x0} {z0}')
+
+
+def zombie_villager_summoned_data():
+    """#13198: `ZombieVillager.defineSynchedData` picks a random profession in the constructor and
+    leaves `villagerDataFinalized` false; `readAdditionalSaveData` sets it only for a save with
+    `VillagerDataFinalized` or `VillagerData`. `/summon` with NBT does not finalize the mob."""
+    x0, y0, z0 = 3776, 260, 3648
+    ops = [cmd(f'/forceload add {x0} {z0}', False), {'op': 'wait_chunks', 'chunks': [[x0 >> 4, z0 >> 4]]},
+           cmd('/tick freeze', False)]
+    subjects = ['NoAI:1b', 'NoAI:1b,VillagerDataFinalized:1b',
+                'NoAI:1b,VillagerData:{type:"minecraft:taiga",profession:"minecraft:cleric",level:2}']
+    for n, fields in enumerate(subjects, 1):
+        uuid = f'000033ce-0000-0000-0000-{n:04x}00000001'
+        ops.append(cmd(f'/summon zombie_villager {x0 + 3 * n}.5 {y0} {z0 + 4}.5 {{UUID:[I;13262,0,{n},1],{fields}}}',
+                       expect_result=1))
+        ops.append(cmd(f'/data get entity {uuid} VillagerDataFinalized'))
+        ops.append(cmd(f'/execute if data entity {uuid} VillagerData{{profession:"minecraft:none"}}'))
+        if n == 3:
+            ops.append(cmd(f'/data get entity {uuid} VillagerData'))
+    return ops + setup('/tick unfreeze', f'/kill @e[type=!player,x={x0},y={y0 - 8},z={z0},dx=16,dy=32,dz=16]',
+                       f'/forceload remove {x0} {z0}')
+
+
+def projectile_fall_distance():
+    """#13702: `Entity.load` reads `fall_distance` for every entity and `saveWithoutId` writes it; a projectile
+    moves by `setPos`, never through `Entity.move`, so in the air it keeps what it was given."""
+    # Away from the cases at z 3648: unloading this chunk at the end would keep vanilla's chunks two
+    # columns away from entity ticking for a few ticks (the explosion and falling block cases next).
+    x0, y0, z0 = 4096 - 96, 280, 3392
+    ops = [cmd(f'/forceload add {x0} {z0}', False), {'op': 'wait_chunks', 'chunks': [[x0 >> 4, z0 >> 4]]},
+           cmd('/tick freeze', False)]
+    kinds = [('fireball', ''), ('wither_skull', ''), ('small_fireball', ''), ('snowball', ''),
+             ('fireball', ',fall_distance:2.5f')]
+    for n, (kind, extra) in enumerate(kinds, 1):
+        fields = extra.lstrip(',') if extra else 'fall_distance:1.0d'
+        uuid = f'000035f0-0000-0000-0000-{n:04x}00000001'
+        ops += [cmd(f'/summon {kind} {x0 + 2 * n}.5 {y0} {z0 + 8}.5 {{UUID:[I;13808,0,{n},1],{fields},'
+                    f'Motion:[0.0d,0.0d,0.0d],acceleration_power:0.0d}}', expect_result=1),
+                cmd(f'/data get entity {uuid} fall_distance')]
+    ops += [cmd('/tick unfreeze', False), {'op': 'tick', 'n': 1}, cmd('/tick freeze', False)]
+    for n in range(1, len(kinds) + 1):
+        ops.append(cmd(f'/data get entity 000035f0-0000-0000-0000-{n:04x}00000001 fall_distance'))
+    return ops + setup('/tick unfreeze', f'/kill @e[type=!player,x={x0},y={y0 - 8},z={z0},dx=16,dy=32,dz=16]',
+                       f'/forceload remove {x0} {z0}')
+
+
+def living_short_timers():
+    """#13846: `LivingEntity` reads `HurtTime` and `DeathTime` with `getShortOr` and writes them back as `(short)`
+    casts: a negative value stays."""
+    x0, y0, z0 = 4096 - 128, 260, 3648
+    ops = [cmd(f'/forceload add {x0} {z0}', False), {'op': 'wait_chunks', 'chunks': [[x0 >> 4, z0 >> 4]]},
+           cmd('/tick freeze', False)]
+    for n, (kind, fields) in enumerate([('squid', 'DeathTime:-1s'), ('drowned', 'DeathTime:-7s,HurtTime:-3s'),
+                                        ('pig', 'HurtTime:-1s'), ('cow', 'DeathTime:5s,Health:20.0f')], 1):
+        uuid = f'000036d0-0000-0000-0000-{n:04x}00000001'
+        ops += [cmd(f'/summon {kind} {x0 + 3 * n}.5 {y0} {z0 + 8}.5 {{UUID:[I;14032,0,{n},1],NoAI:1b,{fields}}}',
+                    expect_result=1),
+                cmd(f'/data get entity {uuid} DeathTime'), cmd(f'/data get entity {uuid} HurtTime')]
+    return ops + setup('/tick unfreeze', f'/kill @e[type=!player,x={x0},y={y0 - 8},z={z0},dx=16,dy=32,dz=16]',
+                       f'/forceload remove {x0} {z0}')
+
+def command_block_last_output():
+    """#13077: `BaseCommandBlock` keeps the feedback it got as a component (stamped with the time:
+    `Component.literal("[HH:mm:ss] ").append(message)`) and saves it with
+    `ComponentSerialization.CODEC`: a failed command keeps its red, click-to-suggest error."""
+    x0, y0, z0 = 3904, 260, 3648
+    ops = [cmd(f'/forceload add {x0} {z0}', False), {'op': 'wait_chunks', 'chunks': [[x0 >> 4, z0 >> 4]]},
+           cmd('/scoreboard objectives add cb_out dummy', False)]
+    # Two failures, whose styled feedback (red, click to suggest the command) is what the save must keep.
+    # A success's feedback names an entity, a new score holder or a bracketed value, whose components
+    # the two engines build differently (or which change later groups' scoreboard lists).
+    commands = ['say', 'scoreboard players get #nobody cb_out']
+    at = [(x0 + 2 + 3 * n, y0, z0 + 4) for n in range(len(commands))]
+    for command, (x, y, z) in zip(commands, at):
+        ops.append(cmd(f'/setblock {x} {y} {z} minecraft:command_block{{Command:"{command}"}}', expect_result=1))
+        ops.append(cmd(f'/setblock {x} {y + 1} {z} minecraft:redstone_block', expect_result=1))
+    ops.append({'op': 'tick', 'n': 3})
+    for x, y, z in at:
+        ops.append(cmd(f'/data get block {x} {y} {z} LastOutput'))
+    return ops + setup(f'/fill {x0} {y0} {z0} {x0 + 15} {y0 + 1} {z0 + 15} air',
+                       '/scoreboard objectives remove cb_out', f'/forceload remove {x0} {z0}')
+
+def loaded_ticket_removal(blocks=False):
+    """Entity-ticking command visibility after forced tickets leave; FULL is separate."""
+    targets = [(d, x, z) for d in range(2, 7)
+               for x, z in [(0, d * 16 + 3), (d * 16 + 3, d * 16 + 3), (-d * 16 + 3, 0)]]
+    ops = setup('/scoreboard objectives add loaded_audit dummy', '/forceload remove all',
+                '/tp @s 0.5 -63 0.5 0 0')
+    ops += [cmd('/forceload add -128 -128 127 127', expect_result=256),
+            {'op': 'settle'},
+            {'op': 'wait_chunks', 'chunks': [[x >> 4, z >> 4] for _, x, z in targets]}]
+    for _, x, z in targets:
+        ops += [{'op': 'chunk_ready', 'chunk': [x >> 4, z >> 4], 'expect_values': [1, 1, 1]}]
+        ops += setup(f'/setblock {x} -63 {z} air')
+    ops += setup('/setblock 0 -64 0 stone', '/setblock 0 -63 0 air', '/setblock 0 -62 0 air',
+                 '/data modify storage h010:identity uuid set from entity @s UUID')
+    ops += [cmd('/data get entity @s UUID', expect_result=4),
+            cmd('/execute if entity @s[type=player,gamemode=creative,nbt={Health:20f,Pos:[0.5d,-63d,0.5d]}]', expect_result=1),
+            cmd('/forceload query', expect_result=256), {'op': 'server_distances', 'expect_values': [2, 2]}]
+    for phase, ticks in [('before', 40), ('after', 120)]:
+        if phase == 'after':
+            ops += [cmd('/forceload remove all', expect_result=0), cmd('/forceload query', expect_result=0)]
+        ops += setup('/execute store result score start loaded_audit run time query gametime')
+        ops += [{'op': 'tick', 'n': ticks, 'pace_ms': 50}]
+        ops += setup('/execute store result score elapsed loaded_audit run time query gametime',
+                     '/scoreboard players operation elapsed loaded_audit -= start loaded_audit')
+        ops += [cmd('/scoreboard players get elapsed loaded_audit', expect_result=ticks),
+                {'op': 'server_distances', 'expect_values': [2, 2]},
+                cmd('/execute if entity @s[type=player,gamemode=creative,nbt={Health:20f,Pos:[0.5d,-63d,0.5d]}]', expect_result=1)]
+        for distance, x, z in targets:
+            present = phase == 'before' or distance == 2
+            for sign in ['if', 'unless']:
+                accepted = present if sign == 'if' else not present
+                op = cmd(f'/execute {sign} loaded {x} -63 {z}')
+                op['label'] = f'h010 {phase}/{distance}/{x},{z}/{sign}'
+                op['expect_callback'] = [accepted, int(accepted)]
+                ops.append(op)
+            if blocks:
+                op = cmd(f'/execute if block {x} -63 {z} air')
+                op['label'] = f'h010 FULL diagnostic/{phase}/{distance}/{x},{z}'
+                ops.append(op)
+    ops += setup('/execute store success score changed loaded_audit run data modify storage h010:identity uuid set from entity @s UUID')
+    ops += [cmd('/scoreboard players get changed loaded_audit', expect_result=0),
+            cmd('/data get entity @s UUID', expect_result=4)]
+    return ops
+def mob_team_command_names():
+    """Live mob command decoration; no damage, entity ticks or rendering claims."""
+    uid = '00000125-0000-0000-0000-000000000001'
+    team = 'command_red'
+    objective = 'team_name_cmd'
+    out = []
+
+    def check(command, result=1):
+        out.append(cmd(command, expect_result=result))
+
+    check('/tick freeze')
+    check('/gamerule minecraft:spawn_mobs', 0)
+    out.extend(setup('/forceload remove 0 0'))
+    check('/forceload add 0 0')
+    out.append({'op': 'settle'})
+    check('/execute if loaded 10 200 10')
+    check('/setblock 10 199 10 stone')
+    check('/execute if block 10 199 10 stone')
+    check(f'/scoreboard objectives add {objective} dummy')
+    out.extend(setup(f'/execute store result score #before {objective} run time query gametime'))
+    check('/summon zombie 10.5 200 10.5 {UUID:[I;293,0,0,1],Tags:["command_team_subject"],'
+          'NoAI:1b,NoGravity:1b,Silent:1b,PersistenceRequired:1b}')
+
+    def observe(member, host_member, custom):
+        # Guard the actual actor and values before absence/default assertions.
+        check(f'/execute as {uid} if entity @s[type=minecraft:zombie,tag=command_team_subject]')
+        check(f'/execute if data entity {uid} {{UUID:[I;293,0,0,1],Health:20f,'
+              'Pos:[10.5d,200d,10.5d],NoAI:1b,NoGravity:1b,Silent:1b,PersistenceRequired:1b}')
+        check(f'/data get entity {uid} UUID', 4)
+        check(f'/data get entity {uid} Pos', 3)
+        check(f'/data get entity {uid} Health', 20)
+        check(f'/execute as {uid} {"if" if member else "unless"} entity @s[team={team}]')
+        check(f'/execute {"if" if host_member else "unless"} entity @s[team={team}]')
+        if custom:
+            check(f'/data get entity {uid} CustomName', 3)
+        else:
+            out.append(cmd(f'/data get entity {uid} CustomName'))
+        check(f'/tp {uid} 10.5 200 10.5')
+        check('/tp @s 8.5 230 8.5')
+        out.extend(setup(f'/execute store result score #clock {objective} run time query gametime'))
+        check(f'/scoreboard players operation #clock {objective} -= #before {objective}', 0)
+
+    observe(False, False, False)
+    check(f'/team add {team}')
+    check(f'/team modify {team} prefix "[P] "')
+    check(f'/team modify {team} suffix " [S]"')
+    check(f'/team modify {team} color red', 0)
+    check(f'/team join {team} @s')
+    # The host witnesses the same stored formatting before the mob joins.
+    observe(False, True, False)
+    check(f'/team join {team} {uid}')
+    observe(True, True, False)
+    check(f'/data merge entity {uid} {{CustomName:"Bob"}}')
+    observe(True, True, True)
+    check(f'/team modify {team} prefix ""')
+    observe(True, True, True)
+    check(f'/team modify {team} suffix ""')
+    observe(True, True, True)
+    check(f'/team leave {uid}')
+    observe(False, True, True)
+    check('/team leave @s')
+    check(f'/data remove entity {uid} CustomName')
+    observe(False, False, False)
+    check(f'/team remove {team}', 0)
+    out.extend(setup(f'/kill {uid}', f'/scoreboard objectives remove {objective}',
+                     '/setblock 10 199 10 air', '/forceload remove 0 0', '/tick unfreeze'))
+    return out
+
+
+def reinforcement_room(legacy=False):
+    ops = setup('/tick freeze', '/gamerule spawn_mobs false', '/gamerule spawn_monsters true',
+                '/gamerule mob_drops false', '/gamerule advance_time false', '/scoreboard objectives add h300 dummy',
+                '/forceload add -64 -64 63 63', '/tp @s 0.5 -63 3.5 0 0')
+    ops += [{'op': 'settle'}]
+    for x in range(-64, 64, 16):
+        for z in range(-64, 64, 16):
+            ops += [cmd(f'/execute if loaded {x} -63 {z}', expect_result=1)]
+    if not legacy:
+        # Reinforcement foot offsets can reachY-23. Solid foot cells exclude
+        # generated caves above the room; the original roof/floor stay unchanged.
+        # Prime each band with air so its stone ACK proves the complete volume.
+        for y in range(-59, -22, 3):
+            top = min(y + 2, -23)
+            ops += setup(f'/fill -50 {y} -50 50 {top} 50 air')
+            ops += [cmd(f'/fill -50 {y} -50 50 {top} 50 stone', expect_result=101 * 101 * (top - y + 1))]
+        for pos, block in [('-40 -23 -40', 'stone'), ('40 -59 40', 'stone'),
+                           ('0 -56 0', 'stone')]:
+            ops += [cmd(f'/execute if block {pos} {block}', expect_result=1)]
+    ops += setup('/fill -50 -63 -50 50 -61 50 air', '/fill -50 -64 -50 50 -64 50 air',
+                 '/fill -50 -60 -50 50 -60 50 air')
+    ops += [cmd('/fill -50 -64 -50 50 -64 50 stone', expect_result=10201),
+            cmd('/fill -50 -60 -50 50 -60 50 stone', expect_result=10201), {'op': 'settle'}]
+    if not legacy:
+        for pos, block in [('0 -63 0', 'air'), ('0 -60 0', 'stone'), ('0 -64 0', 'stone')]:
+            ops += [cmd(f'/execute if block {pos} {block}', expect_result=1)]
+    for x, z in [(0, 0), (-16, -16), (-16, 16), (16, -16), (16, 16)]:
+        ops += [{'op': 'light', 'pos': [x, -63, z], 'expect_light': [0, 0]}]
+    ops += setup('/gamerule spawn_mobs true', '/kill @e[type=zombie]', '/kill @e[type=zombified_piglin]',
+                 '/execute store result score start h300 run time query gametime',
+                 '/data modify storage h300:actor uuid set from entity @s UUID')
+    ops += [cmd('/gamerule spawn_mobs', expect_result=1), cmd('/gamerule spawn_monsters', expect_result=1),
+            cmd('/execute if entity @s[type=player,nbt={Pos:[0.5d,-63d,3.5d],Health:20f}]', expect_result=1)]
+    return ops
+
+def command_zombie_reinforcements(once=False, raw=False, legacy=False):
+    """Frozen accepted command hits, with typed random facts and additive raw snapshots."""
+    ops = reinforcement_room(legacy) + setup('/scoreboard objectives add parity dummy')
+    original_rows = []
+    def original(label, command):
+        op = cmd(command)
+        op['label'] = 'h300 original/' + label
+        original_rows.append(label)
+        return [op]
+    def clean(difficulty):
+        # Cleanup must not make a hurt callee call again: peaceful before /kill.
+        return setup('/difficulty peaceful', '/kill @e[type=zombie]', '/kill @e[type=zombified_piglin]',
+                     '/difficulty ' + difficulty)
+    def subject(kind, serial, tag):
+        return setup(f'/summon {kind} 0.5 -63 0.5 {{UUID:[I;300,0,0,{serial}],NoAI:1b,Tags:["{tag}"]}}') + [
+            cmd(f'/execute if entity @e[type={kind},tag={tag},nbt={{UUID:[I;300,0,0,{serial}],NoAI:1b,Health:20f,Pos:[0.5d,-63d,0.5d]}}]', expect_result=1),
+            cmd('/execute if entity @s[type=player,gamemode=creative,nbt={Pos:[0.5d,-63d,3.5d],Health:20f}]', expect_result=1)]
+    def chance(selector, value=1):
+        return [cmd(f'/attribute {selector} minecraft:spawn_reinforcements base set {value}', expect_result=1),
+                cmd(f'/attribute {selector} minecraft:spawn_reinforcements base get', expect_result=value),
+                cmd(f'/attribute {selector} minecraft:spawn_reinforcements get', expect_result=1)]
+    def read(command, success, result_name='#value', objective='parity'):
+        return setup(f'/scoreboard players set {result_name} {objective} -99',
+                     '/scoreboard players set read_ok h300 -99',
+                     f'/execute store result score {result_name} {objective} store success score read_ok h300 run {command}') + [
+                         cmd('/scoreboard players get read_ok h300', expect_result=success)]
+    def clock(expected):
+        return setup('/execute store result score elapsed h300 run time query gametime',
+                     '/scoreboard players operation elapsed h300 -= start h300') + [cmd('/scoreboard players get elapsed h300', expect_result=expected)]
+    def callee(kind, parent_tag, case):
+        target = f'@e[type={kind},tag=!{parent_tag},limit=1]'
+        charge = 'minecraft:reinforcement_callee_charge'
+        out = [cmd(f'/execute if entity @e[type={kind},tag=!{parent_tag}]', expect_result=1)]
+        out += setup(f'/data modify storage h300:callees {case} set from entity {target}')
+        out += read(f'data get entity {target} UUID', 1, 'uuid_length', 'h300')
+        out += [cmd('/scoreboard players get uuid_length h300', expect_result=4),
+                cmd(f'/execute if data entity {target} attributes[{{id:"minecraft:spawn_reinforcements"}}].modifiers[{{id:"{charge}",amount:-0.05000000074505806d,operation:"add_value"}}]', expect_result=1)]
+        out += read(f'data get entity {target} Health 1000', 1, 'health', 'h300')
+        out += [cmd('/execute if score health h300 matches 1..', expect_result=1)]
+        for axis, bounds in enumerate(['-40..40', '-63', '-40..40']):
+            out += read(f'data get entity {target} Pos[{axis}]', 1, 'coordinate', 'h300')
+            out += [cmd(f'/execute if score coordinate h300 matches {bounds}', expect_result=1)]
+        out += [cmd(f'/execute at {target} if block ~ ~-1 ~ stone', expect_result=1)]
+        out += read(f'attribute {target} minecraft:knockback_resistance modifier value get minecraft:random_spawn_bonus 1000', 1)
+        out += [cmd('/execute if score #value parity matches 0..50', expect_result=1)]
+        if not legacy:
+            # A random baby may be a chicken jockey. These strict conditional
+            # facts never equate a missing entity with a successful query. The raw
+            # diagnostic retains vehicle presence and full snapshots separately.
+            out += setup('/scoreboard players set vehicle_present h300 0',
+                         f'/execute as {target} on vehicle run scoreboard players set vehicle_present h300 1',
+                         f'/data remove storage h300:vehicles {case}',
+                         f'/execute as {target} on vehicle run data modify storage h300:vehicles {case} set from entity @s',
+                         f'/data modify storage h300:rider uuid set from entity {target} UUID')
+            facts = [
+                (f'execute as {target} on vehicle if entity @s[type=chicken,nbt={{Health:4f}}]', '1', 1),
+                (f'execute as {target} on vehicle run data get entity @s UUID', '4', 1),
+                (f'execute as {target} on vehicle run data get entity @s Pos[0]', '-40..40', 1),
+                (f'execute as {target} on vehicle run data get entity @s Pos[1]', '-63', 1),
+                (f'execute as {target} on vehicle run data get entity @s Pos[2]', '-40..40', 1),
+                (f'execute as {target} on vehicle at @s if block ~ ~-1 ~ stone', '1', 1),
+                (f'execute as {target} on vehicle on passengers if entity @s[type={kind},tag=!{parent_tag}]', '1', 1),
+                (f'execute as {target} on vehicle on passengers run data modify storage h300:rider uuid set from entity @s UUID', '0', 0),
+            ]
+            for command, bounds, success in facts:
+                out += setup('/scoreboard players set vehicle_ok h300 1',
+                             '/execute if score vehicle_present h300 matches 1 run scoreboard players set vehicle_ok h300 0',
+                             '/scoreboard players set vehicle_value h300 -99',
+                             '/scoreboard players set vehicle_read h300 -99',
+                             f'/execute store result score vehicle_value h300 store success score vehicle_read h300 run {command}',
+                             f'/execute if score vehicle_present h300 matches 1 if score vehicle_read h300 matches {success} if score vehicle_value h300 matches {bounds} run scoreboard players set vehicle_ok h300 1')
+                out += [cmd('/scoreboard players get vehicle_ok h300', expect_result=1)]
+        if raw:
+            if not legacy:
+                out += [cmd(f'/data get storage h300:vehicles {case}')]
+            op = cmd(f'/data get storage h300:callees {case}')
+            op['label'] = 'h300 raw snapshot/' + case
+            out.append(op)
+        return out
+
+    if once:
+        ops += clean('hard') + subject('zombie', 30, 'origin') + chance('@e[tag=origin,limit=1]')
+        ops += [cmd('/difficulty', expect_result=3),
+                cmd('/damage @e[tag=origin,limit=1] 1 minecraft:player_attack by @s', expect_result=1)]
+        ops += callee('zombie', 'origin', 'once') + clock(0)
+        # Guarantee eligibility if an erroneously retained event runs later: .95 is not sufficient.
+        ops += chance('@e[tag=origin,limit=1]', 2)
+        marked = '@e[type=zombie,nbt={attributes:[{id:"minecraft:spawn_reinforcements",modifiers:[{id:"minecraft:reinforcement_callee_charge"}]}]}]'
+        ops += [cmd('/execute if entity ' + marked, expect_result=1)]
+        ops += setup('/data modify storage h300:once uuid set from entity @e[type=zombie,tag=!origin,limit=1] UUID', '/tick unfreeze')
+        ops += [{'op': 'tick', 'n': 1}]
+        ops += setup('/tick freeze')
+        ops += [cmd('/execute if entity ' + marked, expect_result=1),
+                cmd('/execute if data entity @e[tag=origin,limit=1] attributes[{id:"minecraft:spawn_reinforcements"}].modifiers[{id:"minecraft:reinforcement_caller_charge",amount:-0.05d}]', expect_result=1)]
+        ops += setup('/execute store success score changed h300 run data modify storage h300:once uuid set from entity ' + marked[:-1] + ',limit=1] UUID')
+        ops += [cmd('/execute if entity ' + marked, expect_result=1), cmd('/scoreboard players get changed h300', expect_result=0)] + clock(1)
+    else:
+        for difficulty, serial in [('easy', 10), ('hard', 11)]:
+            ops += clean(difficulty) + subject('zombie', serial, 'origin')
+            ops += [cmd('/difficulty', expect_result=1 if difficulty == 'easy' else 3)]
+            # These are the same six original reads, with their failure flags retained separately.
+            ops += read('attribute @e[tag=origin,limit=1] minecraft:spawn_reinforcements base get 1000', 1)
+            ops += original(difficulty + '/summoned base range', '/execute if score #value parity matches 0..100')
+            ops += read('attribute @e[tag=origin,limit=1] minecraft:knockback_resistance modifier value get minecraft:random_spawn_bonus 1000', 0)
+            ops += original(difficulty + '/summoned knockback range', '/execute if score #value parity matches 0..50')
+            ops += setup('/execute store success score #value parity run attribute @e[tag=origin,limit=1] minecraft:knockback_resistance modifier value get minecraft:random_spawn_bonus')
+            ops += original(difficulty + '/summoned knockback exists', '/execute if score #value parity matches 1')
+            ops += chance('@e[tag=origin,limit=1]')
+            ops += original(difficulty + '/first hurt', '/damage @e[tag=origin,limit=1] 1 minecraft:player_attack by @s')
+            ops += original(difficulty + '/birth', '/execute if entity @e[type=zombie,tag=!origin]')
+            ops += original(difficulty + '/birth floor', '/execute if entity @e[type=zombie,tag=!origin,x=-60,y=-63.5,z=-60,dx=120,dy=1,dz=120]')
+            ops += original(difficulty + '/caller charge', '/attribute @e[tag=origin,limit=1] minecraft:spawn_reinforcements modifier value get minecraft:reinforcement_caller_charge')
+            ops += original(difficulty + '/callee charge', '/execute as @e[type=zombie,tag=!origin,limit=1] run attribute @s minecraft:spawn_reinforcements modifier value get minecraft:reinforcement_callee_charge')
+            ops += read('attribute @e[type=zombie,tag=!origin,limit=1] minecraft:spawn_reinforcements base get 1000', int(difficulty == 'hard'))
+            ops += original(difficulty + '/callee base range', '/execute if score #value parity matches 0..100')
+            ops += original(difficulty + '/callee target', '/execute as @e[type=zombie,tag=!origin,limit=1] on target run data get entity @s Pos')
+            if difficulty == 'hard':
+                ops += callee('zombie', 'origin', 'hard')
+            ops += setup('/data modify storage h300:health value set from entity @e[tag=origin,limit=1] Health',
+                         '/scoreboard players set rejected_result h300 -99', '/scoreboard players set rejected_success h300 -99')
+            ops += [cmd('/execute store result score rejected_result h300 store success score rejected_success h300 run damage @e[tag=origin,limit=1] 1 minecraft:player_attack by @s'),
+                    cmd('/scoreboard players get rejected_result h300', expect_result=0), cmd('/scoreboard players get rejected_success h300', expect_result=0)]
+            ops += setup('/execute store success score changed h300 run data modify storage h300:health value set from entity @e[tag=origin,limit=1] Health')
+            ops += [cmd('/scoreboard players get changed h300', expect_result=0)]
+            ops += original(difficulty + '/charge after rejected hit', '/attribute @e[tag=origin,limit=1] minecraft:spawn_reinforcements modifier value get minecraft:reinforcement_caller_charge')
+            ops += original(difficulty + '/birth after rejected hit', '/execute if entity @e[type=zombie,tag=!origin]')
+        ops += clean('hard') + subject('zombified_piglin', 12, 'piglin')
+        ops += original('piglin/default chance', '/attribute @e[tag=piglin,limit=1] minecraft:spawn_reinforcements base get')
+        ops += chance('@e[tag=piglin,limit=1]')
+        ops += original('piglin/hurt', '/damage @e[tag=piglin,limit=1] 1 minecraft:player_attack by @s')
+        ops += original('piglin/birth', '/execute if entity @e[type=zombified_piglin,tag=!piglin]')
+        ops += callee('zombified_piglin', 'piglin', 'piglin')
+        ops += clean('hard') + setup('/summon zombified_piglin 0.5 -63 0.5 {UUID:[I;300,0,0,13],NoAI:1b,Tags:["piglin"],CanBreakDoors:1b}')
+        ops += [cmd('/execute if entity @e[type=zombified_piglin,tag=piglin,nbt={UUID:[I;300,0,0,13]}]', expect_result=1)]
+        ops += original('piglin/saved door flag', '/data get entity @e[tag=piglin,limit=1] CanBreakDoors')
+        ops += clean('hard') + subject('zombie', 14, 'origin') + chance('@e[tag=origin,limit=1]')
+        ops += original('no attacker/hurt', '/damage @e[tag=origin,limit=1] 1 minecraft:generic')
+        ops += original('no attacker/no birth', '/execute if entity @e[type=zombie,tag=!origin]')
+        assert len(original_rows) == 30
+        ops += clock(0)
+    ops += setup('/execute store success score changed h300 run data modify storage h300:actor uuid set from entity @s UUID')
+    ops += [cmd('/execute if entity @s[type=player,gamemode=creative,nbt={Health:20f,Pos:[0.5d,-63d,3.5d]}]', expect_result=1), cmd('/scoreboard players get changed h300', expect_result=0)]
+    return ops
+
+
+# Groups the full run leaves out: each runs alone in its own world (--only), so
+# what they leave behind reaches no other group.
+ISOLATED_REINFORCEMENTS = frozenset({'command zombie reinforcements', 'command reinforcement once'})
+# These overlays replace built-in recipes, never beside the corpus's fixed vanilla recipe-count controls.
+ISOLATED_RECIPES = frozenset({'crafting recipe priority', 'crafting base recipe control', 'transmute result patches'})
+ISOLATED_FRAME_MAPS = frozenset({'frame live map detachment'})
+ISOLATED_SPECTRAL_DURATION = frozenset({'spectral saved duration'})
+ISOLATED_FRAME_MAPS = frozenset({'frame live map detachment'})
+ISOLATED_ITEM_HEALTH = frozenset({'item Health short load'})
+ISOLATED_FRAME_MAPS = frozenset({'frame live map detachment', 'treasure map copies'})
+ISOLATED_MAP_CRAFTING = frozenset({'craft map takes'})
+ISOLATED_MACRO_TYPE = frozenset({'macro source type error'})
+ISOLATED_PICKUP_SAVE = frozenset({'mob saved pickup loot'})
+ISOLATED_ORB_UUID = frozenset({'orb saved UUID'})
+ISOLATED_STAND_FALL = frozenset({'stand saved fall distance'})
+ISOLATED_POTION_ICONS = frozenset({'potion custom effect icons'})
+ISOLATED_JUKEBOX_CLOCK = frozenset({'jukebox saved clock'})
+ISOLATED_FUNCTION_FEEDBACK = frozenset({'fork function feedback'})
+ISOLATED_EFFECTIVE_PRESENCE = frozenset({'effective component presence'})
+ISOLATED_BOAT_TREE = frozenset({'boat passenger tree'})
+# Its sync turns on fixed seeds for the whole script: the groups after it would draw from them (tools/test_seed_sync_parity.py).
+ISOLATED_SEED_SYNC = frozenset({'seed sync proof'})
+ISOLATED_EFFECTIVE_PRESENCE = frozenset({'effective component presence'})
+ISOLATED_BOAT_TREE = frozenset({'boat passenger tree'})
+ISOLATED_GUEST_CLOSE = frozenset({'guest container close event'})
+ISOLATED_POT_HOPPER = frozenset({'hopper pot saved slot'})
+ISOLATED_GROUPS = ISOLATED_REINFORCEMENTS | ISOLATED_RECIPES | ISOLATED_WOLF_ANGER | ISOLATED_FRAME_MAPS | ISOLATED_SPECTRAL_DURATION | ISOLATED_PICKUP_SAVE | ISOLATED_ORB_UUID | ISOLATED_STAND_FALL | ISOLATED_MAP_CRAFTING | ISOLATED_MACRO_TYPE | ISOLATED_ITEM_HEALTH | ISOLATED_POTION_ICONS | ISOLATED_JUKEBOX_CLOCK | ISOLATED_FUNCTION_FEEDBACK | ISOLATED_SEED_SYNC | ISOLATED_EFFECTIVE_PRESENCE | ISOLATED_BOAT_TREE | ISOLATED_GUEST_CLOSE | ISOLATED_POT_HOPPER
+
+
+def vehicle_fall_clip():
+    """#13005: `Entity.move` resets a fall when a move of a block or more passes a
+    `fall_damage_resetting` block (a full block for the ray) or water, before the move's own
+    drop counts. Boats and minecarts fall fast past a vine on a wall; one column has no vine. A boat
+    falls through one block of water and ends the move below it, out of the water's own reset.
+    """
+    x0, y0, z0 = 3648, 260, 3648
+    chunk = [[x0 >> 4, z0 >> 4]]
+    ops = [cmd(f'/forceload add {x0} {z0}', False), {'op': 'wait_chunks', 'chunks': chunk},
+           cmd('/tick freeze', False),
+           cmd(f'/fill {x0} {y0 - 1} {z0} {x0 + 15} {y0 - 1} {z0 + 15} stone', expect_result=256)]
+    subjects = [('oak_boat', 'vine'), ('minecart', 'vine'), ('command_block_minecart', 'vine'),
+                ('oak_boat', None), ('minecart', None), ('oak_boat', 'water')]
+    for n, (kind, block) in enumerate(subjects, 1):
+        x, z = x0 + 1 + (n - 1) * 3 % 15, z0 + 4 + (n - 1) // 5 * 6
+        ops.append(cmd(f'/fill {x - 1} {y0 + 10} {z} {x - 1} {y0 + 30} {z} stone', expect_result=21))
+        if block == 'vine':
+            ops.append(cmd(f'/setblock {x} {y0 + 18} {z} vine[west=true]', expect_result=1))
+        y, dy = y0 + 20, '-1.2d'
+        if block == 'water':
+            ops.append(cmd(f'/setblock {x} {y0 + 19} {z} water', expect_result=1))
+            y, dy = y0 + 21, '-2.5d'
+        ops.append(cmd(f'/summon {kind} {x}.7 {y} {z}.5 {{UUID:[I;13005,0,{n},1],'
+                       f'fall_distance:5d,Motion:[0d,{dy},0d]}}', expect_result=1))
+
+    def reads():
+        for n, _ in enumerate(subjects, 1):
+            for key in ('fall_distance', 'Pos[1]'):
+                ops.append(cmd(f'/data get entity 000032cd-0000-0000-0000-{n:04x}00000001 {key}'))
+
+    reads()
+    for _ in range(4):
+        ops += [cmd('/tick unfreeze', False), {'op': 'tick', 'n': 1}, cmd('/tick freeze', False)]
+        reads()
+    return ops + setup('/tick unfreeze', f'/kill @e[type=!player,x={x0},y={y0 - 8},z={z0},dx=16,dy=48,dz=16]',
+                       f'/fill {x0} {y0 - 1} {z0} {x0 + 15} {y0 + 30} {z0 + 15} air',
+                       f'/forceload remove {x0} {z0}')
+
+
+def mob_fall_clip():
+    """Entity.move on a mob: a move of a block or more casts along it (FALLDAMAGE_RESETTING as a full
+    block, WATER) and a hit resets the fall before the move's own drop counts. Pigs and husks fall
+    fast past a vine on a wall and with nothing in the way; a husk falls through one block of water.
+    """
+    x0, y0, z0 = 4160, 260, 4160
+    chunk = [[x0 >> 4, z0 >> 4]]
+    ops = [cmd(f'/forceload add {x0} {z0}', False), {'op': 'wait_chunks', 'chunks': chunk},
+           cmd('/tick freeze', False),
+           cmd(f'/fill {x0} {y0 - 1} {z0} {x0 + 15} {y0 - 1} {z0 + 15} stone', expect_result=256)]
+    # A pig in water floats up at random (FloatGoal): only the husk falls through it.
+    subjects = [('pig', 'vine'), ('husk', 'vine'), ('pig', None), ('husk', None), ('husk', 'water')]
+    for n, (kind, block) in enumerate(subjects, 1):
+        x, z = x0 + 1 + (n - 1) % 5 * 3, z0 + 4 + (n - 1) // 5 * 6
+        ops.append(cmd(f'/fill {x - 1} {y0 + 10} {z} {x - 1} {y0 + 30} {z} stone', expect_result=21))
+        if block == 'vine':
+            ops.append(cmd(f'/setblock {x} {y0 + 18} {z} vine[west=true]', expect_result=1))
+        # A move of 2.5 passes the vine's block or the water whole (in it, a climbable or the water would
+        # reset the fall anyway).
+        y = y0 + 20
+        if block == 'water':
+            ops.append(cmd(f'/setblock {x} {y0 + 19} {z} water', expect_result=1))
+            y = y0 + 21
+        dy = '-2.5d'
+        ops.append(cmd(f'/summon {kind} {x}.7 {y} {z}.5 {{UUID:[I;14000,0,{n},1],'
+                       f'fall_distance:5d,Motion:[0d,{dy},0d],PersistenceRequired:1b}}', expect_result=1))
+
+    def reads():
+        for n, _ in enumerate(subjects, 1):
+            for key in ('fall_distance', 'Pos[1]'):
+                ops.append(cmd(f'/data get entity 000036b0-0000-0000-0000-{n:04x}00000001 {key}'))
+
+    reads()
+    for _ in range(3):
+        ops += [cmd('/tick unfreeze', False), {'op': 'tick', 'n': 1}, cmd('/tick freeze', False)]
+        reads()
+    return ops + setup('/tick unfreeze', f'/kill @e[type=!player,x={x0},y={y0 - 8},z={z0},dx=16,dy=48,dz=16]',
+                       f'/fill {x0} {y0 - 1} {z0} {x0 + 15} {y0 + 30} {z0 + 15} air',
+                       f'/forceload remove {x0} {z0}')
+
+
+def boat_float_height():
+    """#13022: `AbstractBoat.checkInWater` and `isUnderwater` sum a block's y and its water height
+    in float (`y + FluidState.getHeight`), and `floatBoat` lands a falling boat at the float
+    `getWaterLevelAbove() - getBbHeight()`, with `waterLevel = getY(1.0)`. Boats fall into a
+    single water block in the air, a pool two deep and a flowing edge, high up where a float is
+    coarse, and are read for 10 ticks.
+    """
+    x0, y0, z0 = 3776, 279, 3776
+    chunk = [[x0 >> 4, z0 >> 4]]
+    ops = [cmd(f'/forceload add {x0} {z0}', False), {'op': 'wait_chunks', 'chunks': chunk},
+           cmd('/tick freeze', False)]
+    # (x, water blocks to set, boat y, motion y)
+    cases = [(1, [f'{x0 + 1} {y0} {z0 + 4} water'], y0 + 2, '-2.5d'),
+             (5, [f'{x0 + 4} {y0 - 2} {z0 + 3} {x0 + 6} {y0 - 3} {z0 + 5} stone',
+                  f'{x0 + 4} {y0 - 1} {z0 + 3} {x0 + 6} {y0} {z0 + 5} water'], y0 + 3, '0d'),
+             (9, [f'{x0 + 8} {y0 - 1} {z0 + 3} {x0 + 10} {y0 - 1} {z0 + 5} stone',
+                  f'{x0 + 9} {y0} {z0 + 4} water[level=3]'], y0 + 2, '0d')]
+    for n, (dx, waters, y, dy) in enumerate(cases, 1):
+        for w in waters:
+            ops.append(cmd(f'/fill {w}' if w.count(' ') > 4 else f'/setblock {w}', False))
+        ops.append(cmd(f'/summon oak_boat {x0 + dx}.5 {y} {z0 + 4}.5 {{UUID:[I;13022,0,{n},1],'
+                       f'Motion:[0d,{dy},0d]}}', expect_result=1))
+    for _ in range(10):
+        ops += [cmd('/tick unfreeze', False), {'op': 'tick', 'n': 1}, cmd('/tick freeze', False)]
+        for n in range(1, len(cases) + 1):
+            for key in ('Pos[1]', 'Motion[1]'):
+                ops.append(cmd(f'/data get entity 000032de-0000-0000-0000-{n:04x}00000001 {key}'))
+    return ops + setup('/tick unfreeze', f'/kill @e[type=!player,x={x0},y={y0 - 8},z={z0},dx=16,dy=24,dz=16]',
+                       f'/fill {x0} {y0 - 4} {z0} {x0 + 15} {y0 + 4} {z0 + 15} air',
+                       f'/forceload remove {x0} {z0}')
+
+
 def groups():
     try:
-        from .loaded_cloud_corpus import loaded_clouds
+        from .spectral_duration_corpus import cases as spectral_saved_duration
     except ImportError:
+        from spectral_duration_corpus import cases as spectral_saved_duration
+    try:
+        from .item_health_load_corpus import cases as item_health_load
+    except ImportError:
+        from item_health_load_corpus import cases as item_health_load
+    try:
+        from .vehicle_kill_corpus import vehicle_kill_contents
+    except ImportError:
+        from vehicle_kill_corpus import vehicle_kill_contents
+    try:
+        from .vehicle_container_corpus import vehicle_containers
+    except ImportError:
+        from vehicle_container_corpus import vehicle_containers
+    try:
+        from .vehicle_boolean_corpus import other_entity_boolean_flags, vehicle_boolean_flags
+    except ImportError:
+        from vehicle_boolean_corpus import other_entity_boolean_flags, vehicle_boolean_flags
+    try:
+        from .data_literal_corpus import storage_literals
+    except ImportError:
+        from data_literal_corpus import storage_literals
+    try:
+        from .craft_map_take_corpus import cases as craft_map_takes
+    except ImportError:
+        from craft_map_take_corpus import cases as craft_map_takes
+    try:
+        from .potion_effect_icon_corpus import cases as potion_effect_icons
+    except ImportError:
+        from potion_effect_icon_corpus import cases as potion_effect_icons
+    try:
+        from .trader_llama_delay_corpus import llama_delay
+    except ImportError:
+        from trader_llama_delay_corpus import llama_delay
+    try:
+        from .guest_close_event_corpus import cases as guest_close_events
+    except ImportError:
+        from guest_close_event_corpus import cases as guest_close_events
+    try:
+        from .pot_hopper_corpus import cases as pot_hopper_cases
+    except ImportError:
+        from pot_hopper_corpus import cases as pot_hopper_cases
+    try:
+        from .transmute_patch_corpus import cases as transmute_patches
+    except ImportError:
+        from transmute_patch_corpus import cases as transmute_patches
+    try:
+        from .mob_effect_predicate_corpus import cases as mob_effect_predicates
+    except ImportError:
+        from mob_effect_predicate_corpus import cases as mob_effect_predicates
+    try:
+        from .fill_block_nbt_corpus import fill_block_nbt
+    except ImportError:
+        from fill_block_nbt_corpus import fill_block_nbt
+    try:
+        from .seed_sync_corpus import cases as seed_sync_proof
+    except ImportError:
+        from seed_sync_corpus import cases as seed_sync_proof
+    try:
+        from .mob_name_predicate_corpus import cases as mob_name_predicates
+    except ImportError:
+        from mob_name_predicate_corpus import cases as mob_name_predicates
+    try:
+        from . import player_food_predicate_corpus as player_food
+    except ImportError:
+        import player_food_predicate_corpus as player_food
+    try:
+        from .frame_map_corpus import frame_maps, treasure_map_copies
+        from .allay_damage_corpus import allay_player_damage
+        from .wolf_anger_corpus import groups as wolf_anger_groups
+        from .allay_healing_corpus import allay_healing
+        from .loaded_cloud_corpus import loaded_clouds
+        from .moving_piston_data_corpus import moving_piston_data
+        from .carpet_farm_corpus import carpet_farms
+        from .passenger_teleport_corpus import passenger_teleports
+        from .gateway_passenger_corpus import gateway_passengers
+        from .gateway_item_motion_corpus import gateway_item_motion
+        from .item_honey_bounce_corpus import item_honey_bounce
+        from .item_merge_corpus import stack_limit_merges
+        from .conduit_table_entity_corpus import conduit_table_entities
+    except ImportError:
+        from frame_map_corpus import frame_maps, treasure_map_copies
+        from allay_damage_corpus import allay_player_damage
+        from wolf_anger_corpus import groups as wolf_anger_groups
+        from allay_healing_corpus import allay_healing
         from loaded_cloud_corpus import loaded_clouds
-    return [
+        from moving_piston_data_corpus import moving_piston_data
+        from carpet_farm_corpus import carpet_farms
+        from passenger_teleport_corpus import passenger_teleports
+        from gateway_passenger_corpus import gateway_passengers
+        from gateway_item_motion_corpus import gateway_item_motion
+        from item_honey_bounce_corpus import item_honey_bounce
+        from item_merge_corpus import stack_limit_merges
+        from conduit_table_entity_corpus import conduit_table_entities
+    result = [
         ('setup', group_setup()),
+        ('guest container close event', guest_close_events()),
+        ('spectral saved duration', spectral_saved_duration(cmd, setup)),
+        ('item Health short load', item_health_load(cmd, setup)),
+        ('vehicle container saved fields', vehicle_containers(cmd)),
+        ('vehicle boolean save flags', vehicle_boolean_flags(cmd)),
+        ('other entity boolean save flags', other_entity_boolean_flags(cmd)),
+        ('hopper pot saved slot', pot_hopper_cases(cmd)),
+        ('macro source type error', macro_source_type_error()),
+        ('potion custom effect icons', potion_effect_icons(cmd, setup)),
+        ('stand saved fall distance', stand_saved_fall()),
+        ('orb saved UUID', orb_saved_uuid()),
+        ('mob saved pickup loot', mob_saved_pickup_loot()),
+        ('transmute result patches', transmute_patches(cmd, setup)),
+        ('mob effect predicate view', mob_effect_predicates(cmd, setup)),
+        ('mob custom name components', mob_name_predicates(cmd, setup)),
+        ('frame live map detachment', frame_maps(cmd, setup)),
+        ('treasure map copies', treasure_map_copies(cmd, setup)),
+        ('craft map takes', craft_map_takes(cmd, setup)),
+        ('allay player damage immunity', allay_player_damage(cmd, setup)),
+        *wolf_anger_groups(cmd, setup),
+        ('allay passive healing', allay_healing(cmd, setup)),
+        ('crafter map extension', crafter_map_extension()),
+
+
+        ('command zombie reinforcements', command_zombie_reinforcements()),
+        ('command reinforcement once', command_zombie_reinforcements(True)),
+        ('advancement world loot rewards', advancement_world_loot_rewards()),
+        ('advancement empty loot reference', advancement_empty_loot_reference()),
+        ('crafting recipe priority', crafting_recipe_priority()),
+        ('crafting base recipe control', crafting_recipe_priority(False)),
+        ('item stack-size override merges', stack_limit_merges(cmd, setup)),
+        ('moving piston command data', moving_piston_data(cmd, setup)),
+        ('mob team command names', mob_team_command_names()),
+        ('bell server glow', bell_server_glow()),
+        ('advancement reward functions', advancement_reward_functions()),
+        ('named weather predicates', named_weather_predicates()),
+        ('named smoke predicates', named_smoke_predicates()),
         ('mining_efficiency_9021', mining_efficiency_9021()),
         ('structured item slots', structured_item_slots()),
+        ('boat passenger tree', boat_passenger_tree_cases()),
+        ('effective component presence', effective_component_presence_cases()),
+        ('jukebox saved clock', jukebox_saved_clock_cases()),
         ('loaded potion clouds', loaded_clouds(cmd, setup)),
         ('server clock', server_clock()),
         ('inline execute predicates', inline_execute_predicates()),
 
 
         ('decorated pot data', decorated_pot_data()),
+        ('conduit and enchanting table block entities', conduit_table_entities(cmd, setup)),
+        ('modern data literal values', storage_literals(cmd)),
         ('comparator output data', comparator_output_data()),
+        ('fill block NBT', fill_block_nbt(cmd, setup)),
         ('hopper empty slot limits', hopper_empty_slot_limits()),
         ('End clock commands', end_clock_commands()),
         ('client commands', client_commands()),
@@ -4500,6 +7459,7 @@ def groups():
         ('experience level boundaries', experience_level_boundaries()),
         ('blocks and border', world_blocks()),
         ('setblock destroy air', setblock_destroy_air()),
+        ('block predicate NBT', block_predicate_nbt()),
         ('forceload query order', forceload_query_order()),
         ('entities', entities()),
         ('zombie nautilus ignored age', zombie_nautilus_ignored_age()),
@@ -4514,8 +7474,10 @@ def groups():
         ('command minecart loaded success', command_minecart_loaded_success()),
         ('ravager NoAI counters', ravager_noai_counters()),
         ('aquatic FromBucket', aquatic_from_bucket()),
+        ('dispensed spawn egg persistence', dispensed_spawn_egg_persistence()),
         ('villager command names', villager_command_names()),
         ('item lifetime counters', item_lifetime_counters()),
+        ('seed sync proof', seed_sync_proof(cmd, setup)),
         ('animal signed InLove', animal_signed_in_love()),
         ('mob fire resistance damage', mob_fire_resistance_damage()),
         ('armor stand climbing', armor_stand_climbing()),
@@ -4526,24 +7488,59 @@ def groups():
         ('sulfur cube fuse ticks', sulfur_cube_fuse_ticks()),
         ('wither spawn', wither_spawn()),
         ('riding teleport', riding_teleport()),
+        ('piston entity tick order', piston_entity_tick_order()),
+        ('piston mob bounce', piston_mob_bounce()),
+        ('primed tnt box', primed_tnt_box()),
+        ('primed tnt fall', primed_tnt_fall()),
+        ('command block last output', command_block_last_output()),
+        ('living short timers', living_short_timers()),
+        ('projectile fall distance', projectile_fall_distance()),
+        ('item fall distance', item_fall_distance()),
+        ('beacon levels load', beacon_levels_load()),
+        ('zombie villager summoned data', zombie_villager_summoned_data()),
+        ('loaded dead mob', loaded_dead_mob()),
+        ('falling block fall float', falling_block_fall_float()),
+        ('explosion infested blocks', explosion_infested_blocks()),
+        ('jigsaw default joint', jigsaw_default_joint()),
+        ('command block auto load', command_block_auto_load()),
+        ('item block escape', item_block_escape()),
+        ('scheduled block item birth', scheduled_item_birth()),
+        ('piston push ground', piston_push_ground()),
+        ('falling block in a moving piston', falling_block_in_moving_piston()),
+        ('piston tnt effects', piston_tnt_effects()),
+        ('carpet farms', carpet_farms(cmd, setup)),
+        ('passenger teleports', passenger_teleports(cmd, setup)),
         ('mob riding', mob_riding()),
         ('trial spawner passengers', trial_spawner_passengers()),
+        ('ominous spawner saved Motion', ominous_spawner_saved_motion()),
+        ('gateway passengers', gateway_passengers(cmd, setup)),
+        ('gateway item motion', gateway_item_motion(cmd, setup)),
+        ('item honey bounce', item_honey_bounce(cmd, setup)),
         ('camel riders', camel_riders()),
         ('scores, teams and bossbars', scores()),
         ('bossbar list order', bossbar_list_order()),
         ('large fireball fire', large_fireball_fire()),
         ('mannequin pose anchors', mannequin_pose_anchors()),
         ('item command damage', item_command_damage()),
+        ('dragon command damage', dragon_command_damage()),
+        ('minecart numeric fields', minecart_numeric_fields()),
+        ('enderman command damage', enderman_command_damage()),
+        ('shulker command damage', shulker_command_damage()),
+        ('SNBT trailing commas', snbt_trailing_commas()),
         ('execute', execute()),
         ('projectile origin', projectile_origin()),
         ('selector missing predicates', selector_missing_predicates()),
         ('levels', levels()),
         ('end portal entities', end_portal_entities()),
         ('items and loot', items_and_loot()),
+        ('loot world pack tables', loot_world_pack_tables()),
         ('numeric array edits', numeric_array_edits()),
         ('projectile saved UUID', projectile_saved_uuid()),
+        ('entity ticking gate', entity_ticking_gate()),
+        ('summoned eye of ender', summoned_eye_of_ender()),
         ('awake villager saved position', awake_villager_saved_position()),
         ('villager wake rotation', villager_wake_rotation()),
+        ('villager gossip decay', villager_gossip_decay()),
         ('cube saved Age', cube_saved_age()),
         ('mob baby attribute reads', mob_baby_attribute_reads()),
         ('mob partial block suffocation', mob_partial_block_suffocation()),
@@ -4557,15 +7554,20 @@ def groups():
         ('bird flap sensors', bird_flap_sensors()),
         ('entity landing sensors', entity_landing_sensors()),
         ('loot set damage', loot_set_damage()),
+        ('loot set name and components', loot_set_name_and_components()),
+        ('loot give full inventory', loot_give_full_inventory()),
         ('item NBT count bounds', item_nbt_count_bounds()),
         ('item block containers', item_block_containers()),
         ('world', world_misc()),
         ('recipe special arguments', recipe_special_arguments()),
         ('progression', progression()),
         ('functions and packs', functions_and_packs()),
+        ('mob NBT damage cooldown', mob_nbt_damage_cooldown()),
         ('mob full resistance hits', mob_full_resistance_hits()),
         ('sulfur cube loaded health', sulfur_cube_loaded_health()),
         ('function return feedback', function_return_feedback()),
+        ('fork function feedback', fork_function_feedback_cases()),
+        ('function condition fallthrough', function_condition_fallthrough()),
         ('ticking and random', ticking()),
         ('compute', compute()),
         ('social and scoreboard', social()),
@@ -4573,13 +7575,34 @@ def groups():
         ('wither breaks', wither_breaks()),
         ('tnt minecart rails', tnt_minecart_rails()),
         ('creative shulker drops', creative_shulker_drops()),
+        ('shulker box empty Items', shulker_box_empty_items()),
         ('minecart drag', minecart_drag()),
         ('ender dragon', ender_dragon()),
+        ('summoned dragon hovers', summoned_dragon_hovers()),
+        ('dragon scanning turn', dragon_scanning_turn()),
         ('place structure', place_structure()),
+        ('template container loot table', template_container_loot_table()),
         ('tame wolf kills', tame_wolf_kills()),
+        ('forceload loads the chunk', forceload_loads_the_chunk()),
         ('experience orb fall', experience_orb_fall()),
         ('piglin pickups', piglin_pickups()),
         ('experience orb stuck', experience_orb_stuck()),
+        ('experience orb saved Value', experience_orb_saved_value()),
         ('summoned potions', summoned_potions()),
+        ('potion contents names', potion_contents_names()),
         ('creeper cloud selectors', creeper_cloud_selectors()),
+        ('boat float height', boat_float_height()),
+        ('vehicle fall clip', vehicle_fall_clip()),
+        ('projectile saved ground', projectile_saved_ground()),
+        ('teleport lands', teleport_lands()),
+        ('rocket data merge', rocket_data_merge()),
+        ('mob fall clip', mob_fall_clip()),
+        ('vehicle ground and fall', vehicle_ground_and_fall()),
+        ('vehicle saved ground and fall', vehicle_saved_ground_and_fall()),
+        ('ravager saved movement speed', ravager_saved_movement_speed()),
+        # Last: it leaves the player in other food than it found.
+        (player_food.GROUP, player_food.cases(cmd, setup)),
     ]
+    result.insert(1, ('vehicle kill contents', vehicle_kill_contents(cmd)))
+    result.insert(1, ('trader llama NoAI delay', llama_delay(cmd)))
+    return result

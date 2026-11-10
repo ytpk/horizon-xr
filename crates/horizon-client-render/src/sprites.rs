@@ -27,6 +27,10 @@ impl SpriteAnimation {
         let frames = self.materials[kind].as_ref()?;
         Some(&frames[self.frame(tick) % frames.len()])
     }
+    /// Polytone's `mode` on this animation, when it has one.
+    pub fn mode(&self) -> Option<&horizon_assets::animation::ClipMode> {
+        self.clip.mode()
+    }
     pub fn frame(&self, tick: u64) -> usize {
         self.clip.sample(tick).frame as usize
     }
@@ -34,7 +38,21 @@ impl SpriteAnimation {
     /// `interpolate` mixes the frame with the next one by
     /// `(int)(subFrame / time * 1000)` thousandths; others show the frame.
     pub fn blend(&self, tick: u64) -> FrameBlend {
-        let sample = self.clip.sample(tick);
+        self.blend_sample(self.clip.sample(tick))
+    }
+    /// [`Self::blend`], or what a Polytone `mode` (time of day, weather, an expression) picks
+    /// from `inputs` for an animation that has one.
+    pub fn blend_with(
+        &self,
+        tick: u64,
+        inputs: Option<&horizon_assets::animation::ModeInputs>,
+    ) -> FrameBlend {
+        match inputs.and_then(|i| self.clip.sample_mode(i)) {
+            Some(sample) => self.blend_sample(sample),
+            None => self.blend(tick),
+        }
+    }
+    fn blend_sample(&self, sample: horizon_assets::animation::AnimationSample) -> FrameBlend {
         let frame = sample.frame as usize;
         let next = sample.next_frame as usize;
         if self.clip.interpolates() && sample.interpolation_millis > 0 && next != frame {
@@ -144,8 +162,15 @@ pub fn set_labpbr_maps(on: bool) {
 pub fn labpbr_maps() -> bool {
     LABPBR_MAPS.load(std::sync::atomic::Ordering::Relaxed)
 }
-/// Budget for either complete normal or specular image set.
-const MAX_MAP_BYTES: u64 = DEFAULT_TEXTURE_BUDGET / 4;
+/// Budget for either complete normal or specular image set: a quarter of the block textures'
+/// budget, so raising `textureBudgetMiB` sharpens a pack's LabPBR maps along with its colours.
+fn map_bytes(texture_budget: u64) -> u64 {
+    texture_budget / 4
+}
+/// [`map_bytes`] for the budget the next resource load keeps to.
+fn max_map_bytes() -> u64 {
+    map_bytes(TEXTURE_BUDGET.load(std::sync::atomic::Ordering::Relaxed))
+}
 /// Fewer layers than any game has (vanilla's are about 1300): what a map is kept at while
 /// loading assumes at least these many share the array.
 const LAYERS_AT_LEAST: u64 = 1024;
@@ -275,7 +300,7 @@ impl Sprites {
         self.specular.clear();
         let largest_map = self.pbr.iter().flatten().flatten().map(|m| m.0).max();
         self.pbr_size = largest_map.map_or(SPRITE_SIZE, |l| {
-            side_within(l.min(size), layers, MAX_MAP_BYTES)
+            side_within(l.min(size), layers, max_map_bytes())
         });
         if largest_map.is_some() {
             let pbr_size = self.pbr_size;
@@ -714,7 +739,7 @@ impl Sprites {
 /// A PNG's width, height and pixels as RGBA. From the prepared data file
 /// when it holds the texture: no file opened per texture, nor for its absent
 /// LabPBR maps.
-fn read_rgba(path: &Path) -> Result<(u32, u32, Vec<u8>)> {
+pub(crate) fn read_rgba(path: &Path) -> Result<(u32, u32, Vec<u8>)> {
     let bytes = horizon_core::prepared_files::read(path)?;
     let mut decoder = png::Decoder::new(std::io::Cursor::new(bytes));
     decoder.ignore_checksums(true);
@@ -783,7 +808,7 @@ fn pbr_map(
         return None;
     }
     let side = w.max(h);
-    let output_side = side_within(side, LAYERS_AT_LEAST, MAX_MAP_BYTES).min(side);
+    let output_side = side_within(side, LAYERS_AT_LEAST, max_map_bytes()).min(side);
     let frames = (0..columns * rows)
         .map(|index| {
             let (x, y) = (index % columns * w, index / columns * h);
@@ -854,6 +879,15 @@ mod tests {
         assert_eq!(side_within(64, 1300, 1536 << 20), 64);
         // Never under vanilla's size, whatever the budget.
         assert_eq!(side_within(512, 1300, 1), SPRITE_SIZE);
+    }
+    #[test]
+    fn labpbr_maps_follow_the_texture_budget() {
+        // 1300 layers of 1024 px maps: 64 px at the default budget, 256 px at 1536 MiB.
+        assert_eq!(
+            side_within(1024, 1300, map_bytes(DEFAULT_TEXTURE_BUDGET)),
+            64
+        );
+        assert_eq!(side_within(1024, 1300, map_bytes(1536 << 20)), 256);
     }
     #[test]
     fn a_labpbr_map_selects_whole_texels_and_missing_layers_get_defaults() {

@@ -504,7 +504,7 @@ impl Game<'_> {
         };
         offer(
             self.mob_hit()
-                .map(|(i, d)| (d, self.mobs[i].kind.id.to_string())),
+                .map(|(i, d, _)| (d, self.mobs[i].kind.id.to_string())),
         );
         offer(
             self.boat_hit()

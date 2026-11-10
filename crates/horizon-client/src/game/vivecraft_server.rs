@@ -325,7 +325,9 @@ impl Game<'_> {
                 Action::Teleport { x, y, z } => {
                     // `absSnapTo(x, y, z)`, keeping the rotation.
                     let pos = [f64::from(x), f64::from(y), f64::from(z)];
-                    let _ = self.as_guest(host, conn, |g| g.teleport_to(Target::Player, pos, None));
+                    let _ = self.as_guest(host, conn, |g| {
+                        g.teleport_to(Target::Player, pos, None, true)
+                    });
                 }
                 Action::FoodExhaustion(amount) => {
                     let _ = self.as_guest(host, conn, |g| {

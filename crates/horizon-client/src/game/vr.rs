@@ -1547,7 +1547,7 @@ impl Game<'_> {
         }
         match done {
             Teleport::Direct { to, direct_packet } => {
-                self.teleport_to(super::commands::Target::Player, to.to_array(), None);
+                self.teleport_to(super::commands::Target::Player, to.to_array(), None, true);
                 if direct_packet {
                     if self.visor_active() {
                         self.visor_send_teleport(to);

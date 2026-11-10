@@ -1,7 +1,9 @@
 //! The Wardrobe's link to Horizon's cosmetics service ([docs/cosmetics.md](../../docs/cosmetics.md)):
 //! the catalogue, the account's own items and purchase history, what each slot wears and whether
 //! others see it, and whether the Wardrobe has anything to show yet (`Service::shop`). Buying and
-//! claiming happen on the website ([`SHOP_URL`]), never here.
+//! claiming happen on the website ([`SHOP_URL`]), except the founder set's free claim for players
+//! in countries Paddle, the shop's payment provider, doesn't serve (`Claim::here`,
+//! `Service::claim`): the service decides who that is, by country.
 //!
 //! The last answers are kept on disk (`Saved`), so the Wardrobe shows the outfit offline and when
 //! the service fails, and a change made offline waits there until the service answers again.
@@ -31,6 +33,8 @@ pub enum Error {
     SignedOut,
     /// An item the account doesn't own, or one for another slot.
     NotYours,
+    /// The Shop's own refusals, by the service's code (`player`, `owned`, `sales_off`...).
+    Shop(String),
     /// Anything else the service answered.
     Service(u16),
 }
@@ -45,10 +49,32 @@ impl Error {
             Self::Account(e) => tr(e).into(),
             Self::SignedOut => tr("Your Wardrobe session ended. Open the Wardrobe again.").into(),
             Self::NotYours => tr("That item isn't in your Wardrobe.").into(),
+            Self::Shop(code) => tr(match code.as_str() {
+                "player" | "name" => "No Minecraft: Java Edition account has that name.",
+                "owned" | "claimed" => "That account already owns everything in the basket.",
+                "sales_off" | "claim_closed" | "claim_not_open" | "not_for_sale" => {
+                    "The shop isn't selling right now. Nothing was charged."
+                }
+                // Paddle sells where the player is: the founder set is claimed through its free
+                // checkout, which the Shop opens on playhorizon.dev (`Error::use_checkout`).
+                "use_checkout" => {
+                    "Where you are, the founder set is claimed through a free checkout on \
+                     playhorizon.dev. Claim it from the Shop: it opens the checkout for you."
+                }
+                "not_offered_here" => "The founder set can't be claimed from your country.",
+                _ => "Paddle couldn't start the checkout. Nothing was charged.",
+            })
+            .into(),
             Self::Service(_) => {
                 tr("Horizon's cosmetics service had a problem. Try again later.").into()
             }
         }
+    }
+
+    /// The service refused a one-click claim because Paddle sells where the player is: the
+    /// claim goes through the free checkout instead (`Claim::one_click` is no longer true).
+    pub fn use_checkout(&self) -> bool {
+        matches!(self, Self::Shop(code) if code == "use_checkout")
     }
 
     /// Whether the change that failed should wait and be sent again: the service wasn't
@@ -88,9 +114,21 @@ pub struct Claim {
     /// Open only because the account is on the service's preview list.
     #[serde(default)]
     pub preview: bool,
+    /// The service grants the set to this player from the Wardrobe (`POST /v1/claim`): Paddle
+    /// doesn't sell where they are, so the site's checkout can't (in `me` only).
+    #[serde(default)]
+    pub one_click: bool,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+impl Claim {
+    /// Whether the Wardrobe offers "Claim for free": open for this account, not claimed yet, and
+    /// the service says the checkout isn't for this player.
+    pub fn here(&self) -> bool {
+        self.open && self.one_click && self.claimed == Some(false)
+    }
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
 pub struct Entry {
     pub id: String,
     pub hash: String,
@@ -101,6 +139,16 @@ pub struct Entry {
     /// A launcher theme's colours (`slot` is `theme`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub theme: Option<Theme>,
+    /// One line about it per game language code.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub lines: BTreeMap<String, String>,
+    /// What it costs per currency code, in the currency's cents, only while it is on sale (the
+    /// Shop, `shop.rs`): empty, it isn't sold.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub prices: BTreeMap<String, u32>,
+    /// The collection the Shop lists it under.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub collection: Option<String>,
 }
 
 /// A launcher theme: the sky's six stops, top to bottom (`#rrggbb`), and the accent's hue.
@@ -122,13 +170,15 @@ impl Theme {
     }
 }
 
+/// `words` in `lang` (a game language code), else in English.
+pub fn words<'a>(words: &'a BTreeMap<String, String>, lang: &str) -> Option<&'a str> {
+    (words.get(lang).or_else(|| words.get("en_us"))).map(String::as_str)
+}
+
 impl Entry {
     /// The name in `lang` (a game language code), else English, else the id.
     pub fn name(&self, lang: &str) -> &str {
-        self.names
-            .get(lang)
-            .or_else(|| self.names.get("en_us"))
-            .map_or(&self.id, String::as_str)
+        words(&self.names, lang).unwrap_or(&self.id)
     }
 
     /// Whether the id and hash are plain parts of a file name, by the game's rule
@@ -146,6 +196,82 @@ impl Entry {
 pub struct Catalogue {
     pub items: Vec<Entry>,
     pub claim: Claim,
+    /// The currency codes the Shop offers, in the service's order; prices are in each of them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub currencies: Vec<String>,
+    /// Items sold together, for less than apart.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sets: Vec<Set>,
+    /// The Shop's headings, in order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub collections: Vec<Collection>,
+    /// The Supporter badge: the buyer picks what it costs, between `min` and `max`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supporter: Option<Supporter>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
+pub struct Set {
+    pub id: String,
+    pub names: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub lines: BTreeMap<String, String>,
+    /// Item ids, all in the catalogue's `items`.
+    pub items: Vec<String>,
+    /// For an account that owns none of it, in cents per currency code.
+    #[serde(default)]
+    pub prices: BTreeMap<String, u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub collection: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
+pub struct Collection {
+    pub id: String,
+    pub names: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub lines: BTreeMap<String, String>,
+    /// The set that holds everything the collection sells: the Shop's hero.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pack: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
+pub struct Supporter {
+    /// The badge's item id.
+    pub item: String,
+    pub min: BTreeMap<String, u32>,
+    pub max: BTreeMap<String, u32>,
+}
+
+/// A Minecraft account as the Shop's lookup knows it (`GET /v1/players/{name}`): a gift's
+/// recipient, and what it owns already, which a price leaves out.
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+pub struct Player {
+    pub uuid: String,
+    pub name: String,
+    #[serde(default)]
+    pub owned: Vec<String>,
+}
+
+/// A basket to pay (`POST /v1/web/checkout`): item and set ids for `name`'s account.
+#[derive(Clone, Debug, Serialize, PartialEq)]
+pub struct Order {
+    pub name: String,
+    pub items: Vec<String>,
+    pub currency: String,
+    /// The Supporter badge's price, in cents of `currency`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub amount: Option<u32>,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub gift: bool,
+}
+
+/// The checkout the service started with Paddle; it is paid on the website (`shop::pay_url`).
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+pub struct Checkout {
+    pub transaction_id: String,
+    pub uuid: String,
 }
 
 /// The signed-in account's items: what it owns, what each slot wears, whether others see it.
@@ -301,6 +427,10 @@ impl Session {
     pub fn live(&self) -> bool {
         Instant::now() < self.until
     }
+    /// Whether this is the account `uuid`'s session and it has not run out.
+    pub fn for_account(&self, uuid: &str) -> bool {
+        self.uuid == uuid && self.live()
+    }
 }
 
 pub struct Service {
@@ -336,6 +466,23 @@ impl Service {
 
     pub fn catalogue(&self) -> Result<Catalogue, Error> {
         parse(self.call("GET", "/v1/catalogue", None, None)?)
+    }
+
+    /// The Minecraft account named `name`, and what it owns.
+    pub fn player(&self, name: &str) -> Result<Player, Error> {
+        let plain = |n: &str| {
+            (1..=16).contains(&n.len()) && n.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
+        };
+        if !plain(name) {
+            return Err(Error::Shop("name".into()));
+        }
+        parse(self.call("GET", &format!("/v1/players/{name}"), None, None)?)
+    }
+
+    /// Starts Paddle's checkout for `order`; the service answers for the account it names.
+    pub fn checkout(&self, order: &Order) -> Result<Checkout, Error> {
+        let body = serde_json::to_value(order).map_err(|_| Error::Service(0))?;
+        parse(self.call("POST", "/v1/web/checkout", None, Some(body))?)
     }
 
     /// One item's file, checked against the format's limits.
@@ -401,6 +548,17 @@ impl Service {
         parse(self.call("GET", "/v1/me", Some(session), None)?)
     }
 
+    /// Claim the founder set here (only where `Claim::here`): the account's answer after it. One
+    /// the service already recorded is no failure.
+    pub fn claim(&self, session: &Session) -> Result<Me, Error> {
+        match self.call("POST", "/v1/claim", Some(session), Some(json!({}))) {
+            // Claimed already (another launcher, a double click): the account's answer.
+            Err(Error::Service(409)) => self.me(session),
+            Err(Error::Shop(code)) if code == "claimed" => self.me(session),
+            other => parse(other?),
+        }
+    }
+
     /// Wear `item` in `slot`, or nothing there (`None`).
     pub fn equip(&self, session: &Session, slot: &str, item: Option<&str>) -> Result<Me, Error> {
         let body = json!({ "slot": slot, "item": item });
@@ -431,6 +589,53 @@ impl Service {
             saved.pending.remove(0);
         }
         Ok(())
+    }
+
+    /// Send the changes waiting and read the account's own answer with `session`, which is kept
+    /// while it is live: the account is proved with Mojang once per service session, not once
+    /// per refresh. The service's 401 (its session ended) signs in once more and retries; any
+    /// other failure stands.
+    pub fn sync_with_session(
+        &self,
+        name: &str,
+        uuid: &str,
+        session: &mut Option<std::sync::Arc<Session>>,
+        saved: &mut Saved,
+        join: impl Fn(&str) -> Result<(), String>,
+    ) -> Result<(), Error> {
+        let mut renewed = false;
+        loop {
+            let current = match session.clone().filter(|s| s.for_account(uuid)) {
+                Some(current) => current,
+                None => {
+                    let signed = std::sync::Arc::new(self.sign_in(name, &join)?);
+                    *session = Some(signed.clone());
+                    signed
+                }
+            };
+            if let Err(e) = self.sync(&current, saved) {
+                if e == Error::SignedOut && !renewed {
+                    *session = None;
+                    renewed = true;
+                    continue;
+                }
+                return Err(e);
+            }
+            match self.me(&current) {
+                Ok(mut me) => {
+                    for change in &saved.pending {
+                        me.apply(change);
+                    }
+                    saved.me = Some(me);
+                    return Ok(());
+                }
+                Err(Error::SignedOut) if !renewed => {
+                    *session = None;
+                    renewed = true;
+                }
+                Err(e) => return Err(e),
+            }
+        }
     }
 
     /// An item's file, from `cache` (`<id>-<hash>.json`, kept by hash: it never changes for one)
@@ -487,6 +692,13 @@ impl Service {
                 return Err(match (status, code["error"].as_str().unwrap_or("")) {
                     (401, _) => Error::SignedOut,
                     (403, "not_owned") | (400, "wrong_slot") | (404, "item") => Error::NotYours,
+                    (
+                        _,
+                        code @ ("player" | "name" | "owned" | "claimed" | "sales_off"
+                        | "claim_closed" | "claim_not_open" | "not_for_sale" | "paddle"
+                        | "amount" | "currency" | "items" | "overlap" | "use_checkout"
+                        | "not_offered_here"),
+                    ) => Error::Shop(code.into()),
                     (status, _) => Error::Service(status),
                 });
             }

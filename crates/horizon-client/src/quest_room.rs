@@ -170,8 +170,12 @@ const SMALL_LINE: f32 = 28.0;
 const BUTTON_TEXT: f32 = 26.0;
 /// The cursor dot's radius in dp.
 const CURSOR_RADIUS: f32 = 6.0;
-const DANGER: u32 = color::hex(horizon_theme::DARK.danger, 255);
-const GOOD: u32 = color::hex(horizon_theme::DARK.success, 255);
+fn danger() -> u32 {
+    color::hex(horizon_client::menu_style::get().settings.danger, 255)
+}
+fn good() -> u32 {
+    color::hex(horizon_client::menu_style::get().settings.success, 255)
+}
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Look {
@@ -281,17 +285,21 @@ impl Canvas<'_, '_> {
         });
         let held = over && self.pressed == Some(event);
         let (plate, ink) = match (look, over, held) {
-            (Look::Off, ..) => (color::RAISED, color::MUTED),
-            (Look::Primary, _, true) => (color::with_alpha(color::ACCENT, 0.7), color::ON_ACCENT),
-            (Look::Primary, true, _) => (color::with_alpha(color::ACCENT, 0.88), color::ON_ACCENT),
-            (Look::Primary, ..) => (color::ACCENT, color::ON_ACCENT),
-            (Look::Secondary, _, true) => (color::BORDER, color::TEXT),
-            (Look::Secondary, true, _) => (color::HOVER, color::TEXT),
-            (Look::Secondary, ..) => (color::RAISED, color::TEXT),
+            (Look::Off, ..) => (color::raised(), color::muted()),
+            (Look::Primary, _, true) => {
+                (color::with_alpha(color::accent(), 0.7), color::on_accent())
+            }
+            (Look::Primary, true, _) => {
+                (color::with_alpha(color::accent(), 0.88), color::on_accent())
+            }
+            (Look::Primary, ..) => (color::accent(), color::on_accent()),
+            (Look::Secondary, _, true) => (color::border(), color::text()),
+            (Look::Secondary, true, _) => (color::hover(), color::text()),
+            (Look::Secondary, ..) => (color::raised(), color::text()),
         };
         self.ui.rounded(x, y, w, h, h / 2.0, plate);
         if over && look == Look::Secondary {
-            self.ui.border(x, y, w, h, h / 2.0, color::BORDER);
+            self.ui.border(x, y, w, h, h / 2.0, color::border());
         }
         let lw = self.ui.measure(Face::Medium, size, label);
         self.text(
@@ -326,13 +334,13 @@ impl Canvas<'_, '_> {
             48.0,
             MARGIN,
             22.0,
-            color::TEXT,
+            color::text(),
             "Horizon",
         );
         if let Some(name) = &model.account {
             let nw = self.ui.measure(Face::Medium, BODY, name);
             let x = w - MARGIN - nw;
-            self.text(Face::Medium, BODY, 48.0, x, 22.0, color::TEXT, name);
+            self.text(Face::Medium, BODY, 48.0, x, 22.0, color::text(), name);
             if let Some(head) = model.head.as_ref().filter(|h| h.len() == 8 * 8 * 4) {
                 let side = 5.0;
                 let (hx, hy) = (x - 16.0 - 8.0 * side, 22.0 + (48.0 - 8.0 * side) / 2.0);
@@ -348,7 +356,7 @@ impl Canvas<'_, '_> {
             }
         }
         self.ui
-            .rounded(MARGIN, 84.0, w - 2.0 * MARGIN, 1.0, 0.0, color::BORDER);
+            .rounded(MARGIN, 84.0, w - 2.0 * MARGIN, 1.0, 0.0, color::border());
     }
 
     // ----- Pages -------------------------------------------------------------------------------
@@ -361,7 +369,7 @@ impl Canvas<'_, '_> {
             64.0,
             MARGIN,
             130.0,
-            color::TEXT,
+            color::text(),
             &t("no_account.title"),
         );
         let y = self.paragraph(
@@ -371,7 +379,7 @@ impl Canvas<'_, '_> {
             MARGIN,
             214.0,
             (w - 2.0 * MARGIN).min(820.0),
-            color::MUTED,
+            color::muted(),
             &t("no_account.body"),
         );
         self.fit(
@@ -389,7 +397,7 @@ impl Canvas<'_, '_> {
             SMALL_LINE,
             MARGIN,
             h - 70.0,
-            color::MUTED,
+            color::muted(),
             &t("no_account.eula"),
         );
         if model.connecting {
@@ -399,7 +407,7 @@ impl Canvas<'_, '_> {
                 SMALL_LINE,
                 MARGIN,
                 h - 110.0,
-                color::MUTED,
+                color::muted(),
                 &t("connecting"),
             );
         }
@@ -413,7 +421,7 @@ impl Canvas<'_, '_> {
             64.0,
             MARGIN,
             120.0,
-            color::TEXT,
+            color::text(),
             &t("code.title"),
         );
         let Some(code) = &model.code else {
@@ -423,7 +431,7 @@ impl Canvas<'_, '_> {
                 BODY_LINE,
                 MARGIN,
                 220.0,
-                color::MUTED,
+                color::muted(),
                 &t("connecting"),
             );
             self.fit(
@@ -446,7 +454,7 @@ impl Canvas<'_, '_> {
             BODY_LINE,
             MARGIN,
             200.0,
-            color::MUTED,
+            color::muted(),
             &tf("code.step_open", &[&url]),
         );
         self.text(
@@ -455,21 +463,21 @@ impl Canvas<'_, '_> {
             BODY_LINE,
             MARGIN,
             250.0,
-            color::MUTED,
+            color::muted(),
             &t("code.step_enter"),
         );
         // The code, big, in a plate.
         let code_size = 92.0;
         let cw = self.ui.measure(Face::Mono, code_size, &code.user_code);
         self.ui
-            .rounded(MARGIN, 292.0, cw + 56.0, 128.0, 20.0, color::RAISED);
+            .rounded(MARGIN, 292.0, cw + 56.0, 128.0, 20.0, color::raised());
         self.text(
             Face::Mono,
             code_size,
             128.0,
             MARGIN + 28.0,
             292.0,
-            color::ACCENT,
+            color::accent(),
             &code.user_code,
         );
         self.text(
@@ -478,7 +486,7 @@ impl Canvas<'_, '_> {
             SMALL_LINE,
             MARGIN,
             440.0,
-            color::MUTED,
+            color::muted(),
             &tf("code.expires", &[&clock(code.expires_in)]),
         );
         self.text(
@@ -487,7 +495,7 @@ impl Canvas<'_, '_> {
             SMALL_LINE,
             MARGIN,
             474.0,
-            color::MUTED,
+            color::muted(),
             &t("code.waiting"),
         );
         self.fit(
@@ -536,7 +544,7 @@ impl Canvas<'_, '_> {
             SMALL,
             cx + card / 2.0,
             cy + card + 18.0,
-            color::MUTED,
+            color::muted(),
             &t("code.scan"),
         );
     }
@@ -548,7 +556,7 @@ impl Canvas<'_, '_> {
             64.0,
             MARGIN,
             130.0,
-            color::TEXT,
+            color::text(),
             &t("check.title"),
         );
         let line = match (&model.step, model.connecting) {
@@ -561,7 +569,7 @@ impl Canvas<'_, '_> {
             BODY_LINE,
             MARGIN,
             220.0,
-            color::MUTED,
+            color::muted(),
             &line,
         );
         if model.account.is_some() {
@@ -578,11 +586,11 @@ impl Canvas<'_, '_> {
 
     fn bar(&mut self, y: f32, fraction: f32) {
         let w = self.ui.w - 2.0 * MARGIN;
-        self.ui.rounded(MARGIN, y, w, 28.0, 14.0, color::RAISED);
+        self.ui.rounded(MARGIN, y, w, 28.0, 14.0, color::raised());
         let filled = (w * fraction.clamp(0.0, 1.0)).round();
         if filled >= 28.0 {
             self.ui
-                .rounded(MARGIN, y, filled, 28.0, 14.0, color::ACCENT);
+                .rounded(MARGIN, y, filled, 28.0, 14.0, color::accent());
         } else if filled > 0.0 {
             self.ui.rounded(
                 MARGIN,
@@ -590,7 +598,7 @@ impl Canvas<'_, '_> {
                 28.0,
                 28.0,
                 14.0,
-                color::with_alpha(color::ACCENT, 0.5),
+                color::with_alpha(color::accent(), 0.5),
             );
         }
     }
@@ -607,7 +615,7 @@ impl Canvas<'_, '_> {
             64.0,
             MARGIN,
             130.0,
-            color::TEXT,
+            color::text(),
             &t(title),
         );
         match &model.download {
@@ -623,7 +631,7 @@ impl Canvas<'_, '_> {
                     76.0,
                     MARGIN,
                     200.0,
-                    color::ACCENT,
+                    color::accent(),
                     &format!("{}%", (fraction * 100.0).floor() as u32),
                 );
                 self.bar(300.0, fraction);
@@ -633,7 +641,7 @@ impl Canvas<'_, '_> {
                     BODY_LINE,
                     MARGIN,
                     346.0,
-                    color::TEXT,
+                    color::text(),
                     &tf("download.files", &[&p.files_done, &p.files_total]),
                 );
                 let mut line = tf(
@@ -654,7 +662,7 @@ impl Canvas<'_, '_> {
                     BODY_LINE,
                     MARGIN,
                     382.0,
-                    color::MUTED,
+                    color::muted(),
                     &line,
                 );
             }
@@ -665,7 +673,7 @@ impl Canvas<'_, '_> {
                     BODY_LINE,
                     MARGIN,
                     220.0,
-                    color::MUTED,
+                    color::muted(),
                     &t("connecting"),
                 );
             }
@@ -678,7 +686,7 @@ impl Canvas<'_, '_> {
             MARGIN,
             450.0,
             width.min(900.0),
-            color::MUTED,
+            color::muted(),
             &t("download.note"),
         );
         let label = if model.sounds_stage {
@@ -708,7 +716,7 @@ impl Canvas<'_, '_> {
             64.0,
             MARGIN,
             130.0,
-            color::TEXT,
+            color::text(),
             &t(title),
         );
         let (line, fraction) = model.prepare.clone().unwrap_or_default();
@@ -718,7 +726,7 @@ impl Canvas<'_, '_> {
             76.0,
             MARGIN,
             200.0,
-            color::ACCENT,
+            color::accent(),
             &format!("{}%", (fraction * 100.0).floor() as u32),
         );
         self.bar(300.0, fraction);
@@ -730,7 +738,7 @@ impl Canvas<'_, '_> {
             SMALL_LINE,
             MARGIN,
             346.0,
-            color::MUTED,
+            color::muted(),
             &shown,
         );
         self.paragraph(
@@ -740,7 +748,7 @@ impl Canvas<'_, '_> {
             MARGIN,
             450.0,
             width.min(900.0),
-            color::MUTED,
+            color::muted(),
             &t("prepare.note"),
         );
     }
@@ -754,7 +762,7 @@ impl Canvas<'_, '_> {
             64.0,
             MARGIN,
             130.0,
-            DANGER,
+            danger(),
             &t("error.title"),
         );
         let y = self.paragraph(
@@ -764,7 +772,7 @@ impl Canvas<'_, '_> {
             MARGIN,
             214.0,
             width,
-            color::TEXT,
+            color::text(),
             &error_text(&error.kind),
         );
         self.text(
@@ -773,7 +781,7 @@ impl Canvas<'_, '_> {
             SMALL_LINE,
             MARGIN,
             y + 20.0,
-            color::MUTED,
+            color::muted(),
             &t("details"),
         );
         let y = self.paragraph(
@@ -783,7 +791,7 @@ impl Canvas<'_, '_> {
             MARGIN,
             y + 20.0 + SMALL_LINE,
             width,
-            color::MUTED,
+            color::muted(),
             &error.message.chars().take(400).collect::<String>(),
         );
         let top = (y + 36.0).max(400.0).min(self.ui.h - 110.0);
@@ -827,17 +835,17 @@ impl Canvas<'_, '_> {
             64.0,
             MARGIN,
             120.0,
-            color::TEXT,
+            color::text(),
             &tf("idle.version", &[&model.version]),
         );
         let (status, ink) = if model.verifying {
-            (t("idle.checking"), color::MUTED)
+            (t("idle.checking"), color::muted())
         } else if model.offline {
-            (t("idle.offline"), color::MUTED)
+            (t("idle.offline"), color::muted())
         } else if let Some(name) = &model.account {
-            (tf("idle.signed_in", &[name]), GOOD)
+            (tf("idle.signed_in", &[name]), good())
         } else {
-            (t("idle.not_signed_in"), color::MUTED)
+            (t("idle.not_signed_in"), color::muted())
         };
         self.text(
             Face::Regular,
@@ -884,14 +892,14 @@ impl Canvas<'_, '_> {
         // The news card.
         let card_w = 430.0_f32.min(w * 0.38);
         let (cx, cy, ch) = (w - MARGIN - card_w, 128.0, self.ui.h - 128.0 - 56.0);
-        self.ui.rounded(cx, cy, card_w, ch, 20.0, color::RAISED);
+        self.ui.rounded(cx, cy, card_w, ch, 20.0, color::raised());
         self.text(
             Face::Medium,
             SMALL,
             SMALL_LINE,
             cx + 28.0,
             cy + 24.0,
-            color::MUTED,
+            color::muted(),
             &t("idle.news"),
         );
         let inner = card_w - 56.0;
@@ -904,7 +912,7 @@ impl Canvas<'_, '_> {
                     cx + 28.0,
                     cy + 64.0,
                     inner,
-                    color::TEXT,
+                    color::text(),
                     &news.title,
                 );
                 if !news.date.is_empty() {
@@ -914,7 +922,7 @@ impl Canvas<'_, '_> {
                         SMALL_LINE,
                         cx + 28.0,
                         y,
-                        color::MUTED,
+                        color::muted(),
                         &news.date,
                     );
                     y += SMALL_LINE + 10.0;
@@ -930,7 +938,7 @@ impl Canvas<'_, '_> {
                         cx + 28.0,
                         y,
                         inner,
-                        color::TEXT,
+                        color::text(),
                         line,
                     ) + 8.0;
                 }
@@ -943,7 +951,7 @@ impl Canvas<'_, '_> {
                     cx + 28.0,
                     cy + 70.0,
                     inner,
-                    color::MUTED,
+                    color::muted(),
                     &t("idle.no_news"),
                 );
             }
@@ -973,7 +981,7 @@ impl Canvas<'_, '_> {
             64.0,
             MARGIN,
             120.0,
-            color::TEXT,
+            color::text(),
             &t("settings.title"),
         );
         let right = w - MARGIN - 150.0;
@@ -983,7 +991,7 @@ impl Canvas<'_, '_> {
             64.0,
             MARGIN,
             210.0,
-            color::TEXT,
+            color::text(),
             &t("settings.sounds"),
         );
         self.toggle(
@@ -993,7 +1001,7 @@ impl Canvas<'_, '_> {
             210.0,
         );
         self.ui
-            .rounded(MARGIN, 290.0, w - 2.0 * MARGIN, 1.0, 0.0, color::BORDER);
+            .rounded(MARGIN, 290.0, w - 2.0 * MARGIN, 1.0, 0.0, color::border());
         match &model.system_language {
             Some(code) => {
                 self.text(
@@ -1002,7 +1010,7 @@ impl Canvas<'_, '_> {
                     64.0,
                     MARGIN,
                     310.0,
-                    color::TEXT,
+                    color::text(),
                     &tf("settings.language", &[code]),
                 );
                 self.toggle(
@@ -1019,7 +1027,7 @@ impl Canvas<'_, '_> {
                     64.0,
                     MARGIN,
                     310.0,
-                    color::MUTED,
+                    color::muted(),
                     &t("settings.language_none"),
                 );
             }
@@ -1050,7 +1058,7 @@ impl Canvas<'_, '_> {
             64.0,
             MARGIN,
             120.0,
-            color::TEXT,
+            color::text(),
             &t("graphics.extras"),
         );
         self.fit(
@@ -1109,7 +1117,7 @@ impl Canvas<'_, '_> {
                 SMALL_LINE,
                 MARGIN,
                 y,
-                color::MUTED,
+                color::muted(),
                 &t(key),
             );
         }
@@ -1136,7 +1144,7 @@ impl Canvas<'_, '_> {
             64.0,
             MARGIN,
             120.0,
-            color::TEXT,
+            color::text(),
             &t("graphics.title"),
         );
         let label = info.as_ref().map_or_else(
@@ -1155,7 +1163,7 @@ impl Canvas<'_, '_> {
             64.0,
             MARGIN,
             210.0,
-            color::TEXT,
+            color::text(),
             &t("graphics.resolution"),
         );
         self.text(
@@ -1164,7 +1172,7 @@ impl Canvas<'_, '_> {
             SMALL_LINE,
             MARGIN,
             265.0,
-            color::MUTED,
+            color::muted(),
             &label,
         );
         let right = self.ui.w - MARGIN - 170.0;
@@ -1189,7 +1197,7 @@ impl Canvas<'_, '_> {
             64.0,
             MARGIN,
             330.0,
-            color::TEXT,
+            color::text(),
             &tf("graphics.refresh", &[&hz.round()]),
         );
         for (delta, x, label) in [(-1, right, "−"), (1, right + 90.0, "+")] {
@@ -1214,7 +1222,7 @@ impl Canvas<'_, '_> {
             SMALL_LINE,
             MARGIN,
             395.0,
-            color::MUTED,
+            color::muted(),
             &display,
         );
         self.fit(
@@ -1248,7 +1256,7 @@ impl Canvas<'_, '_> {
             SMALL_LINE,
             MARGIN,
             570.0,
-            color::MUTED,
+            color::muted(),
             &note,
         );
         self.fit(
@@ -1293,7 +1301,7 @@ impl RoomUi {
                 pressed: self.pressed,
             };
             let (w, h) = (canvas.ui.w, canvas.ui.h);
-            canvas.ui.rounded(0.0, 0.0, w, h, 0.0, color::BG);
+            canvas.ui.rounded(0.0, 0.0, w, h, 0.0, color::bg());
             canvas.header(model);
             if model.error.is_some() {
                 canvas.error(model);
@@ -1327,7 +1335,7 @@ impl RoomUi {
                 CURSOR_RADIUS + 1.5,
                 0xFF0D_0E13,
             );
-            let fill = if down { color::ACCENT } else { 0xFFFF_FFFF };
+            let fill = if down { color::accent() } else { 0xFFFF_FFFF };
             ui.rounded(
                 x - CURSOR_RADIUS,
                 y - CURSOR_RADIUS,

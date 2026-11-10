@@ -524,6 +524,7 @@ impl Game<'_> {
             assets: &self.pack.assets,
             collision_binding: self.collision,
             resources: self.motion,
+            health: &self.health_resources,
         }
         .room_step(horizon_core::geometry::Vec3::new(
             f64::from(step.x),
@@ -593,6 +594,7 @@ impl Game<'_> {
                     assets: &self.pack.assets,
                     collision_binding: self.collision,
                     resources: self.motion,
+                    health: &self.health_resources,
                 }
                 .no_player_collision(bounds)
                 .unwrap_or(true)

@@ -168,7 +168,9 @@ impl Game<'_> {
                 // `absSnapTo(x, y, z)`, keeping the rotation. The Java does not check the
                 // limits either: they are the client's.
                 let pos = [f64::from(x), f64::from(y), f64::from(z)];
-                let _ = self.as_guest(host, conn, |g| g.teleport_to(Target::Player, pos, None));
+                let _ = self.as_guest(host, conn, |g| {
+                    g.teleport_to(Target::Player, pos, None, true)
+                });
             }
             Action::ResetFall => {
                 let _ = self.as_guest(host, conn, |g| {

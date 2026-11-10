@@ -10,7 +10,7 @@ use crate::{
     engine,
     http::Response,
 };
-use horizon_server_files::user_lists::{
+use horizon_platform::server_files::user_lists::{
     BanList, IpBanList, OpList, UserList, WhiteList, format_date,
 };
 use serde_json::{Value, json};
@@ -189,7 +189,10 @@ fn stopped_command(action: Action, body: &Value) -> Option<(&'static str, Vec<&s
 }
 
 /// A list from its file in the server folder; missing or broken reads as empty, as the game would start.
-fn load<E: horizon_server_files::user_lists::Entry>(dir: &Path, file: &str) -> UserList<E> {
+fn load<E: horizon_platform::server_files::user_lists::Entry>(
+    dir: &Path,
+    file: &str,
+) -> UserList<E> {
     let mut list = UserList::new(dir.join(file));
     let _ = list.load();
     list
@@ -313,7 +316,9 @@ fn uuid(id: u128) -> String {
 fn whitelist_on(dir: &Path) -> bool {
     std::fs::read(dir.join(crate::config::PROPERTIES))
         .ok()
-        .and_then(|b| horizon_server_files::java_properties::Properties::load_file(&b).ok())
+        .and_then(|b| {
+            horizon_platform::server_files::java_properties::Properties::load_file(&b).ok()
+        })
         .and_then(|p| p.get("white-list").map(|v| v == "true"))
         .or_else(|| {
             crate::config::Config::load(dir)
@@ -543,6 +548,118 @@ mod tests {
                 .contains("Alex")
         );
         assert!(crate::config::Config::load(&dir).unwrap().server.whitelist);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    fn moderation_reply(response: Response) -> Value {
+        assert!(response.stream.is_none());
+        json!({
+            "status": response.status,
+            "content_type": response.content_type,
+            "headers": response.headers,
+            "body": serde_json::from_str::<Value>(&response.body).unwrap(),
+        })
+    }
+
+    #[test]
+    fn moderation_replies_match_api_v1_goldens() {
+        let golden: Value =
+            serde_json::from_str(include_str!("../testdata/api-v1-moderation.json")).unwrap();
+        let dir = std::env::temp_dir().join(format!(
+            "horizon-server-api-moderation-goldens-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(crate::config::FILE), crate::config::TEMPLATE).unwrap();
+        crate::config::update(&dir, "server", "online_mode", toml::Value::Boolean(false)).unwrap();
+        crate::config::update(&dir, "server", "whitelist", toml::Value::Boolean(false)).unwrap();
+        let shared = Shared::with_install(&dir, None);
+        shared.set_phase(Phase::Stopped);
+        let call = |path: &str, body: &[u8]| {
+            moderation_reply(crate::api::route(
+                &shared,
+                &crate::http::Request {
+                    method: "POST".into(),
+                    path: path.into(),
+                    query: String::new(),
+                    headers: Vec::new(),
+                    body: body.to_vec(),
+                },
+            ))
+        };
+        let check = |case: &str, path: &str, body: &[u8]| {
+            assert_eq!(call(path, body), golden[case], "{case}");
+        };
+
+        check("op", "/api/v1/players/op", br#"{"name":"Alex"}"#);
+        check("op_again", "/api/v1/players/op", br#"{"name":"Alex"}"#);
+        check("deop", "/api/v1/players/deop", br#"{"name":"Alex"}"#);
+        check("deop_again", "/api/v1/players/deop", br#"{"name":"Alex"}"#);
+        check(
+            "whitelist_add",
+            "/api/v1/whitelist/add",
+            br#"{"name":"Alex"}"#,
+        );
+        check(
+            "whitelist_add_again",
+            "/api/v1/whitelist/add",
+            br#"{"name":"Alex"}"#,
+        );
+        check("whitelist_on", "/api/v1/whitelist", br#"{"enabled":true}"#);
+        check(
+            "whitelist_on_again",
+            "/api/v1/whitelist",
+            br#"{"enabled":true}"#,
+        );
+        check(
+            "whitelist_remove",
+            "/api/v1/whitelist/remove",
+            br#"{"name":"Alex"}"#,
+        );
+        check(
+            "whitelist_remove_again",
+            "/api/v1/whitelist/remove",
+            br#"{"name":"Alex"}"#,
+        );
+        for (case, path, body) in [
+            (
+                "kick_stopped",
+                "/api/v1/players/kick",
+                br#"{"name":"Alex"}"#.as_slice(),
+            ),
+            (
+                "ban_stopped",
+                "/api/v1/players/ban",
+                br#"{"name":"Alex"}"#.as_slice(),
+            ),
+            (
+                "pardon_stopped",
+                "/api/v1/players/pardon",
+                br#"{"name":"Alex"}"#.as_slice(),
+            ),
+            (
+                "ban_ip_stopped",
+                "/api/v1/players/ban-ip",
+                br#"{"ip":"203.0.113.7"}"#.as_slice(),
+            ),
+            (
+                "pardon_ip_stopped",
+                "/api/v1/players/pardon-ip",
+                br#"{"ip":"203.0.113.7"}"#.as_slice(),
+            ),
+        ] {
+            check(case, path, body);
+        }
+        check("malformed", "/api/v1/players/op", b"not json");
+        check("bad_name", "/api/v1/players/op", br#"{"name":"a b"}"#);
+        check(
+            "bad_reason",
+            "/api/v1/players/kick",
+            br#"{"name":"Alex","reason":"first\nsecond"}"#,
+        );
+        check("bad_ip", "/api/v1/players/pardon-ip", br#"{"ip":"Alex"}"#);
+        check("bad_whitelist", "/api/v1/whitelist", br#"{}"#);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

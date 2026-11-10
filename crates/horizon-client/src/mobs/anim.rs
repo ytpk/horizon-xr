@@ -281,8 +281,20 @@ pub struct State {
 pub fn walk_position(m: &Mob, alpha: f32) -> f32 {
     (m.limb_position - m.limb_speed * (1.0 - alpha)) * if m.is_baby() { 3.0 } else { 1.0 }
 }
+/// `LivingEntityRenderer.extractRenderState`'s `bodyRot` (`solveBodyRot`):
+/// the rider of a living vehicle is drawn from the vehicle's body and its own
+/// head, any other mob from its own body.
+pub fn body_rot(m: &Mob, alpha: f32) -> f32 {
+    match m.extra.vehicle_body.filter(|v| m.extra.mount == Some(v.0)) {
+        Some((_, before, now)) => {
+            let head = m.previous_head_yaw + wrap(m.head_yaw - m.previous_head_yaw) * alpha;
+            super::riders::solve_body_rot(head, before + wrap(now - before) * alpha)
+        }
+        None => m.previous_body_yaw + wrap(m.body_yaw - m.previous_body_yaw) * alpha,
+    }
+}
 pub fn state(m: &Mob, alpha: f32) -> State {
-    let body = m.previous_body_yaw + wrap(m.body_yaw - m.previous_body_yaw) * alpha;
+    let body = body_rot(m, alpha);
     let head = m.previous_head_yaw + wrap(m.head_yaw - m.previous_head_yaw) * alpha;
     let mut swing = m.anim.attack_anim - m.anim.attack_anim_o;
     if swing < 0.0 {
@@ -759,8 +771,46 @@ fn swim(p: &mut Poses, pos: f32, h: &Hum) {
         lerp(amount, x, 0.3 * (pos * 0.333_333_34).mcos()),
     );
 }
-/// Apply the mob's model animation to `p`.
+/// A pose laid over the player model's body after its vanilla animation, and the parts it poses:
+/// the hook's own types (`horizon_hooks::players`), kept here under their old path.
+pub use horizon_hooks::players::{BODY_PARTS, BodyPose};
+
+/// Apply the mob's model animation to `p` (at rest), then the pose laid over it, if any.
 pub fn setup(
+    m: &Mob,
+    s: &State,
+    p: &mut Poses,
+    w_anims: &HashMap<String, super::keyframes::Animation>,
+) {
+    let Some(over) = &m.emote else {
+        return vanilla_setup(m, s, p, w_anims);
+    };
+    let rest = BODY_PARTS.map(|b| p.has(b).then(|| *p.get(b)));
+    vanilla_setup(m, s, p, w_anims);
+    body_pose(&**over, s.age, rest, p);
+}
+
+/// Poses the parts `rest` names (those the model has; at rest) as `over` has them at `age`.
+fn body_pose(over: &dyn BodyPose, age: f32, rest: [Option<[f32; 9]>; 6], p: &mut Poses) {
+    const IDENTITY: [f32; 9] = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0];
+    let at_rest = rest.map(|r| r.unwrap_or(IDENTITY));
+    // Read without `get`, which marks the poses changed: `over` may pose nothing.
+    let mut poses: [[f32; 9]; 6] = std::array::from_fn(|i| {
+        rest[i]
+            .and_then(|_| p.map.get(&key(BODY_PARTS[i])).copied())
+            .unwrap_or(IDENTITY)
+    });
+    if !over.pose(age, &at_rest, &mut poses) {
+        return;
+    }
+    for (i, pose) in poses.into_iter().enumerate() {
+        if rest[i].is_some() {
+            *p.get(BODY_PARTS[i]) = pose;
+        }
+    }
+}
+
+fn vanilla_setup(
     m: &Mob,
     s: &State,
     p: &mut Poses,
@@ -1147,6 +1197,65 @@ fn player_model_visibility(p: &mut Poses, hidden: u8, spectator: bool) {
         p.visible(part, hidden & (1 << bit) == 0);
     }
 }
+#[cfg(test)]
+mod body_pose_tests {
+    use super::*;
+
+    /// Lifts the right arm to a fixed angle, the left leg too, and keeps what it was given.
+    #[derive(Debug, Default)]
+    struct Raise(std::sync::Mutex<Option<([[f32; 9]; 6], [[f32; 9]; 6])>>);
+    impl BodyPose for Raise {
+        fn pose(&self, age: f32, at_rest: &[[f32; 9]; 6], poses: &mut [[f32; 9]; 6]) -> bool {
+            *self.0.lock().unwrap() = Some((*at_rest, *poses));
+            if age > 20.0 {
+                return false;
+            }
+            poses[2][5] = 1.5;
+            poses[5][5] = 1.5;
+            true
+        }
+    }
+
+    #[test]
+    fn a_body_pose_sees_the_rest_and_the_animation_and_writes_only_the_parts_the_model_has() {
+        let rest = |x: f32, y: f32| [x, y, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0];
+        let mut p = Poses {
+            map: [("head", rest(0.0, 0.0)), ("right_arm", rest(-5.0, 2.0))]
+                .into_iter()
+                .map(|(n, pose)| (key(n), pose))
+                .collect(),
+            dummy: [0.0; 9],
+            skipped: Default::default(),
+            hidden: Default::default(),
+            version: 0,
+        };
+        let at_rest = BODY_PARTS.map(|b| p.has(b).then(|| *p.get(b)));
+        // What the walk animation did: the head looks aside, the arm swings.
+        p.get("head")[4] = 0.4;
+        p.get("right_arm")[3] = 0.7;
+        let raise = Raise::default();
+        body_pose(&raise, 10.0, at_rest, &mut p);
+        let identity = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0];
+        let (seen_rest, seen) = raise.0.lock().unwrap().unwrap();
+        assert_eq!(seen_rest[0], rest(0.0, 0.0));
+        assert_eq!(seen_rest[2], rest(-5.0, 2.0));
+        assert_eq!(seen_rest[5], identity);
+        assert_eq!(seen[0][4], 0.4);
+        assert_eq!(seen[2][3], 0.7);
+        assert_eq!(seen[5], identity);
+        let arm = *p.get("right_arm");
+        assert_eq!((arm[3], arm[5]), (0.7, 1.5));
+        assert_eq!(p.get("head")[4], 0.4);
+        // Nothing was added for the parts the model lacks.
+        assert_eq!(p.map.len(), 2);
+        // Posing nothing leaves the poses, their version too.
+        let version = p.version();
+        body_pose(&raise, 30.0, at_rest, &mut p);
+        assert_eq!(p.version(), version);
+        assert_eq!(p.get("right_arm")[5], 1.5);
+    }
+}
+
 #[cfg(test)]
 mod flight_pose_tests {
     use super::*;

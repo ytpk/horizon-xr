@@ -183,6 +183,7 @@ fn inputs(downloads: &Path, version: &str) -> horizon_prepare::artifacts::Inputs
         client_jar: Some(downloads.join(format!("versions/{version}/{version}.jar"))),
         libraries_dir: Some(downloads.join("libraries")),
         assets_dir: Some(downloads.join("assets")),
+        prism_dir: None,
     }
 }
 

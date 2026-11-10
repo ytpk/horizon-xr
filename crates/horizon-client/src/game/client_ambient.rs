@@ -16,11 +16,19 @@ impl Game<'_> {
         if self.serving.is_some() || self.options.dedicated.is_some() {
             return;
         }
+        // A window simulating the world already runs `WitherBoss.aiStep`.
+        // One following a server does not: `Level.addParticle` on the server
+        // draws nothing, so the smoke, the powered effect and the charge
+        // cloud have to be made here.
+        let following = self.remote.is_some();
         let mut events = Vec::new();
         let random = self.particles.level_random();
         for m in self.mobs.iter_mut().filter(|m| !m.removed) {
             ambient::client_ai_step(m, &mut events);
             ambient::client_particles(m, random, &mut events);
+            if following && m.species() == horizon_client::mobs::Species::Wither {
+                horizon_client::mobs::wither::head_particles(m, random, &mut events);
+            }
         }
         for event in events {
             match event {
@@ -29,6 +37,22 @@ impl Game<'_> {
                         self.particles
                             .add(&ParticleOptions::simple(ty), at, velocity);
                     }
+                }
+                MobEvent::Particles { kind, at, count: 0 } => {
+                    if let Some(ty) = ParticleType::from_name(kind) {
+                        self.particles
+                            .add(&ParticleOptions::simple(ty), at, [0.0; 3]);
+                    }
+                }
+                MobEvent::ParticleColored {
+                    at,
+                    color: [r, g, b],
+                } => {
+                    self.particles.add(
+                        &ParticleOptions::colored(ParticleType::EntityEffect, [r, g, b, 1.0]),
+                        at,
+                        [0.0; 3],
+                    );
                 }
                 // Each guest of a LAN host makes its own.
                 MobEvent::LocalSound(name, at, volume, pitch) => {
@@ -167,7 +191,8 @@ impl Game<'_> {
             z = z.clamp(f64::from(at[2]), f64::from(at[2]) + 1.0);
         }
         self.particles.add(
-            &ParticleOptions::block(ParticleType::Block, sprite, tint),
+            &ParticleOptions::block(ParticleType::Block, sprite, tint)
+                .with_source(&self.res.facts().get(state).name),
             [x, position.y + 0.1, z],
             [movement.x * -4.0, 1.5, movement.z * -4.0],
         );
@@ -202,16 +227,16 @@ impl Game<'_> {
             );
         }
         for m in self.mobs.iter() {
-            if !m.alive() {
+            // A mob with no effects swirls nothing: skipped before its size
+            // is worked out, which every mob in a crowded world would pay
+            // for (#14053).
+            if !m.alive() || (m.extra.effect_particles.is_empty() && m.extra.effects.is_empty()) {
                 continue;
             }
             let size = (f64::from(m.width()), f64::from(m.height()));
             let invisible = m.invisible || m.has_effect("minecraft:invisibility");
             if m.extra.effect_particles.is_empty() {
                 // A mob of this game: its own effects, visible and not ambient.
-                if m.extra.effects.is_empty() {
-                    continue;
-                }
                 let list: Vec<_> = m
                     .extra
                     .effects

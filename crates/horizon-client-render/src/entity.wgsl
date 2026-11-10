@@ -33,7 +33,10 @@ struct Globals {
     hdr_windows: array<vec4<f32>, 2>,
     // HDR lighting: x how strongly the sky lights the world now (`Sky::sky_light_factor`),
     // y what the sky and fog get: the same, but none under water.
+    // w: apply the no-pack HDR gain; HDR_WRITE_LIGHT independently keeps float alpha as coverage.
     hdr_light: vec4<f32>,
+    hdr_settings: vec4<f32>,
+    hdr_shares: vec4<f32>,
 }
 @group(0) @binding(0) var<uniform> globals: Globals;
 @group(0) @binding(1) var atlas: texture_2d<f32>;
@@ -87,7 +90,11 @@ fn entity_light(normal: vec3<f32>, nether: bool) -> f32 {
 // primed TNT flash (5) and at column overlay - 16 for 16..=31 (a creeper's
 // swelling). Alpha 1 changes nothing.
 fn overlay_texel(overlay: u32) -> vec4<f32> {
-    if overlay == 1u || overlay == 8u { return HURT_OVERLAY; }
+    if overlay == 1u || overlay == 8u {
+        // PvP & HUD's hit colour (pvp.rs `Hit::texel`) rides in colored_count.y; 0 is vanilla's.
+        let hit = globals.colored_count.y;
+        return select(HURT_OVERLAY, unpack4x8unorm(hit), hit != 0u);
+    }
     if overlay == 5u { return vec4(1.0, 1.0, 1.0, WHITE_OVERLAY_ALPHA[15]); }
     if overlay >= 16u && overlay < 32u { return vec4(1.0, 1.0, 1.0, WHITE_OVERLAY_ALPHA[overlay - 16u]); }
     return vec4(1.0);
@@ -168,7 +175,11 @@ fn entity_vertex(position: vec3<f32>, uv: vec2<f32>,
 @vertex fn vs_entity(@location(0) position: vec3<f32>, @location(1) uv: vec2<f32>,
     @location(2) overlay: u32, @location(3) color: vec4<f32>, @location(4) light: vec4<u32>,
     @location(5) normal: vec4<f32>, @location(6) glint_uv: vec2<f32>) -> Out {
-    var out = entity_vertex(position, uv, overlay & 0xffffu, color, light, normal);
+    // [world warp entity]
+    // (a world warp's pipelines put the vertex through the mod's `world_warp`: gfx/world_warp.rs)
+    let at = position;
+    // [end world warp entity]
+    var out = entity_vertex(at, uv, overlay & 0xffffu, color, light, normal);
     out.glint_uv = glint_uv;
     out.tier = (overlay >> 16u) & 0xffu;
     return out;
@@ -246,11 +257,18 @@ fn armor_glint_uv(model: vec2<f32>) -> vec2<f32> {
     return vec2(scaled.x * c - scaled.y * s - offset0,
                 scaled.x * s + scaled.y * c + offset1);
 }
+// PvP & HUD's glint colour (pvp.rs `Tweaks::glint_texel`, 0 for vanilla's): the sample's
+// brightest channel over the chosen colour, so the shimmer keeps its pattern and strength.
+fn tinted_glint(glint: vec4<f32>, packed: u32) -> vec4<f32> {
+    if packed == 0u { return glint; }
+    let tint = unpack4x8unorm(packed).rgb;
+    return vec4(max(glint.r, max(glint.g, glint.b)) * tint, glint.a);
+}
 // RenderPipelines.GLINT: the source colour is scaled by itself, so `GlintAlpha`
 // is squared along with the sample.
 fn glint_over(color: vec4<f32>, glint: vec4<f32>) -> vec4<f32> {
     let alpha = globals.fog_ends.w;
-    let g = alpha * glint;
+    let g = alpha * tinted_glint(glint, globals.colored_count.z);
     return vec4(color.rgb + g.rgb * g.rgb, max(color.a, alpha));
 }
 // CRUMBLING_UV_BEGIN
@@ -265,6 +283,19 @@ fn crumbling_uv(uv: vec2<f32>, packed_origin: vec2<f32>, sprite_size: vec2<f32>,
 }
 // CRUMBLING_UV_END
 @fragment fn fs_entity(in: Out, @builtin(front_facing) front: bool) -> @location(0) vec4<f32> {
+    return entity_written_color(in, entity_color(in, front));
+}
+// Takes entity_color's result rather than calling it: FXC (DX12) fails with "argument pulled into
+// unrelated predicate" when entity_color's discards sit a function call below the entry point.
+fn entity_written_color(in: Out, color: vec4<f32>) -> vec4<f32> {
+    if HDR_WRITE_LIGHT && globals.hdr_light.w != 0.0 && in.overlay != 11u && in.overlay != 12u {
+        var mark = hdr_entity_mark(in);
+        if in.overlay == 4u { mark = hdr_scene_alpha(globals.hdr_light.y); }
+        return vec4(hdr_written(color.rgb, mark, globals.hdr_settings, globals.hdr_shares), color.a);
+    }
+    return color;
+}
+@fragment fn fs_entity_unmarked(in: Out, @builtin(front_facing) front: bool) -> @location(0) vec4<f32> {
     return entity_color(in, front);
 }
 fn entity_color(in: Out, front: bool) -> vec4<f32> {
@@ -347,15 +378,23 @@ fn shadow_color(in: Out) -> vec4<f32> {
     if in.overlay == 6u { uv.y = in.wrap.x + fract(in.uv.y) * in.wrap.y; }
     let texel = textureSample(atlas, atlas_sampler, uv);
     if texel.a < 0.1 { discard; }
+    return vec4(0.0, 0.0, 0.0, hdr_entity_mark(in));
+}
+fn hdr_entity_mark(in: Out) -> f32 {
+    var uv = in.uv;
+    if in.overlay == 6u { uv.y = in.wrap.x + fract(in.uv.y) * in.wrap.y; }
+    let texel = textureSample(atlas, atlas_sampler, uv);
+    // Additive and procedural colour draws can survive where the legacy mark pass skips.
+    if texel.a < 0.1 { return 1.0; }
     // Fog hides a light source and the light on a surface as it hides everything else.
     let fogged = max(linear_fog(in.fog_distance.x, globals.fog.x, globals.fog.y),
         linear_fog(in.fog_distance.y, globals.fog.z, globals.fog.w)) * globals.fog_color.a;
     if in.tier == 0u {
-        return vec4(0.0, 0.0, 0.0, hdr_scene_alpha(mix(in.scene, globals.hdr_light.y, fogged)));
+        return hdr_scene_alpha(mix(in.scene, globals.hdr_light.y, fogged));
     }
     // A layer that fades (the warden's) shines by what's left of it.
     let y = brightness(texel.rgb * in.color.rgb) * in.color.a * (1.0 - fogged);
-    return vec4(0.0, 0.0, 0.0, hdr_mark(in.tier, y));
+    return hdr_mark(in.tier, y);
 }
 fn brightness(c: vec3<f32>) -> f32 {
     let l = pow(max(c, vec3(0.0)), vec3(2.2));
@@ -393,10 +432,22 @@ fn celestial_color(in: Out) -> vec4<f32> {
                       linear_fog(in.fog_distance.y, globals.fog.z, globals.fog.w));
         return in.color * (1.0 - fog);
     }
-    return textureSample(atlas, atlas_sampler, in.uv) * in.color * in.light_color;
+    let color = textureSample(atlas, atlas_sampler, in.uv) * in.color * in.light_color;
+    if in.overlay == 45u {
+        // A Polytone custom particle drawn additively: the fog over its colour, as vanilla's
+        // particle.fsh, under the additive blend (no alpha cutout: its faint texels add up).
+        let f = max(linear_fog(in.fog_distance.x, globals.fog.x, globals.fog.y),
+                    linear_fog(in.fog_distance.y, globals.fog.z, globals.fog.w));
+        return vec4(mix(color.rgb, globals.fog_color.rgb, f * globals.fog_color.a), color.a);
+    }
+    return color;
 }
 @fragment fn fs_celestial(in: Out) -> @location(0) vec4<f32> {
-    return celestial_color(in);
+    let color = celestial_color(in);
+    if HDR_WRITE_LIGHT && globals.hdr_light.w != 0.0 {
+        return vec4(hdr_written(color.rgb, hdr_entity_mark(in), globals.hdr_settings, globals.hdr_shares), color.a);
+    }
+    return color;
 }
 
 // The sky's celestial pass (sun, moon, the End sky): fs_celestial's light,
@@ -413,7 +464,12 @@ fn celestial_color(in: Out) -> vec4<f32> {
     let y = brightness(added);
     // Only what's past the tier's window takes the mark: a soft edge keeps the sky's light,
     // or it would come out darker than the sky around it.
-    if y < globals.hdr_windows[1][clamp(tier, 1u, 4u) - 1u] { return vec4(added, 0.0); }
+    let full = y >= globals.hdr_windows[1][clamp(tier, 1u, 4u) - 1u];
+    if HDR_WRITE_LIGHT && globals.hdr_light.w != 0.0 {
+        return vec4(hdr_written(added, select(1.0, hdr_mark(tier, y), full), globals.hdr_settings, globals.hdr_shares), color.a);
+    }
+    if HDR_WRITE_LIGHT { return vec4(added, color.a); }
+    if !full { return vec4(added, 0.0); }
     return vec4(added, 1.0 - hdr_mark(tier, y));
 }
 

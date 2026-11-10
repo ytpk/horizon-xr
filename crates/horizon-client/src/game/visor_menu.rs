@@ -446,7 +446,7 @@ impl Game<'_> {
             }
             Do::Chat => {
                 self.close_game_menu();
-                self.open_chat("");
+                self.open_chat("", false);
             }
             Do::PauseMenu => {
                 self.pause_focus = None;

@@ -3,6 +3,7 @@
 //! (`LocalPlayer.aiStep`'s riding jump), positioning, dismounting, and the
 //! mount's health and jump bar on the HUD.
 use super::Game;
+use horizon_client::actions::Action;
 use horizon_client::{
     blocks::Fluid,
     hud::HudBatch,
@@ -17,7 +18,20 @@ use horizon_core::{
     random::RandomSource,
 };
 
-fn steering_item(species: Species, main: Option<&str>, offhand: Option<&str>) -> bool {
+/// `ItemStack.hurtAndConvertOnBreak`: the stack after `wear` more damage, or -
+/// when that wear breaks it - the copy it leaves behind
+/// (`transmuteCopyIgnoreEmpty`: the components carry over, and a damageable
+/// copy starts whole). None while it still holds, so the caller adds the wear.
+fn stick_on_break(stack: &ItemStack, wear: u32, max: u32) -> Option<ItemStack> {
+    if max == 0 || stack.damage + wear < max {
+        return None;
+    }
+    let mut rod = stack.transmute("minecraft:fishing_rod", 1);
+    rod.damage = 0;
+    Some(rod)
+}
+
+pub(super) fn steering_item(species: Species, main: Option<&str>, offhand: Option<&str>) -> bool {
     let item = match species {
         Species::Pig => "minecraft:carrot_on_a_stick",
         Species::Strider => "minecraft:warped_fungus_on_a_stick",
@@ -56,7 +70,7 @@ impl MountState {
 }
 /// `AbstractHorse.isFood` and `handleEating`: what a mount eats, and what that
 /// mouthful does — `(heal, age up seconds, temper, falls in love)`. The temper
-/// is the `u8` the mob stores it in.
+/// increment is kept separate from its signed saved counter.
 ///
 /// `AbstractHorse.isFood` is the `#minecraft:horse_food` tag, `ZombieHorse`
 /// overrides it with `#minecraft:zombie_horse_food` (a red mushroom and
@@ -124,12 +138,28 @@ impl Game<'_> {
         let id = self.riding?;
         self.mobs.iter().position(|m| m.id == id)
     }
-    /// `Entity.interact` / `Mob.canShearEquipment` / `Mob.shearItem`:
-    /// the pig's ordinary saddle comes off before Pig.mobInteract can ride it.
-    /// An occupied pig consumes no equipment interaction and cannot be mounted.
-    pub(super) fn shear_pig_saddle(&mut self, index: usize, item: &str) -> Option<bool> {
+    /// `Entity.interact` / `Mob.canShearEquipment` / `Mob.attemptToShearEquipment`
+    /// / `Mob.shearItem`: the saddle of a `#can_equip_saddle` mob comes off
+    /// before its mobInteract can ride it, with the saddle's shearing sound.
+    /// An occupied mount is not sheared: its mobInteract runs instead.
+    pub(super) fn shear_saddle(&mut self, index: usize, item: &str) -> Option<bool> {
         let m = &self.mobs[index];
-        if item != "minecraft:shears" || m.species() != Species::Pig || m.is_baby() || !m.alive() {
+        // EntityTypeTags.CAN_EQUIP_SADDLE.
+        let saddleable = matches!(
+            m.species(),
+            Species::Horse
+                | Species::SkeletonHorse
+                | Species::ZombieHorse
+                | Species::Donkey
+                | Species::Mule
+                | Species::Pig
+                | Species::Strider
+                | Species::Camel
+                | Species::CamelHusk
+                | Species::Nautilus
+                | Species::ZombieNautilus
+        );
+        if item != "minecraft:shears" || !saddleable || m.is_baby() || !m.alive() {
             return None;
         }
         let id = m.id;
@@ -141,24 +171,47 @@ impl Game<'_> {
                 .iter()
                 .any(|r| r.alive() && !r.removed && r.extra.mount == Some(id))
         {
-            return Some(false);
+            // !canShearEquipment (isVehicle): the click goes on to mobInteract. A
+            // ridden pig or strider has nothing more to give, but a camel takes a
+            // second rider and a horse or nautilus opens its inventory.
+            return matches!(m.species(), Species::Pig | Species::Strider).then_some(false);
         }
-        if self.keys.contains(&winit::keyboard::KeyCode::ShiftLeft) {
+        if self.keys.held(Action::Sneak) {
+            return None;
+        }
+        // attemptToShearEquipment takes the body slot before the saddle: horse
+        // and nautilus armor come off first (not modelled here).
+        if m.extra
+            .body
+            .as_deref()
+            .is_some_and(|b| b.ends_with("_horse_armor") || b.ends_with("_nautilus_armor"))
+        {
             return None;
         }
         let saddle = m.saddle_item()?;
         if &*saddle.item != "minecraft:saddle" {
             return None;
         }
+        let silent = m.silent;
         let at = m.position;
         let offset = horizon_client::mobs::riders::passenger_attachment(m)[1];
         self.damage_held_tool();
         self.mobs[index].set_saddle(None);
         let context = self.who_context(Some(Who::Player), None);
         self.post_game_event("minecraft:shear", [at.x, at.y, at.z], context);
+        self.mob_equip_event(id, [at.x, at.y, at.z], false);
         self.spawn_at_location(at, offset, saddle.clone());
         let target = self.mob_entity(&self.mobs[index]);
         self.trigger_item_entity("minecraft:player_sheared_equipment", &saddle, &target);
+        // attemptToShearEquipment: playSound(equippable.shearingSound()).
+        if !silent {
+            self.audio.play(
+                "minecraft:item.saddle.unequip",
+                Some([at.x, at.y, at.z]),
+                1.0,
+                1.0,
+            );
+        }
         Some(true)
     }
     /// `Pig` / `Strider.mobInteract`: saddle an adult, or ride a saddled one.
@@ -176,8 +229,11 @@ impl Game<'_> {
             } else {
                 "minecraft:entity.pig.saddle"
             };
-            self.audio.play(sound, Some(at), 0.5, 1.0);
+            self.audio.play(sound, Some(at), 1.0, 1.0);
             self.consume_held();
+            let id = self.mobs[index].id;
+            let pos = self.mobs[index].position;
+            self.mob_equip_event(id, [pos.x, pos.y, pos.z], true);
             self.world
                 .modified
                 .insert((at[0].floor() as i32 >> 4, at[2].floor() as i32 >> 4));
@@ -185,15 +241,14 @@ impl Game<'_> {
         }
         // Pig.mobInteract: held food goes to Animal.mobInteract, not a ride.
         let food = m.kind.food.iter().any(|f| f.as_str() == item);
-        if !m.extra.saddled || food || self.keys.contains(&winit::keyboard::KeyCode::ShiftLeft) {
+        if !m.extra.saddled || food || self.keys.held(Action::Sneak) {
             return false;
         }
         let id = m.id;
-        if !self.may_board() || !self.native_may_board(id) {
+        if !self.native_may_board(id) {
             return true;
         }
-        self.riding = Some(id);
-        self.trigger_player("minecraft:started_riding");
+        self.start_riding(id);
         true
     }
     /// `FoodOnAStickItem.use` while riding: boost the mount, wear the stick.
@@ -212,23 +267,30 @@ impl Game<'_> {
         if !self.creative
             && let Some(stack) = self.inventory[self.selected].clone()
         {
-            self.trigger_item_durability(&stack, stack.damage + wear);
-            if let Some(stack) = self.inventory[self.selected].as_mut() {
-                stack.damage += wear;
-                let max = self
-                    .res
-                    .items()
-                    .get(&stack.item)
-                    .map_or(25, |i| i.max_damage);
-                if stack.damage >= max {
-                    let broken = stack.clone();
-                    self.inventory[self.selected] =
-                        Some(ItemStack::new("minecraft:fishing_rod", 1));
-                    // ItemStack.hurtAndBreak: onEquippedItemBroken, then the replacement.
+            // `ItemStack.hurtAndBreak`: Unbreaking has its say first, and the
+            // durability trigger only hears the wear it leaves.
+            let wear = self.wear(&stack, wear);
+            let max = self
+                .res
+                .items()
+                .get(&stack.item)
+                .map_or(25, |i| i.max_damage);
+            match stick_on_break(&stack, wear, max) {
+                Some(rod) => {
+                    // `hurtAndConvertOnBreak`: the stick breaks (the broken
+                    // statistic and `onEquippedItemBroken`), then what is
+                    // left is the rod, not a fresh plain one.
+                    self.award_stat("broken", &stack.item, 1);
                     self.player_equipment_broke(
                         horizon_world::player_inventory::EquipmentSlot::MainHand,
-                        &broken,
+                        &stack,
                     );
+                    self.inventory[self.selected] = Some(rod);
+                }
+                None => {
+                    if let Some(stack) = self.inventory[self.selected].as_mut() {
+                        stack.damage += wear;
+                    }
                 }
             }
         }
@@ -275,8 +337,8 @@ impl Game<'_> {
         if species == Species::SkeletonHorse && !m.extra.tame {
             return false;
         }
-        let sneaking = self.keys.contains(&winit::keyboard::KeyCode::ShiftLeft)
-            || self.keys.contains(&winit::keyboard::KeyCode::ShiftRight);
+        let sneaking =
+            self.keys.held(Action::Sneak) || self.keys.raw(&winit::keyboard::KeyCode::ShiftRight);
         // Horse / ZombieHorse.mobInteract: food is fed, and anything else in
         // hand makes an untamed one mad instead of seating the player.
         let dandelion = [self.held(), self.offhand_item()]
@@ -341,8 +403,15 @@ impl Game<'_> {
         if let Some(sound) = sound {
             let pitch =
                 (self.world.random.next_float() - self.world.random.next_float()) * 0.2 + 1.0;
-            self.audio.play(sound, Some(at), 0.5, pitch);
+            let chest = item == "minecraft:chest";
+            self.audio
+                .play(sound, Some(at), if chest { 0.5 } else { 1.0 }, pitch);
             self.consume_held();
+            if !chest {
+                let id = self.mobs[index].id;
+                let pos = self.mobs[index].position;
+                self.mob_equip_event(id, [pos.x, pos.y, pos.z], true);
+            }
             self.world
                 .modified
                 .insert((at[0].floor() as i32 >> 4, at[2].floor() as i32 >> 4));
@@ -350,17 +419,16 @@ impl Game<'_> {
         }
         // doPlayerRide
         let id = self.mobs[index].id;
-        if !self.may_board() || !self.native_may_board(id) {
+        if !self.native_may_board(id) {
             return true;
         }
         let m = &mut self.mobs[index];
         m.extra.flag = false;
         m.extra.counter = 0;
         self.yaw = m.yaw;
-        self.riding = Some(m.id);
         self.mount.jump_ticks = 0;
         self.mount.jump_scale = 0.0;
-        self.trigger_player("minecraft:started_riding");
+        self.start_riding(id);
         true
     }
     /// `AbstractHorse.handleEating`.
@@ -385,8 +453,8 @@ impl Game<'_> {
             m.extra.age = (m.extra.age + age_up * 20).min(0);
             used = true;
         }
-        if temper > 0 && (used || !m.extra.tame) && m.extra.variant3 < 100 {
-            m.extra.variant3 = (m.extra.variant3 + temper).min(100);
+        if temper > 0 && (used || !m.extra.tame) && equine::temper(m) < 100 {
+            equine::modify_temper(m, i32::from(temper));
             used = true;
         }
         if !used {
@@ -513,7 +581,7 @@ impl Game<'_> {
             pitch: self.pitch,
             jump: if jump > 0.0 { jump } else { pending },
             steer,
-            sprint: keys.sprint || self.keys.contains(&winit::keyboard::KeyCode::ControlLeft),
+            sprint: keys.sprint || self.keys.held(Action::Sprint),
             jumping: keys.jump,
             // A server's player (a LAN guest, single player's window) drives
             // a horse from its own client (`handleMoveVehicle`).
@@ -545,7 +613,16 @@ impl Game<'_> {
         };
         let m = &self.mobs[i];
         let mut at = Vec3::new(m.position.x, m.position.y + seat(m.species()), m.position.z);
-        if horizon_client::mobs::camel::is_camel(m.species()) {
+        if &*m.kind.id == "minecraft:player" || &*m.kind.id == "minecraft:mannequin" {
+            // Avatar attachments follow pose and minecraft:scale, just as for
+            // remote avatars riding other avatars. Do not guess a standing height.
+            at = horizon_client::mobs::riders::seat(
+                horizon_client::mobs::riders::passenger_attachment(m),
+                f64::from(0.6_f32),
+                m.position,
+                m.yaw,
+            );
+        } else if horizon_client::mobs::camel::is_camel(m.species()) {
             // Camel.getPassengerAttachmentPoint: the driver half a block
             // forward, at the body anchor (lower while sitting), turned with
             // the camel.
@@ -559,12 +636,15 @@ impl Game<'_> {
             );
         }
         if m.species() == Species::HappyGhast {
-            // The first passenger attachment (0, 4, 1.7) of the harnessed back.
-            let yaw = f64::from(m.yaw.to_radians());
+            // The attachment of the player's seat on the harnessed back.
+            let seat = self.remote.as_ref().map_or(0, |r| r.passenger_index);
+            let a = horizon_client::mobs::riders::happy_ghast_attachment(seat);
+            let turned = Vec3::new(a[0], a[1], a[2])
+                .rotate_y(-m.yaw * (std::f64::consts::PI / 180.0) as f32);
             at = Vec3::new(
-                m.position.x - 1.7 * yaw.sin(),
-                m.position.y + 4.0 - 0.6,
-                m.position.z + 1.7 * yaw.cos(),
+                m.position.x + turned.x,
+                m.position.y + turned.y - 0.6,
+                m.position.z + turned.z,
             );
         }
         if horizon_client::mobs::llama::is_llama(m.species()) {
@@ -626,6 +706,9 @@ impl Game<'_> {
             height: m.height(),
             yaw: m.yaw,
         };
+        if self.dismount_in_portal(mount.position) {
+            return;
+        }
         let Some(p) = self.player.as_ref() else {
             return;
         };
@@ -717,6 +800,46 @@ impl Game<'_> {
                 // RunAroundLikeCrazyGoal.tick: entity event 6, smoke.
                 self.mob_event_particles(mob, 6);
             }
+            // `Entity.ejectPassengers` before the mob moved off `from`: each
+            // rider's `dismountVehicle` reads the vehicle where it stood.
+            MobEvent::EjectPassengers { mob, from } => {
+                let Some(i) = self.mobs.iter().position(|m| m.id == mob) else {
+                    return;
+                };
+                let moved = (self.mobs[i].position, self.mobs[i].previous);
+                self.mobs[i].position = from;
+                self.mobs[i].previous = from;
+                if self.riding == Some(mob) {
+                    self.stop_riding();
+                }
+                let guests: Vec<u32> = self.lan.as_ref().map_or_else(Vec::new, |h| {
+                    h.hub
+                        .guests
+                        .iter()
+                        .filter(|g| g.vehicle == Some(mob))
+                        .map(|g| g.conn)
+                        .collect()
+                });
+                for conn in guests {
+                    if let Some(mut host) = self.lan.take() {
+                        self.as_guest(&mut host, conn, |g| g.stop_riding());
+                        self.lan = Some(host);
+                    }
+                }
+                let riders: Vec<u32> = self
+                    .mobs
+                    .iter()
+                    .filter(|m| m.extra.mount == Some(mob))
+                    .map(|m| m.id)
+                    .collect();
+                for rider in riders {
+                    self.dismount_mob(rider);
+                }
+                if let Some(m) = self.mobs.iter_mut().find(|m| m.id == mob) {
+                    (m.position, m.previous) = moved;
+                    m.extra.rider = None;
+                }
+            }
             // `LivingEntity.stabAttack`: `target.stopRiding()`.
             MobEvent::StabDismount { target } => match target {
                 Who::Player => self.stop_riding(),
@@ -749,17 +872,18 @@ impl Game<'_> {
             }
             self.lan = Some(host);
         }
-        let rider = self
+        let riders: Vec<u32> = self
             .mobs
             .iter()
-            .find(|m| m.id == mob)
-            .and_then(|m| m.extra.rider);
-        if let Some(rider) = rider
-            && let Some(r) = self.mobs.iter_mut().find(|m| m.id == rider)
-        {
-            let mut events = Vec::new();
-            r.cause_fall_damage_from(distance, modifier, &mut events);
-            let _ = self.handle_mob_events(events);
+            .filter(|m| m.extra.mount == Some(mob))
+            .map(|m| m.id)
+            .collect();
+        for rider in riders {
+            if let Some(r) = self.mobs.iter_mut().find(|m| m.id == rider) {
+                let mut events = Vec::new();
+                r.cause_fall_damage_from(distance, modifier, &mut events);
+                let _ = self.handle_mob_events(events);
+            }
         }
     }
     /// The player this game runs (the local one, or the server player it acts
@@ -767,7 +891,7 @@ impl Game<'_> {
     /// landing code's own fall damage for the player: creative flight is
     /// exempt, and the statistic, the sounds and the damage records wait in the
     /// player's events for its next tick, as a landing of its own leaves them.
-    fn rider_fall_damage(&mut self, distance: f64, modifier: f32) {
+    pub(super) fn rider_fall_damage(&mut self, distance: f64, modifier: f32) {
         let Some(player) = self.player.as_mut() else {
             return;
         };
@@ -778,6 +902,7 @@ impl Game<'_> {
             assets: &self.pack.assets,
             collision_binding: self.collision,
             resources: self.motion,
+            health: &self.health_resources,
         }
         .cause_mount_fall(distance, modifier);
     }
@@ -805,6 +930,7 @@ impl Game<'_> {
         let m = &self.mobs[i];
         let hearts = horizon_client::hud_layout::vehicle_max_hearts(m.attrs.max_health);
         let draws = horizon_client::hud_layout::vehicle_health(w, h, hearts, m.health);
+        self.keep_status_rows(&draws, w, h);
         self.gui_layer("minecraft:vehicle_health", batch, |g, batch| {
             horizon_client::hud_layout::paint(batch, &g.gui.atlas, &draws);
         });
@@ -1040,6 +1166,51 @@ pub(super) fn start_riding_jump(
     }
 }
 
+impl Game<'_> {
+    /// ServerGamePacketListenerImpl.handlePlayerCommand START_RIDING_JUMP: the
+    /// vehicle the guest rides takes its own `handleStartJump` — a horse rears
+    /// and slides on the rider's keys, a camel dashes — and the sound vanilla's
+    /// server plays is broadcast to the players near the mount, the rider
+    /// included (their own client plays none).
+    pub(super) fn lan_start_riding_jump(
+        &mut self,
+        host: &mut super::lan::LanHost,
+        conn: u32,
+        data: i32,
+    ) {
+        let Some(Some(index)) = self.as_guest(host, conn, |g| g.mount_index()) else {
+            return;
+        };
+        let m = &mut self.mobs[index];
+        let camel = crate::mobs::camel::is_camel(m.species()).then_some(m.id);
+        let Some((sound, volume)) = crate::game::mounts::start_riding_jump(m, data) else {
+            return;
+        };
+        let at = m.center();
+        // LivingEntity.getSoundSource: a mob's sounds are in the neutral source.
+        let neutral = horizon_client::settings::SOUND_SOURCES
+            .iter()
+            .position(|s| *s == "neutral")
+            .unwrap_or(0) as i32;
+        host.hub.sound(
+            &format!("minecraft:{sound}"),
+            at,
+            volume,
+            1.0,
+            neutral,
+            None,
+        );
+        // Camel.handleStartJump, which the helper accepted: after the dash
+        // sound, `gameEvent(GameEvent.ENTITY_ACTION)` from the camel.
+        if let Some(id) = camel {
+            self.post_entity_event(
+                "minecraft:entity_action",
+                horizon_client::mobs::Who::Mob(id),
+            );
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1128,6 +1299,33 @@ mod tests {
             horizon_core::geometry::Vec3::new(1.5, 64.0, -2.5),
             0.0,
         ))
+    }
+
+    /// `ItemStack.hurtAndConvertOnBreak`: the seven points a pig's boost
+    /// wears break a carrot on a stick at 25, and what it leaves is a fishing
+    /// rod that kept the stick's components - not a fresh plain rod.
+    #[test]
+    fn a_steering_stick_that_breaks_leaves_a_fishing_rod() {
+        let mut stick = ItemStack::new("minecraft:carrot_on_a_stick", 1);
+        stick.data_mut().custom_name = Some(horizon_world::nbt::Tag::String("Old Nag".into()));
+        // One point short of the break: the caller wears it and it holds.
+        stick.damage = 17;
+        assert!(stick_on_break(&stick, 7, 25).is_none());
+        // 18 + 7 is the break: the rod it leaves is whole and keeps the name.
+        stick.damage = 18;
+        let rod = stick_on_break(&stick, 7, 25).expect("the wear breaks it");
+        assert_eq!(&*rod.item, "minecraft:fishing_rod");
+        assert_eq!(rod.count, 1);
+        assert_eq!(rod.damage, 0, "the rod starts whole");
+        assert_eq!(
+            rod.custom_name().as_deref(),
+            Some("Old Nag"),
+            "the components carry over"
+        );
+        // Wear Unbreaking took away breaks nothing, and a stack with no
+        // durability at all never breaks.
+        assert!(stick_on_break(&stick, 0, 25).is_none());
+        assert!(stick_on_break(&stick, 25, 0).is_none());
     }
 
     /// `handlePlayerCommand` START_RIDING_JUMP reaches the ridden vehicle's
@@ -1390,3 +1588,7 @@ mod tests {
         assert!((v.x + edge).abs() < 1.0e-3 && (v.z - edge).abs() < 1.0e-3);
     }
 }
+
+#[cfg(test)]
+#[path = "camel_jump_tests.rs"]
+mod camel_jump_tests;

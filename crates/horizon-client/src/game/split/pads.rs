@@ -4,7 +4,8 @@
 use super::hud::tr;
 use super::*;
 use crate::game::pad::{PadEvent, PadId};
-use horizon_client::gamepad::{Button, PadState};
+use horizon_client::controller_notice::{Notice, NoticeId, Priority};
+use horizon_client::gamepad::{Button, MenuJob, PadState};
 
 /// How long a controller's offer to join stays up.
 const OFFER: Duration = Duration::from_secs(10);
@@ -125,10 +126,16 @@ impl Split<'_> {
             self.fresh.clear();
             self.lost.clear();
             self.p1_pad = P1Pad::default();
-            self.pads = PadRouter::default();
+            self.pads.hand_back(&mut self.host.pad);
         }
     }
 
+    /// The furthest a player's pad leant its sticks since the last frame: nothing for a pad just
+    /// joined whose buttons are still being let go.
+    fn pad_peaks(&self, pad: Option<PadId>) -> [[f32; 2]; 2] {
+        pad.filter(|id| !self.fresh.contains(id))
+            .map_or([[0.0; 2]; 2], |id| self.pads.peaks(id))
+    }
     /// The pad's state for its player: nothing while the press that gave it is still held.
     fn pad_state(&mut self, pad: Option<PadId>) -> PadState {
         let Some(id) = pad else {
@@ -154,6 +161,7 @@ impl Split<'_> {
         let offers_before = self.offers.len();
         let mut joins = Vec::new();
         let mut presses = Vec::new();
+        self.pads.adopt(&mut self.host.pad);
         for event in self.pads.events() {
             match event {
                 PadEvent::Press(id, button) => presses.push((id, button)),
@@ -167,6 +175,10 @@ impl Split<'_> {
             }
         }
         self.forget_lost();
+        // Presses in another window aren't asking to join this one.
+        if !self.host.pad_has_window() {
+            presses.clear();
+        }
         for (id, button) in presses {
             if Some(id) == self.p1_pad.owner || self.guests.iter().any(|g| g.pad == Some(id)) {
                 continue;
@@ -256,10 +268,12 @@ impl Split<'_> {
         if let Some(id) = self.p1_pad.owner {
             self.host.pad.style = self.pads.style(id);
         }
+        self.host.pad.device = self.p1_pad.owner.and_then(|id| self.pads.device(id));
         for g in &mut self.guests {
             if let Some(id) = g.pad {
                 g.game.pad.style = self.pads.style(id);
             }
+            g.game.pad.device = g.pad.and_then(|id| self.pads.device(id));
         }
         // P1 alone keeps its controller's output (rumble, the DualSense's triggers): the router
         // lends it its reader for P1's turn (`lend_output`), so no second reader opens. Only
@@ -268,10 +282,22 @@ impl Split<'_> {
         if !lends_output(solo, self.p1_pad.owner.is_some()) {
             self.host.pad.release_hardware();
         }
-        self.host.pad.feed = Some(self.pad_state(self.p1_pad.owner));
+        let owner = self.p1_pad.owner;
+        // Only something on the control socket can ask.
+        if self.host.control.is_some() {
+            self.pads.report_status(&mut self.host.pad, owner);
+        }
+        let state = self.pad_state(owner);
+        let peaks = self.pad_peaks(owner);
+        self.host.pad.feed_from(owner, state, peaks);
         for i in 0..self.guests.len() {
-            let state = self.pad_state(self.guests[i].pad);
-            self.guests[i].game.pad.feed = Some(state);
+            let pad = self.guests[i].pad;
+            if self.guests[i].game.control.is_some() {
+                self.pads.report_status(&mut self.guests[i].game.pad, pad);
+            }
+            let state = self.pad_state(pad);
+            let peaks = self.pad_peaks(pad);
+            self.guests[i].game.pad.feed_from(pad, state, peaks);
         }
         joins
     }
@@ -312,7 +338,9 @@ impl Split<'_> {
         if owned {
             if self.in_world() {
                 self.lost.push(Lost { seat: 1, id, uuid });
-                self.host.split_hud.notice = Some(Notice::new(
+                self.host.split_hud.notice.raise(Notice::new(
+                    NoticeId::Connection,
+                    Priority::Attention,
                     tr("controller_disconnected", &[]),
                     tr("controller_disconnected.hint", &[]),
                 ));
@@ -352,7 +380,12 @@ impl Split<'_> {
         if hud.prompt.as_ref().is_some_and(|p| p.ask == Ask::Lost) {
             hud.prompt = None;
         }
-        hud.notice = Some(Notice::new(tr("controller_connected", &[]), ""));
+        hud.notice.raise(Notice::new(
+            NoticeId::Connection,
+            Priority::Info,
+            tr("controller_connected", &[]),
+            "",
+        ));
     }
 
     /// A button on a controller nobody has while players wait for one: true when it answered
@@ -400,15 +433,18 @@ impl Split<'_> {
             [(id, _)] => tr("join.one", &[&self.pads.name(*id)]),
             offers => tr("join.many", &[&offers.len()]),
         };
-        let mut choices = vec![(Button::South, tr("join.yes", &[]))];
+        let mut choices = vec![(MenuJob::Confirm, tr("join.yes", &[]))];
         if self.p1_pad.owner.is_none() && self.host.settings.controller.enabled {
-            choices.push((Button::North, tr("join.as_p1", &[])));
+            choices.push((MenuJob::Extra, tr("join.as_p1", &[])));
         }
-        choices.push((Button::East, tr("join.no", &[])));
+        choices.push((MenuJob::Back, tr("join.no", &[])));
+        // Answered on the asking controller: the first one's family when several ask.
+        let family = self.offers.first().map(|(id, _)| self.pads.style(*id));
         self.prompt_join(Some(Prompt {
             ask: Ask::Join,
             title,
             choices,
+            family,
         }));
     }
 }
@@ -428,8 +464,9 @@ fn lends_output(solo: bool, p1_has_pad: bool) -> bool {
     solo && p1_has_pad
 }
 
-/// Still holding the press that gave the pad its player: a button, or a trigger off its rest
-/// (gilrs reports a trigger press as a button, but `PadState` keeps it in `triggers`).
+/// Still holding the press that gave the pad its player: a button, or a trigger off its rest.
+/// Mapped triggers may also report a gilrs button press; unmapped axis triggers
+/// only appear in `PadState::triggers` and do not create the join `Press` event.
 fn pressing(state: &PadState) -> bool {
     state.buttons != 0 || state.triggers.iter().any(|&t| t > 0.05)
 }

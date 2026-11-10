@@ -115,7 +115,7 @@ impl Game<'_> {
             self.visor_keyboard_close(true);
         } else {
             if !self.pad_in_menu() {
-                self.open_chat("");
+                self.open_chat("", false);
             }
             self.visor_keyboard_open();
         }

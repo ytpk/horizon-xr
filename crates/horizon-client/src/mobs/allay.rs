@@ -12,6 +12,12 @@ use crate::items::ItemStack;
 use crate::sculk::{self, Context, Info};
 use horizon_core::geometry::trig::Mth;
 use horizon_core::geometry::{Aabb, Vec3};
+use horizon_protocol::entity_data::PositionSource;
+
+#[cfg(test)]
+#[path = "allay_liked_player_tests.rs"]
+mod allay_liked_player_tests;
+pub mod interaction;
 
 // Allay state: `main_hand` the held filter; `State::inventory` the fetched stack,
 // `tame` a liked player, `point` the wanted item (set by the game),
@@ -21,6 +27,11 @@ use horizon_core::geometry::{Aabb, Vec3};
 // spinning (1).
 pub const HOLD: usize = 0;
 pub const SPIN: usize = 1;
+/// `Allay.isLikedPlayer`: compare the supplied verified player UUID with
+/// the live liked-player memory; identity is supplied by the Game context.
+pub fn is_liked_player(m: &Mob, attacker: Option<super::Who>, uuid: [i32; 4]) -> bool {
+    attacker == Some(super::Who::Player) && m.extra.tame && m.extra.owner == Some(uuid)
+}
 /// `Allay.VibrationUser.VIBRATION_EVENT_LISTENER_RANGE`.
 const LISTENER_RADIUS: i64 = 16;
 
@@ -48,21 +59,11 @@ impl GlobalPos {
 }
 /// The identifier of a dimension as a `'static` string, for loading saves.
 pub fn dimension_id(id: &str) -> &'static str {
-    match id {
-        "minecraft:the_nether" => "minecraft:the_nether",
-        "minecraft:the_end" => "minecraft:the_end",
-        _ => "minecraft:overworld",
-    }
+    horizon_core::LevelKey::builtin_or_overworld(id).id()
 }
 /// `Level.dimension` of the level the mob ticks in.
 pub fn dimension(w: &MobWorld) -> &'static str {
-    if w.nether {
-        "minecraft:the_nether"
-    } else if w.end {
-        "minecraft:the_end"
-    } else {
-        "minecraft:overworld"
-    }
+    w.level.id()
 }
 
 /// `AllayAi.allayConsidersItemEqual`: the same item (`ItemStack.isSameItem`)
@@ -98,6 +99,10 @@ pub struct State {
     pub inventory: Option<ItemStack>,
     pub vibration: sculk::Data,
     pub noteblock: Option<GlobalPos>,
+    /// The `LIKED_PLAYER` memory's time to live (`MemorySlot.timeToLive`);
+    /// None for a memory that never expires. The memory itself is
+    /// `Extra::tame` and `Extra::owner`.
+    pub liked_player_ttl: Option<i64>,
 }
 
 /// The pocket is independent of the main-hand filter.
@@ -368,6 +373,8 @@ pub fn listen(
                 pos,
                 source: ctx.source,
                 owner: ctx.owner,
+                source_uuid: ctx.source_uuid,
+                owner_uuid: ctx.owner_uuid,
             },
             now,
         );
@@ -392,6 +399,12 @@ pub fn tick(m: &mut Mob, w: &MobWorld, events: &mut Vec<MobEvent>) {
             from: info.pos,
             to: [m.position.x, m.eye_y(), m.position.z],
             ticks: travel,
+            // `Allay.VibrationUser`: `new EntityPositionSource(allay,
+            // allay.getEyeHeight())`.
+            source: PositionSource::Entity {
+                id: m.id as i32,
+                y_offset: (m.eye_y() - m.position.y) as f32,
+            },
         });
     }
     if let Some(info) = tick.received {
@@ -408,9 +421,8 @@ pub fn travel(m: &mut Mob, w: &MobWorld, input: Vec3, events: &mut Vec<MobEvent>
 }
 /// `Allay.aiStep` / `tick`: healing, cooldowns, the hold and spin clocks.
 pub fn ai_step(m: &mut Mob) {
-    if m.alive() && m.age.is_multiple_of(10) {
-        m.heal(1.0);
-    }
+    tick_liked_player(m);
+    passive_heal(m);
     for i in [2, 3] {
         if m.extra.ints[i] > 0 {
             m.extra.ints[i] -= 1;
@@ -418,6 +430,48 @@ pub fn ai_step(m: &mut Mob) {
     }
     update_duplication_cooldown(m);
     animate(m);
+}
+/// `MemorySlot.tick` for `LIKED_PLAYER` in the Allay's brain tick
+/// (`customServerAiStep`, which `NoAI` skips): a memory with a time to live
+/// counts down, and is cleared on the tick after it reaches 0.
+fn tick_liked_player(m: &mut Mob) {
+    if !m.extra.tame {
+        return;
+    }
+    let Some(st) = m.extra.allay.as_mut() else {
+        return;
+    };
+    match st.liked_player_ttl {
+        Some(ttl) if ttl <= 0 => {
+            st.liked_player_ttl = None;
+            m.extra.tame = false;
+            m.extra.owner = None;
+        }
+        Some(ttl) => st.liked_player_ttl = Some(ttl - 1),
+        None => {}
+    }
+}
+/// `Brain.setMemory(LIKED_PLAYER, uuid)`: the memory never expires.
+pub fn like_player(m: &mut Mob, uuid: [i32; 4]) {
+    m.extra.tame = true;
+    m.extra.owner = Some(uuid);
+    if let Some(st) = m.extra.allay.as_mut() {
+        st.liked_player_ttl = None;
+    }
+}
+/// `Brain.eraseMemory(LIKED_PLAYER)`.
+pub fn forget_liked_player(m: &mut Mob) {
+    m.extra.tame = false;
+    m.extra.owner = None;
+    if let Some(st) = m.extra.allay.as_mut() {
+        st.liked_player_ttl = None;
+    }
+}
+/// `Allay.aiStep`: server-side healing runs independently of the AI gate.
+pub fn passive_heal(m: &mut Mob) {
+    if m.alive() && m.age.is_multiple_of(10) {
+        m.heal(1.0);
+    }
 }
 /// `Allay.updateDuplicationCooldown`: the server decrements positive counters,
 /// independently of the AI goal gate.

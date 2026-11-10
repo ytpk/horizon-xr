@@ -125,24 +125,30 @@ impl FileStore {
     pub fn read(&self) -> Result<std::collections::BTreeMap<String, String>, String> {
         match std::fs::read(&self.path) {
             // Only where the file breaks: serde's own message can quote what the file holds.
-            Ok(bytes) => serde_json::from_slice(
-                &unseal_with(&self.sealing_key()?, &bytes).ok_or_else(|| {
+            Ok(bytes) => {
+                let (json, old) = self.unseal(&bytes)?.ok_or_else(|| {
                     format!(
-                    "{} can't be read on this computer: it was written on another one, or changed. \
-                     Remove it and sign in again.",
-                    self.path.display()
-                )
-                })?,
-            )
-            .map_err(|e| {
-                format!(
-                    "{} can't be read ({:?} error at line {}, column {}).",
-                    self.path.display(),
-                    e.classify(),
-                    e.line(),
-                    e.column()
-                )
-            }),
+                        "{} can't be read on this computer: it was written on another one, or changed. \
+                         Remove it and sign in again.",
+                        self.path.display()
+                    )
+                })?;
+                let secrets = serde_json::from_slice(&json).map_err(|e| {
+                    format!(
+                        "{} can't be read ({:?} error at line {}, column {}).",
+                        self.path.display(),
+                        e.classify(),
+                        e.line(),
+                        e.column()
+                    )
+                })?;
+                // Sealed under the old key: sealed again under this install's. Every read runs
+                // under the lock; a write that fails leaves the old file, read again next time.
+                if old {
+                    let _ = self.write(&secrets);
+                }
+                Ok(secrets)
+            }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Default::default()),
             Err(e) => Err(self.shown(e)),
         }
@@ -166,7 +172,7 @@ impl FileStore {
             .path
             .with_extension(format!("json.{}.{n}.tmp", std::process::id()));
         let json = serde_json::to_vec(secrets).map_err(|e| e.to_string())?;
-        let sealed = seal_with(&self.sealing_key()?, &json)?;
+        let sealed = self.seal(&json)?;
         let mut options = std::fs::OpenOptions::new();
         options.write(true).create_new(true);
         #[cfg(unix)]
@@ -222,6 +228,79 @@ impl FileStore {
             }
             Ok(secrets.contains_key(key))
         })
+    }
+
+    fn install_secret(&self, make: bool) -> Result<Option<[u8; 32]>, String> {
+        let path = self.path.with_extension("key");
+        match std::fs::read(&path) {
+            Ok(bytes) => <[u8; 32]>::try_from(bytes).map(Some).map_err(|_| {
+                format!(
+                    "{} is damaged. Remove it and {} and sign in again.",
+                    path.display(),
+                    self.path.display()
+                )
+            }),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound && make => {
+                let mut secret = [0u8; 32];
+                getrandom::fill(&mut secret).map_err(|e| e.to_string())?;
+                // Whole or not at all, as the secrets file: a temporary file, then a rename.
+                let tmp = path.with_extension(format!("key.{}.tmp", std::process::id()));
+                let mut options = std::fs::OpenOptions::new();
+                options.write(true).create_new(true);
+                #[cfg(unix)]
+                std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+                let written = options.open(&tmp).and_then(|mut file| {
+                    std::io::Write::write_all(&mut file, &secret)?;
+                    file.sync_all()
+                });
+                if let Err(e) = written.and_then(|()| std::fs::rename(&tmp, &path)) {
+                    let _ = std::fs::remove_file(&tmp);
+                    return Err(format!("{}: {e}", path.display()));
+                }
+                Ok(Some(secret))
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(format!("{}: {e}", path.display())),
+        }
+    }
+
+    pub fn seal(&self, json: &[u8]) -> Result<Vec<u8>, String> {
+        if let KeySource::File(_) = &self.key {
+            return seal_with(&self.sealing_key()?, json);
+        }
+        use chacha20poly1305::{aead::Aead, KeyInit};
+        let key = file_key_v2(&self.install_secret(true)?.expect("made"));
+        let mut nonce = [0u8; 12];
+        getrandom::fill(&mut nonce).map_err(|e| e.to_string())?;
+        let sealed = chacha20poly1305::ChaCha20Poly1305::new(&key)
+            .encrypt(&nonce.into(), json)
+            .map_err(|_| "the secrets couldn't be sealed".to_string())?;
+        Ok([SEALED_V2, &nonce, &sealed].concat())
+    }
+
+    fn unseal(&self, bytes: &[u8]) -> Result<Option<(Vec<u8>, bool)>, String> {
+        if let KeySource::File(_) = &self.key {
+            return Ok(unseal_with(&self.sealing_key()?, bytes).map(|json| (json, false)));
+        }
+        use chacha20poly1305::{aead::Aead, KeyInit};
+        let (key, old, rest) = if let Some(rest) = bytes.strip_prefix(SEALED_V2) {
+            let Some(secret) = self.install_secret(false)? else {
+                return Ok(None);
+            };
+            (file_key_v2(&secret), false, rest)
+        } else if let Some(rest) = bytes.strip_prefix(SEALED) {
+            (file_key(), true, rest)
+        } else {
+            return Ok(None);
+        };
+        let Some((nonce, sealed)) = rest.split_at_checked(12) else {
+            return Ok(None);
+        };
+        let nonce: [u8; 12] = nonce.try_into().expect("12 bytes");
+        Ok(chacha20poly1305::ChaCha20Poly1305::new(&key)
+            .decrypt(&nonce.into(), sealed)
+            .ok()
+            .map(|json| (json, old)))
     }
 }
 
@@ -393,4 +472,29 @@ mod tests {
         assert_eq!(std::fs::read(dir.join("secrets.key")).unwrap(), b"short");
         std::fs::remove_dir_all(dir).unwrap();
     }
+}
+
+pub const SEALED_V2: &[u8] = b"HZSECv2\n";
+fn machine_id() -> Option<Vec<u8>> {
+    ["/etc/machine-id", "/var/lib/dbus/machine-id", "/etc/hostid"]
+        .iter()
+        .find_map(|path| std::fs::read(path).ok())
+        .map(|id| id.trim_ascii().to_vec())
+}
+
+/// The secrets file's key: a constant of the launcher's, this computer's identity and the install's
+/// own random secret (`account-secrets.key`, 0600). The tokens are never on disk in plain text,
+/// and the key is never something every local user can work out (the machine id is readable by
+/// all, and some systems have none): it takes the install secret, which only the player can read.
+/// The file's mode (0600) is still what keeps other users out; the secret means a copy of the file
+/// alone, or one left readable by others while the secret wasn't, can't be read either.
+fn file_key_v2(install_secret: &[u8; 32]) -> chacha20poly1305::Key {
+    use sha2::Digest;
+    let mut hash = sha2::Sha256::new();
+    hash.update(b"horizon-launcher account-secrets v2");
+    let id = machine_id().unwrap_or_default();
+    hash.update((id.len() as u64).to_le_bytes());
+    hash.update(&id);
+    hash.update(install_secret);
+    hash.finalize()
 }
