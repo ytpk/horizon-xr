@@ -627,12 +627,14 @@ impl super::Instance {
 
         let mut extensions = Self::desired_extensions(&entry, instance_api_version, desc.flags)?;
         let mut create_info = vk::InstanceCreateInfo::default();
+        let mut creator: Option<super::InstanceCreator> = None;
 
         if let Some(callback) = callback {
             callback(super::CreateInstanceCallbackArgs {
                 extensions: &mut extensions,
                 create_info: &mut create_info,
                 entry: &entry,
+                creator: &mut creator,
                 _phantom: PhantomData,
             });
         }
@@ -832,7 +834,11 @@ impl super::Instance {
 
             unsafe {
                 profiling::scope!("vkCreateInstance");
-                entry.create_instance(&create_info, None)
+                match creator.take() {
+                    Some(create) => create(&entry, &create_info)
+                        .map(|raw| ash::Instance::load(entry.static_fn(), raw)),
+                    None => entry.create_instance(&create_info, None),
+                }
             }
             .map_err(|e| {
                 crate::InstanceError::with_source(

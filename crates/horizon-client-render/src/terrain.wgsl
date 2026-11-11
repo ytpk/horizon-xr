@@ -62,6 +62,8 @@ struct Globals {
 // pixels must reach to shine in HDR output: r where the bright parts shine, g
 // where all of it does (gfx/hdr_stats.rs, measured from the sprite itself).
 @group(0) @binding(12) var emission_thresholds: texture_2d<f32>;
+// Each sprite layer's emissive overlay layer, 0xffffffff for none (gfx/emissive_table.rs).
+@group(0) @binding(13) var emissive_table: texture_2d<u32>;
 // How many sprite arrays hold layers (a pipeline constant): 1 for vanilla,
 // which then samples exactly as before.
 override SPRITE_ARRAYS: u32 = 1u;
@@ -675,18 +677,18 @@ fn terrain_vertex(position: vec3<f32>, uv: vec2<f32>, layer: u32, color: vec4<f3
     out.layer = layer;
     out.emissive_layer = 0xffffffffu;
     // The pairs are sorted by base layer: stop at the first past this one.
-    let sprite_layer = layer & 0x7fffu;
-    for (var i = 0u; i < min(globals.emissive_count.x, 128u); i++) {
-        let pair = globals.emissive_layers[i];
-        if pair.x == sprite_layer {
-            out.emissive_layer = pair.y;
-            break;
-        }
-        if pair.x > sprite_layer {
-            break;
-        }
+    // One load from the per-layer table (gfx/emissive_table.rs), not a search through
+    // `Globals.emissive_layers`: the loop's mere presence cost Adreno a third of the vertex's
+    // ALU, with or without pairs.
+    if globals.emissive_count.x != 0u {
+        let l = layer & 0x7fffu;
+        out.emissive_layer = textureLoad(emissive_table,
+            vec2(i32(l % SPRITE_SPLIT), i32(l / SPRITE_SPLIT)), 0).x;
     }
-    let block = max(f32(light.y), dynamic_block_light(pos));
+    var block = f32(light.y);
+    if globals.time.z > 0.0 {
+        block = max(block, dynamic_block_light(pos));
+    }
     out.color = vec4(color.rgb, 1.0) * sample_lightmap(f32(light.x) / 16.0, block / 16.0);
     out.scene = vec2(block / 16.0, f32(light.x) / 16.0);
     if globals.colored_count.x > 0u {

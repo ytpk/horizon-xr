@@ -94,8 +94,63 @@ impl EyeMask {
     }
 }
 
+/// Both eyes' masks as one mesh for a stereo (multiview) pass: every vertex with the eye it
+/// belongs to, the right eye's indices after the left's. The vertex stage collapses the other
+/// eye's triangles, so each layer gets its own eye's mask alone.
+pub fn stereo_mesh(masks: &[EyeMask; 2]) -> (Vec<StereoVertex>, Vec<u32>) {
+    let mut vertices = Vec::new();
+    let mut indices = Vec::new();
+    for (eye, mask) in masks.iter().enumerate() {
+        let base = vertices.len() as u32;
+        vertices.extend(mask.vertices.iter().map(|&ndc| StereoVertex {
+            ndc,
+            eye: eye as u32,
+        }));
+        indices.extend(mask.indices.iter().map(|i| base + i));
+    }
+    (vertices, indices)
+}
+
+/// A vertex of [`stereo_mesh`].
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct StereoVertex {
+    pub ndc: [f32; 2],
+    pub eye: u32,
+}
+
+/// `vis_mask.wgsl` for a stereo (multiview) pass, which only a headset on Vulkan draws (so not
+/// a `.wgsl` file, which every backend must take): a vertex of the other eye's mesh goes to
+/// one point outside the image, so its triangles have no area and draw nothing in this layer.
+const STEREO_SHADER: &str = r"@vertex
+fn vs(@builtin(view_index) view: u32, @location(0) ndc: vec2<f32>, @location(1) eye: u32)
+    -> @builtin(position) vec4<f32> {
+    if eye != view {
+        return vec4<f32>(2.0, 2.0, 1.0, 1.0);
+    }
+    return vec4<f32>(ndc, 1.0, 1.0);
+}
+
+@fragment
+fn fs() -> @location(0) vec4<f32> {
+    return vec4<f32>(0.0);
+}
+";
+
+/// The stereo pass's mask: its own shader (it reads the view index), pipelines and buffers.
+struct Stereo {
+    module: wgpu::ShaderModule,
+    pipelines: Vec<(wgpu::TextureFormat, wgpu::RenderPipeline)>,
+    vertices: wgpu::Buffer,
+    indices: wgpu::Buffer,
+    /// The bytes the two buffers hold: the mask only changes when the runtime says so.
+    held: [Vec<u8>; 2],
+    count: u32,
+}
+
 /// The pipeline and buffers that draw an eye's mask.
 pub(super) struct VisMask {
+    stereo: Option<Stereo>,
     module: wgpu::ShaderModule,
     layout: wgpu::PipelineLayout,
     pipelines: Vec<(wgpu::TextureFormat, wgpu::RenderPipeline)>,
@@ -118,6 +173,7 @@ impl VisMask {
                 bind_group_layouts: &[],
                 ..Default::default()
             }),
+            stereo: None,
             pipelines: Vec::new(),
             vertices: Self::buffer(device, 4096, wgpu::BufferUsages::VERTEX),
             indices: Self::buffer(device, 4096, wgpu::BufferUsages::INDEX),
@@ -201,6 +257,109 @@ impl VisMask {
         }
     }
 
+    /// Puts both eyes' masks in the stereo buffers and makes the multiview pipeline for a colour
+    /// target of `format`.
+    pub(super) fn prepare_stereo(
+        &mut self,
+        device: &wgpu::Device,
+        uploads: &mut super::upload::Uploads,
+        encoder: &mut wgpu::CommandEncoder,
+        masks: &[EyeMask; 2],
+        format: wgpu::TextureFormat,
+    ) {
+        let (vertices, indices) = stereo_mesh(masks);
+        let bytes: [&[u8]; 2] = [
+            bytemuck::cast_slice(&vertices),
+            bytemuck::cast_slice(&indices),
+        ];
+        let stereo = self.stereo.get_or_insert_with(|| Stereo {
+            module: device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("Visibility mask (stereo)"),
+                source: wgpu::ShaderSource::Wgsl(STEREO_SHADER.into()),
+            }),
+            pipelines: Vec::new(),
+            vertices: Self::buffer(device, 4096, wgpu::BufferUsages::VERTEX),
+            indices: Self::buffer(device, 4096, wgpu::BufferUsages::INDEX),
+            held: [Vec::new(), Vec::new()],
+            count: 0,
+        });
+        for (i, usage) in [wgpu::BufferUsages::VERTEX, wgpu::BufferUsages::INDEX]
+            .into_iter()
+            .enumerate()
+        {
+            if stereo.held[i] == bytes[i] {
+                continue;
+            }
+            let buffer = if i == 0 {
+                &mut stereo.vertices
+            } else {
+                &mut stereo.indices
+            };
+            if bytes[i].len() as u64 > buffer.size() {
+                *buffer = Self::buffer(device, (bytes[i].len() as u64).next_power_of_two(), usage);
+            }
+            uploads.buffer(encoder, buffer, 0, bytes[i]);
+            stereo.held[i] = bytes[i].to_vec();
+        }
+        stereo.count = indices.len() as u32;
+        if !stereo.pipelines.iter().any(|(f, _)| *f == format) {
+            let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("Visibility mask (stereo)"),
+                layout: Some(&self.layout),
+                vertex: wgpu::VertexState {
+                    module: &stereo.module,
+                    entry_point: Some("vs"),
+                    compilation_options: Default::default(),
+                    buffers: &[Some(wgpu::VertexBufferLayout {
+                        array_stride: std::mem::size_of::<StereoVertex>() as u64,
+                        step_mode: wgpu::VertexStepMode::Vertex,
+                        attributes: &wgpu::vertex_attr_array![0 => Float32x2, 1 => Uint32],
+                    })],
+                },
+                primitive: wgpu::PrimitiveState {
+                    cull_mode: None,
+                    ..Default::default()
+                },
+                depth_stencil: Some(wgpu::DepthStencilState {
+                    format: wgpu::TextureFormat::Depth32Float,
+                    depth_write_enabled: Some(true),
+                    depth_compare: Some(wgpu::CompareFunction::Always),
+                    stencil: Default::default(),
+                    bias: Default::default(),
+                }),
+                multisample: Default::default(),
+                fragment: Some(wgpu::FragmentState {
+                    module: &stereo.module,
+                    entry_point: Some("fs"),
+                    compilation_options: Default::default(),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format,
+                        blend: None,
+                        write_mask: wgpu::ColorWrites::empty(),
+                    })],
+                }),
+                multiview_mask: super::multiview::MASK,
+                cache: None,
+            });
+            stereo.pipelines.push((format, pipeline));
+        }
+    }
+
+    /// Draws the masks `prepare_stereo` put in, in a stereo pass whose colour target is
+    /// `format`'s.
+    pub(super) fn draw_stereo(&self, pass: &mut wgpu::RenderPass<'_>, format: wgpu::TextureFormat) {
+        let Some(stereo) = &self.stereo else {
+            return;
+        };
+        let Some((_, pipeline)) = stereo.pipelines.iter().find(|(f, _)| *f == format) else {
+            return;
+        };
+        pass.set_pipeline(pipeline);
+        pass.set_vertex_buffer(0, stereo.vertices.slice(..));
+        pass.set_index_buffer(stereo.indices.slice(..), wgpu::IndexFormat::Uint32);
+        pass.draw_indexed(0..stereo.count, 0, 0..1);
+    }
+
     /// Draws the mask `prepare` put in, in a pass whose colour target is `format`'s.
     pub(super) fn draw(&self, pass: &mut wgpu::RenderPass<'_>, format: wgpu::TextureFormat) {
         let Some((_, pipeline)) = self.pipelines.iter().find(|(f, _)| *f == format) else {
@@ -267,6 +426,166 @@ mod tests {
         assert!((ndc[4][0] - (-1.0 + 2.0 * 0.6 / 2.1)).abs() < 1e-6);
         // y = -0.5 is 0.6 above -1.1 of 2.1: the same share.
         assert!((ndc[4][1] - (-1.0 + 2.0 * 0.6 / 2.1)).abs() < 1e-6);
+    }
+
+    /// A square over part of the image, as an eye's mask already in device coordinates.
+    fn square(low: [f32; 2], high: [f32; 2]) -> EyeMask {
+        EyeMask {
+            vertices: vec![low, [high[0], low[1]], high, [low[0], high[1]]],
+            indices: vec![0, 1, 2, 0, 2, 3],
+        }
+    }
+
+    #[test]
+    fn the_stereo_mesh_keeps_each_eyes_triangles_and_says_whose_they_are() {
+        let left = square([-1.0, -1.0], [0.0, 1.0]);
+        let right = EyeMask {
+            vertices: vec![[0.5, 0.5], [1.0, 0.5], [1.0, 1.0]],
+            indices: vec![2, 1, 0],
+        };
+        let (vertices, indices) = stereo_mesh(&[left, right]);
+        assert_eq!(vertices.len(), 7);
+        assert!(vertices[..4].iter().all(|v| v.eye == 0));
+        assert!(vertices[4..].iter().all(|v| v.eye == 1));
+        // The right eye's triangle still names its own corners, in its own order.
+        assert_eq!(indices, vec![0, 1, 2, 0, 2, 3, 6, 5, 4]);
+        assert_eq!(vertices[6].ndc, [1.0, 1.0]);
+    }
+
+    /// A real stereo pass: the left eye's mask hides the left half of its layer and the right
+    /// eye's the bottom half of its own, and neither reaches the other's layer.
+    #[test]
+    #[ignore = "requires a Vulkan adapter with MULTIVIEW; also runs on Mesa lavapipe"]
+    fn each_layer_of_a_stereo_pass_is_hidden_by_its_own_eyes_mask() {
+        const SIZE: u32 = 16;
+        let instance = super::super::test_gpu::instance();
+        let adapter = pollster::block_on(instance.request_adapter(&Default::default())).unwrap();
+        let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+            required_features: wgpu::Features::MULTIVIEW,
+            required_limits: wgpu::Limits {
+                max_multiview_view_count: 2,
+                ..Default::default()
+            },
+            ..Default::default()
+        }))
+        .unwrap();
+        let format = wgpu::TextureFormat::Rgba8Unorm;
+        let masks = [
+            square([-1.0, -1.0], [0.0, 1.0]),
+            square([-1.0, -1.0], [1.0, 0.0]),
+        ];
+        let mut vis = VisMask::new(&device);
+        let mut uploads = super::super::upload::Uploads::new(&device);
+        let mut encoder = device.create_command_encoder(&Default::default());
+        vis.prepare_stereo(&device, &mut uploads, &mut encoder, &masks, format);
+        // White wherever the depth the mask wrote lets it through.
+        let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: None,
+            source: wgpu::ShaderSource::Wgsl(
+                "@vertex fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4<f32> {
+                    return vec4(f32(i32(i & 1u) * 4 - 1), f32(i32(i >> 1u) * 4 - 1), 0.5, 1.0);
+                }
+                @fragment fn fs() -> @location(0) vec4<f32> { return vec4(1.0); }"
+                    .into(),
+            ),
+        });
+        let fill = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: None,
+            layout: None,
+            vertex: wgpu::VertexState {
+                module: &module,
+                entry_point: Some("vs"),
+                compilation_options: Default::default(),
+                buffers: &[],
+            },
+            primitive: Default::default(),
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: wgpu::TextureFormat::Depth32Float,
+                depth_write_enabled: Some(false),
+                depth_compare: Some(wgpu::CompareFunction::GreaterEqual),
+                stencil: Default::default(),
+                bias: Default::default(),
+            }),
+            multisample: Default::default(),
+            fragment: Some(wgpu::FragmentState {
+                module: &module,
+                entry_point: Some("fs"),
+                compilation_options: Default::default(),
+                targets: &[Some(format.into())],
+            }),
+            multiview_mask: super::super::multiview::MASK,
+            cache: None,
+        });
+        let target = super::super::multiview::Targets::new(&device, [SIZE; 2], format);
+        let view = target.color.create_view(&Default::default());
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: None,
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &view,
+                    resolve_target: None,
+                    depth_slice: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &target.depth,
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(0.0),
+                        store: wgpu::StoreOp::Discard,
+                    }),
+                    stencil_ops: None,
+                }),
+                multiview_mask: super::super::multiview::MASK,
+                ..Default::default()
+            });
+            vis.draw_stereo(&mut pass, format);
+            pass.set_pipeline(&fill);
+            pass.draw(0..3, 0..1);
+        }
+        let read = device.create_buffer(&wgpu::BufferDescriptor {
+            label: None,
+            size: u64::from(256 * SIZE * 2),
+            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        encoder.copy_texture_to_buffer(
+            target.color.as_image_copy(),
+            wgpu::TexelCopyBufferInfo {
+                buffer: &read,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(256),
+                    rows_per_image: Some(SIZE),
+                },
+            },
+            target.color.size(),
+        );
+        uploads.finish(&encoder);
+        queue.submit([encoder.finish()]);
+        let (sent, received) = std::sync::mpsc::channel();
+        read.slice(..)
+            .map_async(wgpu::MapMode::Read, move |result| {
+                sent.send(result).unwrap()
+            });
+        device
+            .poll(wgpu::PollType::Wait {
+                submission_index: None,
+                timeout: Some(std::time::Duration::from_secs(30)),
+            })
+            .unwrap();
+        received.recv().unwrap().unwrap();
+        let pixels = read.slice(..).get_mapped_range().unwrap();
+        // (layer, x, y from the top) -> the red channel.
+        let red = |layer: usize, x: usize, y: usize| pixels[(layer * 16 + y) * 256 + x * 4];
+        // Left eye: its left half hidden, top and bottom alike.
+        assert_eq!([red(0, 3, 3), red(0, 3, 12)], [0, 0]);
+        assert_eq!([red(0, 12, 3), red(0, 12, 12)], [255, 255]);
+        // Right eye: its bottom half hidden, left and right alike.
+        assert_eq!([red(1, 3, 12), red(1, 12, 12)], [0, 0]);
+        assert_eq!([red(1, 3, 3), red(1, 12, 3)], [255, 255]);
     }
 
     #[test]

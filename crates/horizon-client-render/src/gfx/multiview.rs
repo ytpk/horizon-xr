@@ -31,6 +31,78 @@ impl Eye {
 /// Adapt only the built-in Globals ABI. Private state is set at each stage's
 /// entry, including fragment entries (sky rays and screen-space effects).
 /// Helpers therefore use the same eye without changing every function ABI.
+/// `HorizonEye`'s fields the rewritten shaders read, and their types.
+const EYE_FIELDS: [(&str, &str); 5] = [
+    ("view_proj", "mat4x4<f32>"),
+    ("inverse_view", "mat4x4<f32>"),
+    ("inverse_projection", "mat4x4<f32>"),
+    ("misc", "vec4<f32>"),
+    ("from_primary", "mat4x4<f32>"),
+];
+
+/// A developer A/B switch for the headset tester: on unless `HORIZON_<NAME>=0`. Read once.
+fn switch(cell: &std::sync::OnceLock<bool>, name: &str) -> bool {
+    *cell.get_or_init(|| std::env::var(name).as_deref() != Ok("0"))
+}
+
+/// The screen effects (vignette, overlays) draw at the end of the stereo world pass
+/// (`HORIZON_QUEST_SCREEN_IN_WORLD=0`: in a pass of their own, which loads and stores both
+/// layers again on a tiled GPU).
+pub fn screen_in_world() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    switch(&ON, "HORIZON_QUEST_SCREEN_IN_WORLD")
+}
+
+/// The hidden-area mask is drawn in the stereo world pass too (`HORIZON_QUEST_STEREO_VISMASK=0`:
+/// only in the separate eye passes).
+pub fn stereo_vis_mask() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    switch(&ON, "HORIZON_QUEST_STEREO_VISMASK")
+}
+
+/// The stereo world pass leaves out the sections its last occlusion results did not see
+/// (`cull::Cull::recall`), with `HORIZON_QUEST_OCCLUSION=1` alone: on a Quest 3S the boxes'
+/// fragment shader, which writes its results to a storage buffer, draws nothing, so every
+/// section tested counts as hidden and most of the world goes missing.
+pub fn occlusion_recall() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("HORIZON_QUEST_OCCLUSION").as_deref() == Ok("1"))
+}
+
+/// `HORIZON_QUEST_SKY_DEBUG=a,b`: what the stereo world pass leaves out of the sky, for finding
+/// which draw a fault is in. `magenta` clears the pass to magenta: a sky pixel that stays
+/// magenta was not covered by the sky's triangle.
+#[derive(Clone, Copy, Default)]
+pub struct SkyDebug {
+    pub no_base: bool,
+    pub no_sunrise: bool,
+    pub no_celestial: bool,
+    pub no_stars: bool,
+    pub no_dark: bool,
+    pub magenta: bool,
+}
+impl SkyDebug {
+    pub fn parse(text: &str) -> Self {
+        let has = |name| text.split(',').any(|part| part.trim() == name);
+        Self {
+            no_base: has("nobase"),
+            no_sunrise: has("nosunrise"),
+            no_celestial: has("nocelestial"),
+            no_stars: has("nostars"),
+            no_dark: has("nodark"),
+            magenta: has("magenta"),
+        }
+    }
+}
+pub fn sky_debug() -> SkyDebug {
+    static DEBUG: std::sync::OnceLock<SkyDebug> = std::sync::OnceLock::new();
+    *DEBUG.get_or_init(|| {
+        std::env::var("HORIZON_QUEST_SKY_DEBUG")
+            .map(|text| SkyDebug::parse(&text))
+            .unwrap_or_default()
+    })
+}
+
 pub fn shader(source: &str) -> String {
     let globals = source.contains("struct Globals {");
     let stars = source.contains("struct Stars {");
@@ -43,10 +115,18 @@ pub fn shader(source: &str) -> String {
         let end = start + source[start..].find('}').unwrap();
         source.insert_str(end, "horizon_eyes: array<HorizonEye, 2>,\n");
         source.insert_str(0, "struct HorizonEye { view_proj: mat4x4<f32>, inverse_view: mat4x4<f32>, inverse_projection: mat4x4<f32>, misc: vec4<f32>, from_primary: mat4x4<f32>, }\n");
+        // Each eye's values through constant indices only: indexing the uniform block by the
+        // view index made Adreno's compiler read all of `Globals` from memory instead of its
+        // constant registers, in every vertex.
+        for (field, ty) in EYE_FIELDS {
+            source.push_str(&format!(
+                "\nfn horizon_eye_{field}() -> {ty} {{ if horizon_eye == 0u {{ return globals.horizon_eyes[0].{field}; }} return globals.horizon_eyes[1].{field}; }}\n"
+            ));
+        }
         for field in ["view_proj", "inverse_view", "misc"] {
             source = source.replace(
                 &format!("globals.{field}"),
-                &format!("globals.horizon_eyes[horizon_eye].{field}"),
+                &format!("horizon_eye_{field}()"),
             );
         }
         // The ordinary sky's symmetric reconstruction cannot represent two
@@ -54,11 +134,11 @@ pub fn shader(source: &str) -> String {
         if let Some(start) = source.find("fn view_ray(") {
             let body = start + source[start..].find('{').unwrap();
             let end = body + source[body..].find('}').unwrap();
-            source.replace_range(body + 1..end, "\nlet e = globals.horizon_eyes[horizon_eye];\nlet p = e.inverse_projection * vec4(ndc, 1.0, 1.0);\nreturn normalize((e.inverse_view * vec4(p.xyz / p.w, 0.0)).xyz);\n");
+            source.replace_range(body + 1..end, "\nlet p = horizon_eye_inverse_projection() * vec4(ndc, 1.0, 1.0);\nreturn normalize((horizon_eye_inverse_view() * vec4(p.xyz / p.w, 0.0)).xyz);\n");
         }
         source = source.replace(
             "SunriseOut(clip, weight)",
-            "SunriseOut(globals.horizon_eyes[horizon_eye].from_primary * clip, weight)",
+            "SunriseOut(horizon_eye_from_primary() * clip, weight)",
         );
     } else {
         source = source.replace("stars.clip_from_sky[0]", "stars.clip_from_sky[horizon_eye]");
@@ -202,6 +282,185 @@ mod tests {
                     .iter()
                     .any(|a| a.binding == Some(naga::Binding::BuiltIn(naga::BuiltIn::ViewIndex)))
             }));
+        }
+    }
+
+    #[test]
+    fn sky_debug_names_what_to_leave_out() {
+        let debug = SkyDebug::parse("nobase, magenta");
+        assert!(debug.no_base && debug.magenta);
+        assert!(!debug.no_stars && !debug.no_dark && !debug.no_sunrise && !debug.no_celestial);
+    }
+
+    /// The sky through two different lenses, one of them off-centre and turned: each pixel is
+    /// sky above the horizon and fog below it, by the pixel's own direction worked out here.
+    #[test]
+    #[ignore = "requires a Vulkan adapter with MULTIVIEW; also runs on Mesa lavapipe"]
+    fn stereo_sky_follows_each_eyes_lens() {
+        use wgpu::util::DeviceExt;
+        const SIZE: usize = 32;
+        let instance = super::super::test_gpu::instance();
+        let adapter = pollster::block_on(instance.request_adapter(&Default::default())).unwrap();
+        let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+            required_features: wgpu::Features::MULTIVIEW,
+            required_limits: wgpu::Limits {
+                max_multiview_view_count: 2,
+                ..Default::default()
+            },
+            ..Default::default()
+        }))
+        .unwrap();
+        // [left, right, up, down] tangents and the eye's turn.
+        let lenses = [
+            ([-1.0f32, 1.0, 1.0, -1.0], glam::Quat::IDENTITY),
+            (
+                [-1.3, 0.8, 0.9, -1.1],
+                glam::Quat::from_rotation_y(0.4)
+                    * glam::Quat::from_rotation_x(0.5)
+                    * glam::Quat::from_rotation_z(0.3),
+            ),
+        ];
+        let views = lenses.map(|(tangents, turn)| View {
+            view: Mat4::from_quat(turn.conjugate()),
+            projection: super::super::headset::eye_projection(tangents, 0.05, 1000.0),
+            aspect: (tangents[1] - tangents[0]) / (tangents[2] - tangents[3]),
+            tan_half_fov: (tangents[2] - tangents[3]) / 2.0,
+        });
+        let mut globals: super::super::Globals = bytemuck::Zeroable::zeroed();
+        globals.sky_color = [0.0, 0.0, 1.0, 1.0];
+        globals.fog_color = [1.0, 0.0, 0.0, 1.0];
+        // No fog on the disc: sky colour wherever the ray meets it.
+        globals.fog_ends = [1e9, 1e9, 1e9, 1e9];
+        let eyes = views.map(|view| Eye::new(view, [0.0; 4], views[0]));
+        let mut bytes = bytemuck::bytes_of(&globals).to_vec();
+        bytes.extend_from_slice(bytemuck::cast_slice(&eyes));
+        let uniform = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: None,
+            contents: &bytes,
+            usage: wgpu::BufferUsages::UNIFORM,
+        });
+        {
+            let source = shader(&super::super::terrain_shader());
+            let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: None,
+                source: wgpu::ShaderSource::Wgsl(source.into()),
+            });
+            let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: None,
+                layout: None,
+                vertex: wgpu::VertexState {
+                    module: &module,
+                    entry_point: Some("vs_sky"),
+                    compilation_options: Default::default(),
+                    buffers: &[],
+                },
+                primitive: Default::default(),
+                depth_stencil: None,
+                multisample: Default::default(),
+                fragment: Some(wgpu::FragmentState {
+                    module: &module,
+                    entry_point: Some("fs_sky_base"),
+                    compilation_options: Default::default(),
+                    targets: &[Some(wgpu::TextureFormat::Rgba8Unorm.into())],
+                }),
+                multiview_mask: MASK,
+                cache: None,
+            });
+            let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: None,
+                layout: &pipeline.get_bind_group_layout(0),
+                entries: &[wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: uniform.as_entire_binding(),
+                }],
+            });
+            let target = Targets::new(&device, [SIZE as u32; 2], wgpu::TextureFormat::Rgba8Unorm);
+            let row = SIZE * 4;
+            let read = device.create_buffer(&wgpu::BufferDescriptor {
+                label: None,
+                size: (256 * SIZE * 2) as u64,
+                usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            assert!(row <= 256);
+            let mut encoder = device.create_command_encoder(&Default::default());
+            let view = target.color.create_view(&Default::default());
+            {
+                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: None,
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: &view,
+                        resolve_target: None,
+                        depth_slice: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(wgpu::Color::GREEN),
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    multiview_mask: MASK,
+                    ..Default::default()
+                });
+                pass.set_pipeline(&pipeline);
+                pass.set_bind_group(0, &group, &[]);
+                pass.draw(0..3, 0..1);
+            }
+            encoder.copy_texture_to_buffer(
+                target.color.as_image_copy(),
+                wgpu::TexelCopyBufferInfo {
+                    buffer: &read,
+                    layout: wgpu::TexelCopyBufferLayout {
+                        offset: 0,
+                        bytes_per_row: Some(256),
+                        rows_per_image: Some(SIZE as u32),
+                    },
+                },
+                target.color.size(),
+            );
+            queue.submit([encoder.finish()]);
+            let (sent, received) = std::sync::mpsc::channel();
+            read.slice(..)
+                .map_async(wgpu::MapMode::Read, move |result| {
+                    sent.send(result).unwrap()
+                });
+            device
+                .poll(wgpu::PollType::Wait {
+                    submission_index: None,
+                    timeout: Some(std::time::Duration::from_secs(30)),
+                })
+                .unwrap();
+            received.recv().unwrap().unwrap();
+            let pixels = read.slice(..).get_mapped_range().unwrap();
+            let mut seen = [[0; 2]; 2];
+            for (eye, (tangents, turn)) in lenses.iter().enumerate() {
+                let [left, right, up, down] = *tangents;
+                for y in 0..SIZE {
+                    for x in 0..SIZE {
+                        let across = (x as f32 + 0.5) / SIZE as f32;
+                        let below = (y as f32 + 0.5) / SIZE as f32;
+                        let ray = *turn
+                            * glam::Vec3::new(
+                                left + across * (right - left),
+                                up + below * (down - up),
+                                -1.0,
+                            )
+                            .normalize();
+                        let elevation = ray.y.asin().to_degrees();
+                        // The disc's rim stands 1.8 to 1.9 degrees over the horizon.
+                        let wanted = if elevation > 2.5 {
+                            [0, 0, 255]
+                        } else if elevation < 1.2 {
+                            [255, 0, 0]
+                        } else {
+                            continue;
+                        };
+                        seen[eye][usize::from(wanted[0] == 0)] += 1;
+                        let at = eye * 256 * SIZE + y * 256 + x * 4;
+                        assert_eq!(pixels[at..at + 3], wanted, "eye {eye} pixel {x},{y}");
+                    }
+                }
+            }
+            // Both eyes show both sky and fog, or the picture says nothing.
+            assert!(seen.iter().flatten().all(|&count| count > 20), "{seen:?}");
         }
     }
 

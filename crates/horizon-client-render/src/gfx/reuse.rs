@@ -159,6 +159,10 @@ pub struct On<'a> {
     stereo: bool,
 }
 impl On<'_> {
+    /// Whether pipelines made here get a stereo (multiview) variant too.
+    pub fn stereo(&self) -> bool {
+        self.stereo
+    }
     pub fn create_shader_module(
         &self,
         descriptor: wgpu::ShaderModuleDescriptor<'_>,

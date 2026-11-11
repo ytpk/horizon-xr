@@ -78,6 +78,9 @@ impl Renderer {
             &mut self.weather.pipeline,
         ];
         slots.extend(self.screen_pipelines.iter_mut());
+        if let Some(pipelines) = &mut self.screen_world_pipelines {
+            slots.extend(pipelines.iter_mut());
+        }
         slots.extend(self.terrain_model_pipelines.iter_mut());
         if let Some(flat) = &mut self.flat {
             slots.extend([
@@ -100,38 +103,106 @@ impl Renderer {
     }
 
     pub(super) fn stereo_compatible(&self, frame: &Frame) -> bool {
-        !self.stereo_failed
-            && horizon_client_input::headset::settings().bool("horizonMultiview")
-            && self.device.features().contains(wgpu::Features::MULTIVIEW)
-            && self.device.limits().max_multiview_view_count >= 2
-            && (self.gpu_timer.is_none()
-                || self
-                    .device
-                    .features()
-                    .contains(wgpu::Features::TIMESTAMP_QUERY_INSIDE_ENCODERS))
-            && horizon_client_input::headset_display::snapshot().is_none_or(|info| {
-                !info.foveated
-                    || horizon_client_input::headset::settings().bool("horizonFoveatedMultiview")
-            })
-            && self.hdr.is_none()
-            && self.custom_sky_draws.is_empty()
-            && frame.world_primitives.is_empty()
-            && self.native.is_none()
-            && self.pack_post.is_none()
-            && self.core_lines.is_none()
-            && !self.improved_transparency
-            && self.visbuf.is_none()
-            && self.world_post.scale == 1.0
-            && !self.world_post.antialias
-            && frame.menu_blur.is_none()
-            && frame.post_effects.effects.is_empty()
-            && frame.glowing.is_empty()
-            && frame.skin.is_none_or(|skin| skin.outline_vertices == 0)
-            && frame.border.is_none()
-            && frame.debug_crosshair.is_empty()
-            && self.screenshot.is_none()
-            && !native_render::world_drawn_hooked()
-            && self.output.frame.format == self.config.format
+        let blocker = self.stereo_blocker(frame);
+        static LOGGED: std::sync::Mutex<Option<Option<&'static str>>> = std::sync::Mutex::new(None);
+        if let Ok(mut logged) = LOGGED.lock()
+            && *logged != Some(blocker)
+        {
+            *logged = Some(blocker);
+            match blocker {
+                Some(reason) => log::info!("Quest multiview not usable: {reason}"),
+                None => log::info!("Quest multiview usable"),
+            }
+        }
+        blocker.is_none()
+    }
+
+    /// The first condition that keeps the world out of the single multiview pass, if any.
+    pub(super) fn stereo_blocker(&self, frame: &Frame) -> Option<&'static str> {
+        if self.stereo_failed {
+            return Some("a multiview target or frame failed earlier");
+        }
+        if !horizon_client_input::headset::settings().bool("horizonMultiview") {
+            return Some("the horizonMultiview setting is off");
+        }
+        if !self.device.features().contains(wgpu::Features::MULTIVIEW) {
+            return Some("the device has no MULTIVIEW");
+        }
+        if self.device.limits().max_multiview_view_count < 2 {
+            return Some("max_multiview_view_count < 2");
+        }
+        if self.gpu_timer.is_some()
+            && !self
+                .device
+                .features()
+                .contains(wgpu::Features::TIMESTAMP_QUERY_INSIDE_ENCODERS)
+        {
+            return Some("GPU timer without TIMESTAMP_QUERY_INSIDE_ENCODERS");
+        }
+        if horizon_client_input::headset_display::snapshot().is_some_and(|info| {
+            info.foveated
+                && !horizon_client_input::headset::settings().bool("horizonFoveatedMultiview")
+        }) {
+            return Some("foveation is on and horizonFoveatedMultiview is off");
+        }
+        if self.hdr.is_some() {
+            return Some("HDR output");
+        }
+        if !self.custom_sky_draws.is_empty() {
+            return Some("a resource pack's custom sky");
+        }
+        if !frame.world_primitives.is_empty() {
+            return Some("world primitives this frame");
+        }
+        if self.native.is_some() {
+            return Some("a native shader pack");
+        }
+        if self.pack_post.is_some() {
+            return Some("a pack's post effects");
+        }
+        if self.core_lines.is_some() {
+            return Some("core shader lines");
+        }
+        if self.improved_transparency {
+            return Some("improved transparency");
+        }
+        if self.visbuf.is_some() {
+            return Some("the visibility buffer");
+        }
+        if self.world_post.scale != 1.0 {
+            return Some("world resolution scale is not 1");
+        }
+        if self.world_post.antialias {
+            return Some("world anti-aliasing (FXAA)");
+        }
+        if frame.menu_blur.is_some() {
+            return Some("menu blur");
+        }
+        if frame.post_effects.has_chain_files() {
+            return Some("screen post effects (nausea, spectator shaders...)");
+        }
+        if !frame.glowing.is_empty() {
+            return Some("glowing entity outlines");
+        }
+        if frame.skin.is_some_and(|skin| skin.outline_vertices != 0) {
+            return Some("skin outline");
+        }
+        if frame.border.is_some() {
+            return Some("world border");
+        }
+        if !frame.debug_crosshair.is_empty() {
+            return Some("debug crosshair");
+        }
+        if self.screenshot.is_some() {
+            return Some("a screenshot is being taken");
+        }
+        if native_render::world_drawn_hooked() {
+            return Some("a native mod hooks world drawing");
+        }
+        if self.output.frame.format != self.config.format {
+            return Some("the output format differs from the swapchain's");
+        }
+        None
     }
 
     /// A headset's frame: each eye drawn in a pass of its own into the runtime's
@@ -300,6 +371,16 @@ impl Renderer {
                     && self.stereo_compatible(frame)
                     && self.swap_stereo_pipelines();
                 if stereo {
+                    // Both eyes' hidden areas in the one pass, each in its own layer.
+                    self.stereo_mask = masks
+                        .as_ref()
+                        .filter(|_| multiview::stereo_vis_mask())
+                        .and_then(|m| {
+                            Some([
+                                vis_mask::EyeMask::new(&m[0], poses[0].tangents)?,
+                                vis_mask::EyeMask::new(&m[1], poses[1].tangents)?,
+                            ])
+                        });
                     self.stereo_views = Some(eye_views);
                     self.headset_eye = Some((self.stereo_views.unwrap()[0], cull));
                     if self.stereo_targets.as_ref().is_none_or(|t| {
@@ -345,6 +426,7 @@ impl Renderer {
                         vr_profile::record(vr_profile::Stage::StallLeft, self.last_wait);
                     }
                     self.stereo_views = None;
+                    self.stereo_mask = None;
                     self.headset_eye = None;
                     assert!(self.swap_stereo_pipelines());
                 }

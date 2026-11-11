@@ -308,6 +308,28 @@ impl DensityImage {
     }
 }
 
+/// The layers of an image's density map its render passes take: (first, count).
+///
+/// The first alone, also for a two-layer (stereo array) image: Vulkan then uses it for every
+/// view of a multiview pass. With a view of both layers the Quest drew blocks of the right
+/// eye's corners wrongly (clear colour, or another part of the picture), every frame.
+/// `HORIZON_XR_DENSITY_LAYERS=all` takes every layer as before, `second` the second alone
+/// (for telling what is wrong with it).
+pub fn density_view_range(layers: u32) -> (u32, u32) {
+    static WANTED: OnceLock<String> = OnceLock::new();
+    let wanted =
+        WANTED.get_or_init(|| std::env::var("HORIZON_XR_DENSITY_LAYERS").unwrap_or_default());
+    density_range_for(wanted, layers)
+}
+
+fn density_range_for(wanted: &str, layers: u32) -> (u32, u32) {
+    match wanted {
+        "all" => (0, layers),
+        "second" if layers > 1 => (1, 1),
+        _ => (0, 1),
+    }
+}
+
 /// An `R8G8_UNORM` view of a density map, for the render pass.
 ///
 /// # Safety
@@ -316,7 +338,7 @@ impl DensityImage {
 pub unsafe fn density_view(
     device: &ash::Device,
     image: vk::Image,
-    layers: u32,
+    (first, layers): (u32, u32),
 ) -> Result<vk::ImageView, String> {
     let info = vk::ImageViewCreateInfo::default()
         .image(image)
@@ -330,7 +352,7 @@ pub unsafe fn density_view(
             aspect_mask: vk::ImageAspectFlags::COLOR,
             base_mip_level: 0,
             level_count: 1,
-            base_array_layer: 0,
+            base_array_layer: first,
             layer_count: layers,
         });
     // Safety: a valid image of this device.
@@ -349,6 +371,16 @@ mod tests {
         assert_eq!(Level::parse("1"), Some(Level::Low));
         assert_eq!(Level::parse("off"), Some(Level::Off));
         assert_eq!(Level::parse("strong"), None);
+    }
+
+    #[test]
+    fn a_stereo_images_passes_take_the_first_density_layer_unless_told() {
+        assert_eq!(density_range_for("", 2), (0, 1));
+        assert_eq!(density_range_for("", 1), (0, 1));
+        assert_eq!(density_range_for("all", 2), (0, 2));
+        assert_eq!(density_range_for("second", 2), (1, 1));
+        // An eye's own image has no second layer to take.
+        assert_eq!(density_range_for("second", 1), (0, 1));
     }
 
     #[test]

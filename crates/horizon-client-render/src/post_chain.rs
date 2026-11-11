@@ -522,6 +522,33 @@ impl Globals {
 }
 
 impl<'a> Request<'a> {
+    /// Whether any requested chain has a file under the root: an id with none (vanilla's
+    /// `minecraft:end_of_frame`, asked for every frame, unless a pack ships it) changes nothing.
+    /// Files are looked for again every couple of seconds, so a pack reload is seen.
+    pub fn has_chain_files(&self) -> bool {
+        use std::sync::Mutex;
+        use std::time::{Duration, Instant};
+        type Seen = HashMap<(PathBuf, String), (bool, Instant)>;
+        static SEEN: Mutex<Option<Seen>> = Mutex::new(None);
+        let Ok(mut seen) = SEEN.lock() else {
+            return !self.effects.is_empty();
+        };
+        let seen = seen.get_or_insert_with(HashMap::new);
+        let now = Instant::now();
+        self.effects.iter().any(|effect| {
+            let id = normalise(effect);
+            let key = (self.root.to_path_buf(), id);
+            match seen.get(&key) {
+                Some(&(exists, at)) if now.duration_since(at) < Duration::from_secs(2) => exists,
+                _ => {
+                    let exists = resource_path(self.root, &key.1).is_file();
+                    seen.insert(key, (exists, now));
+                    exists
+                }
+            }
+        })
+    }
+
     /// No chains.
     pub fn none() -> Self {
         Request {

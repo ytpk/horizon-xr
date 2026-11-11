@@ -233,9 +233,16 @@ impl Quest {
         let available = entry
             .enumerate_extensions()
             .map_err(xr_error("OpenXR extensions"))?;
-        if !available.khr_vulkan_enable {
-            return Err("the OpenXR runtime has no XR_KHR_vulkan_enable".into());
+        if !available.khr_vulkan_enable && !available.khr_vulkan_enable2 {
+            return Err("the OpenXR runtime has no XR_KHR_vulkan_enable(2)".into());
         }
+        // XR_KHR_vulkan_enable2: the runtime makes the Vulkan instance and device itself, so it
+        // sees every extension on them. Meta's runtime fills the eyes' fragment density maps
+        // (`XR_FB_foveation_vulkan`) only then; with the legacy binding it never learns that the
+        // device has `VK_EXT_fragment_density_map` and hands out 0x0 maps.
+        // `HORIZON_XR_VULKAN_ENABLE2=0` keeps the legacy binding.
+        let enable2 = available.khr_vulkan_enable2
+            && std::env::var("HORIZON_XR_VULKAN_ENABLE2").map_or(true, |v| v.trim() != "0");
         // What the device could do beyond what Horizon uses by default, reported for the tester
         // (docs/visor-port.md, "Performance switches").
         log::info!(
@@ -249,7 +256,11 @@ impl Quest {
             available.meta_body_tracking_full_body
         );
         let mut extensions = xr::ExtensionSet::default();
-        extensions.khr_vulkan_enable = true;
+        if enable2 {
+            extensions.khr_vulkan_enable2 = true;
+        } else {
+            extensions.khr_vulkan_enable = true;
+        }
         extensions.fb_display_refresh_rate = available.fb_display_refresh_rate;
         extensions.fb_composition_layer_settings = available.fb_composition_layer_settings;
         horizon_client_input::headset_display::update(|info| {
@@ -283,19 +294,34 @@ impl Quest {
         {
             extensions.khr_android_create_instance = true;
         }
-        let instance = entry
-            .create_instance(
+        // Meta's runtime keys compatibility quirks on this version (its patch number): below
+        // 1.0.22 it drops `XrSwapchainCreateInfo::next`, so the foveated swapchains came back
+        // with 0x0 density maps ("Disable SwapchainCreateInfo next pointer" in logcat), and below
+        // .40 `xrGetVisibilityMaskKHR` returns empty meshes. Ask for the headers' 1.1 version,
+        // and 1.0's last one from a runtime without 1.1.
+        let create = |api_version| {
+            entry.create_instance(
                 &xr::ApplicationInfo {
                     application_name: "Horizon",
                     application_version: 1,
                     engine_name: "Horizon",
                     engine_version: 1,
-                    api_version: xr::Version::new(1, 0, 0),
+                    api_version,
                 },
                 &extensions,
                 &[],
             )
-            .map_err(xr_error("creating the OpenXR instance"))?;
+        };
+        let mut api_version = xr::CURRENT_API_VERSION;
+        let instance = match create(api_version) {
+            Err(xr::sys::Result::ERROR_API_VERSION_UNSUPPORTED) => {
+                api_version = xr::Version::new(1, 0, 34);
+                create(api_version)
+            }
+            made => made,
+        }
+        .map_err(xr_error("creating the OpenXR instance"))?;
+        log::info!("Horizon XR: OpenXR API version {api_version}");
         if let Ok(props) = instance.properties() {
             log::info!(
                 "Horizon XR: runtime {} {}",
@@ -303,6 +329,14 @@ impl Quest {
                 props.runtime_version
             );
         }
+        log::info!(
+            "Horizon XR: Vulkan binding {}",
+            if enable2 {
+                "XR_KHR_vulkan_enable2 (the runtime creates the instance and device)"
+            } else {
+                "XR_KHR_vulkan_enable (legacy)"
+            }
+        );
         let system = instance
             .system(xr::FormFactor::HEAD_MOUNTED_DISPLAY)
             .map_err(xr_error("finding the headset"))?;
@@ -368,6 +402,11 @@ impl Quest {
 
     /// The runtime's space-separated list of Vulkan extension names, leaked:
     /// wgpu-hal takes `&'static CStr`s, and this runs once per process.
+    /// The session's Vulkan objects are made by the runtime (`XR_KHR_vulkan_enable2`).
+    fn enable2(&self) -> bool {
+        self.instance.exts().khr_vulkan_enable2.is_some()
+    }
+
     fn extension_names(list: &str) -> Vec<&'static CStr> {
         list.split_ascii_whitespace()
             .filter_map(|name| CString::new(name).ok())
@@ -801,7 +840,13 @@ impl Chain {
                 // The runtime's density map for this image: the render passes into it take it.
                 if let Some(map) = density.get(i) {
                     // Safety: the runtime's map of this swapchain's image, on this device.
-                    match unsafe { foveation::density_view(hal.raw_device(), map.image, layers) } {
+                    match unsafe {
+                        foveation::density_view(
+                            hal.raw_device(),
+                            map.image,
+                            foveation::density_view_range(layers),
+                        )
+                    } {
                         Ok(view) => {
                             // Safety: the extension and feature are on (checked at device
                             // creation), and the view lives as long as the device.
@@ -1541,12 +1586,18 @@ impl Headset for Quest {
             requirements.min_api_version_supported,
             requirements.max_api_version_supported
         );
-        let wanted = self
-            .instance
-            .vulkan_legacy_instance_extensions(self.system)
-            .map_err(xr_error("the runtime's Vulkan instance extensions"))?;
+        let enable2 = self.enable2();
+        // With enable2 the runtime adds its own extensions inside `xrCreateVulkanInstanceKHR`.
+        let wanted = if enable2 {
+            String::new()
+        } else {
+            self.instance
+                .vulkan_legacy_instance_extensions(self.system)
+                .map_err(xr_error("the runtime's Vulkan instance extensions"))?
+        };
         log::info!("Horizon XR: Vulkan instance extensions: {wanted}");
         let names = Self::extension_names(&wanted);
+        let (xr_instance, system) = (self.instance.clone(), self.system);
         let desc = wgpu::hal::InstanceDescriptor {
             name: "Horizon",
             flags: wgpu::InstanceFlags::from_build_config(),
@@ -1566,6 +1617,36 @@ impl Headset for Quest {
                                 args.extensions.push(name);
                             }
                         }
+                        if enable2 {
+                            *args.creator = Some(Box::new(move |entry, info| {
+                                // Safety: the runtime calls `vkCreateInstance` with `info` (and
+                                // its own extensions) through the loader's entry point.
+                                #[allow(
+                                    unused_unsafe,
+                                    reason = "also checked outside the callback"
+                                )]
+                                let made = unsafe {
+                                    xr_instance.create_vulkan_instance(
+                                        system,
+                                        std::mem::transmute::<
+                                            vk::PFN_vkGetInstanceProcAddr,
+                                            xr::sys::platform::VkGetInstanceProcAddr,
+                                        >(
+                                            entry.static_fn().get_instance_proc_addr
+                                        ),
+                                        std::ptr::from_ref(info).cast(),
+                                    )
+                                };
+                                match made {
+                                    Ok(Ok(raw)) => Ok(vk::Instance::from_raw(raw as u64)),
+                                    Ok(Err(e)) => Err(vk::Result::from_raw(e)),
+                                    Err(e) => {
+                                        log::warn!("Horizon XR: xrCreateVulkanInstanceKHR: {e}");
+                                        Err(vk::Result::ERROR_INITIALIZATION_FAILED)
+                                    }
+                                }
+                            }));
+                        }
                     },
                 )),
             )
@@ -1583,6 +1664,11 @@ impl Headset for Quest {
             .expose_adapter(physical)
             .ok_or("wgpu cannot use the runtime's GPU")?;
         // Safety: the adapter is of this very instance.
+        // The flags the instance takes (third_party/wgpu-core reads the `WGPU_*` variables).
+        log::info!(
+            "Horizon XR: wgpu instance flags {:?}",
+            wgpu::InstanceFlags::default().with_env()
+        );
         let instance = unsafe { wgpu::Instance::from_hal::<Vulkan>(hal) };
         let adapter = unsafe { instance.create_adapter_from_hal(exposed) };
         Ok((instance, adapter))
@@ -1593,10 +1679,16 @@ impl Headset for Quest {
         adapter: &wgpu::Adapter,
         desc: &wgpu::DeviceDescriptor<'_>,
     ) -> Result<(wgpu::Device, wgpu::Queue), String> {
-        let wanted = self
-            .instance
-            .vulkan_legacy_device_extensions(self.system)
-            .map_err(xr_error("the runtime's Vulkan device extensions"))?;
+        let enable2 = self.enable2();
+        // With enable2 the runtime adds its own extensions inside `xrCreateVulkanDeviceKHR`.
+        let wanted = if enable2 {
+            String::new()
+        } else {
+            self.instance
+                .vulkan_legacy_device_extensions(self.system)
+                .map_err(xr_error("the runtime's Vulkan device extensions"))?
+        };
+        let (xr_instance, system) = (self.instance.clone(), self.system);
         log::info!("Horizon XR: Vulkan device extensions: {wanted}");
         log::info!(
             "Horizon XR: wgpu multiview {}",
@@ -1622,6 +1714,11 @@ impl Headset for Quest {
         let open = {
             // Safety: only opened from here; dropped before wgpu takes the adapter back.
             let hal = unsafe { adapter.as_hal::<Vulkan>() }.ok_or("not a Vulkan adapter")?;
+            let get_proc = hal
+                .shared_instance()
+                .entry()
+                .static_fn()
+                .get_instance_proc_addr;
             for name in &names {
                 if !hal.physical_device_capabilities().supports_extension(name) {
                     return Err(format!("the GPU lacks {name:?}, which the runtime needs"));
@@ -1648,6 +1745,35 @@ impl Headset for Quest {
                                 let info = *args.create_info;
                                 *args.create_info =
                                     info.push_next(foveation::device_feature(non_subsampled));
+                            }
+                            if enable2 {
+                                *args.creator = Some(Box::new(move |_instance, physical, info| {
+                                    // Safety: the runtime calls `vkCreateDevice` with `info` (and
+                                    // its own extensions) on the instance it made itself.
+                                    #[allow(
+                                        unused_unsafe,
+                                        reason = "also checked outside the callback"
+                                    )]
+                                    let made = unsafe {
+                                        xr_instance.create_vulkan_device(
+                                            system,
+                                            std::mem::transmute::<
+                                                vk::PFN_vkGetInstanceProcAddr,
+                                                xr::sys::platform::VkGetInstanceProcAddr,
+                                            >(get_proc),
+                                            physical.as_raw() as _,
+                                            std::ptr::from_ref(info).cast(),
+                                        )
+                                    };
+                                    match made {
+                                        Ok(Ok(raw)) => Ok(vk::Device::from_raw(raw as u64)),
+                                        Ok(Err(e)) => Err(vk::Result::from_raw(e)),
+                                        Err(e) => {
+                                            log::warn!("Horizon XR: xrCreateVulkanDeviceKHR: {e}");
+                                            Err(vk::Result::ERROR_INITIALIZATION_FAILED)
+                                        }
+                                    }
+                                }));
                             }
                         },
                     )),

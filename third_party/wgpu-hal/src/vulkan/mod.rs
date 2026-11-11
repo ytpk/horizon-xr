@@ -1704,7 +1704,7 @@ struct RawTlasInstance {
 }
 
 /// Arguments to the [`CreateDeviceCallback`].
-#[derive(Debug)]
+#[expect(missing_debug_implementations, reason = "holds a boxed closure")]
 pub struct CreateDeviceCallbackArgs<'arg, 'pnext, 'this>
 where
     'this: 'pnext,
@@ -1720,6 +1720,9 @@ where
     /// do not turn features off. Additionally, do not add things to the list of extensions,
     /// or to the feature set, as all changes to that member will be overwritten.
     pub create_info: &'arg mut vk::DeviceCreateInfo<'pnext>,
+    /// Makes the device in place of `vkCreateDevice` (an OpenXR runtime's
+    /// `xrCreateVulkanDeviceKHR`), from the final create info.
+    pub creator: &'arg mut Option<DeviceCreator>,
     /// We need to have `'this` in the struct, so we can declare that all lifetimes coming from
     /// captures in the closure will live longer (and hence satisfy) `'pnext`. However, we
     /// don't actually directly use `'this`
@@ -1736,6 +1739,20 @@ where
 pub type CreateDeviceCallback<'this> =
     dyn for<'arg, 'pnext> FnOnce(CreateDeviceCallbackArgs<'arg, 'pnext, 'this>) + 'this;
 
+/// Creates the instance in place of `vkCreateInstance`.
+pub type InstanceCreator = Box<
+    dyn for<'a> FnOnce(&ash::Entry, &vk::InstanceCreateInfo<'a>) -> Result<vk::Instance, vk::Result>,
+>;
+
+/// Creates the device in place of `vkCreateDevice`.
+pub type DeviceCreator = Box<
+    dyn for<'a> FnOnce(
+        &ash::Instance,
+        vk::PhysicalDevice,
+        &vk::DeviceCreateInfo<'a>,
+    ) -> Result<vk::Device, vk::Result>,
+>;
+
 /// Arguments to the [`CreateInstanceCallback`].
 #[expect(missing_debug_implementations, reason = "TODO?")]
 pub struct CreateInstanceCallbackArgs<'arg, 'pnext, 'this>
@@ -1751,6 +1768,9 @@ where
     pub create_info: &'arg mut vk::InstanceCreateInfo<'pnext>,
     /// Vulkan entry point.
     pub entry: &'arg ash::Entry,
+    /// Makes the instance in place of `vkCreateInstance` (an OpenXR runtime's
+    /// `xrCreateVulkanInstanceKHR`), from the final create info.
+    pub creator: &'arg mut Option<InstanceCreator>,
     /// We need to have `'this` in the struct, so we can declare that all lifetimes coming from
     /// captures in the closure will live longer (and hence satisfy) `'pnext`. However, we
     /// don't actually directly use `'this`
