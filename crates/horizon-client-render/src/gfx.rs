@@ -301,6 +301,7 @@ mod hdr_icc;
 mod hdr_start;
 mod hdr_stats;
 pub(crate) mod hud_coverage;
+mod vertex_streams;
 pub use hdr::{Calibration as HdrCalibration, Output as HdrOutput};
 mod hold;
 pub use hold::WorldHold;
@@ -3324,18 +3325,21 @@ impl Renderer {
             &sprite_constants,
         );
         let instance_attributes = wgpu::vertex_attr_array![5=>Float32x4];
-        let terrain_buffers = [
-            Some(wgpu::VertexBufferLayout {
-                array_stride: std::mem::size_of::<TerrainVertex>() as u64,
-                step_mode: wgpu::VertexStepMode::Vertex,
-                attributes: &TERRAIN_ATTRIBUTES,
-            }),
-            Some(wgpu::VertexBufferLayout {
-                array_stride: 16,
-                step_mode: wgpu::VertexStepMode::Instance,
-                attributes: &instance_attributes,
-            }),
-        ];
+        let split_streams = headset::installed()
+            && adapter.get_info().backend == wgpu::Backend::Vulkan
+            && adapter.get_info().vendor == 0x5143
+            && device.limits().max_vertex_buffers >= 3
+            && !shader_pack
+            && !flat::wanted(&adapter, &device)
+            && std::env::var("HORIZON_QUEST_SPLIT_STREAMS").as_deref() == Ok("1");
+        if headset::installed() {
+            log::info!(
+                "Quest terrain split vertex streams: {split_streams} (requested {}, flat {}, shader pack {shader_pack})",
+                std::env::var("HORIZON_QUEST_SPLIT_STREAMS").as_deref() == Ok("1"),
+                flat::wanted(&adapter, &device)
+            );
+        }
+        let terrain_buffers = vertex_streams::buffers(split_streams, &instance_attributes);
         let alpha_blend = wgpu::BlendState::ALPHA_BLENDING;
         let debug_line_attributes =
             wgpu::vertex_attr_array![0=>Float32x3,1=>Float32x3,2=>Unorm8x4,3=>Float32];
@@ -5160,13 +5164,14 @@ impl Renderer {
         // their opaque quads first, so each pass draws its part in a run or two.
         crate::mesher::group_parts(split_solid_gpu(&adapter.get_info()));
         // Readable as storage where flat draws run: a shader pack's terrain program reads them.
-        let arena = arena::Arena::new(
+        let mut arena = arena::Arena::new(
             &device,
             std::mem::size_of::<TerrainVertex>() as u64,
             1 << 20,
             flat_wanted,
         );
         // Sections as one index list per frame where multi-draw is emulated.
+        arena.set_split(split_streams);
         let mut flat = flat_wanted.then(|| {
             let buffers = [Some(wgpu::VertexBufferLayout {
                 array_stride: std::mem::size_of::<TerrainVertex>() as u64,
@@ -5306,12 +5311,15 @@ impl Renderer {
         // (`draw_frame`). It starts as that pack's, a `shaders/` pack taken to draw
         // terrain: the pack loading keeps it, and only one whose terrain and shadow
         // pass draw none meshes the sections again.
-        let (sorted_indices, translucent_arena) = arena::Arena::translucent_arenas(
+        let (sorted_indices, mut translucent_arena) = arena::Arena::translucent_arenas(
             &device,
             std::mem::size_of::<TerrainVertex>() as u64,
             flat.is_some(),
             translucent_split(translucent_batching, flat.is_some(), shader_pack, false),
         );
+        if let Some(arena) = &mut translucent_arena {
+            arena.set_split(split_streams);
+        }
         if let (Some(flat), Some(arena)) = (&mut flat, &translucent_arena) {
             flat.set_translucent_page_vertices(arena.page_vertices());
         }
@@ -6544,7 +6552,6 @@ impl Renderer {
             }
             id
         });
-        let stride = std::mem::size_of::<TerrainVertex>() as u64;
         if solid_slots > 0 {
             self.arena.write_sources(
                 &self.device,
@@ -6587,12 +6594,7 @@ impl Renderer {
             if !bytes.is_empty() {
                 self.uploaded_bytes += bytes.len() as u64;
                 self.section_copy_bytes += bytes.len() as u64;
-                self.section_uploads.buffer(
-                    encoder,
-                    arena.buffer(part_page),
-                    first * stride,
-                    bytes,
-                );
+                arena.upload(encoder, &mut self.section_uploads, part_page, first, bytes);
             }
         }
         if self.section_copy_bytes >= SECTION_COPY_LIMIT
@@ -6689,6 +6691,14 @@ impl Renderer {
                 ),
             };
             pass.set_vertex_buffer(0, vertices);
+            let vertex_arena = if index_page.is_some() {
+                self.translucent_arena.as_ref().unwrap_or(&self.arena)
+            } else {
+                &self.arena
+            };
+            if let Some(attributes) = vertex_arena.attribute_binding(page) {
+                pass.set_vertex_buffer(2, attributes);
+            }
             if pulled
                 && index_page.is_none()
                 && let Some(group) = self.flat.as_ref().and_then(|f| f.page_group(page))
@@ -7081,6 +7091,9 @@ impl Renderer {
             self.flat.is_some(),
             split,
         );
+        if let Some(arena) = &mut self.translucent_arena {
+            arena.set_split(self.arena.split());
+        }
         if let (Some(flat), Some(arena)) = (&mut self.flat, &self.translucent_arena) {
             flat.set_translucent_page_vertices(arena.page_vertices());
         }
@@ -7536,7 +7549,11 @@ impl Renderer {
             step_mode: wgpu::VertexStepMode::Instance,
             attributes: &instance,
         };
-        let buffers = [Some(vertex), Some(instances)];
+        let buffers = if self.arena.split() {
+            vertex_streams::buffers(true, &instance)
+        } else {
+            vec![Some(vertex), Some(instances)]
+        };
         let flat = self.pack_terrain_flat;
         let sprite_rects = self
             .pack_atlas
@@ -7699,6 +7716,7 @@ impl Renderer {
             .atlas_texture
             .as_ref()
             .map(|t| t.create_view(&Default::default()));
+        let split_streams = self.arena.split();
         let flat = self.pack_terrain_flat;
         let table = (self.flat.as_ref())
             .filter(|_| flat)
@@ -7719,7 +7737,11 @@ impl Renderer {
                 step_mode: wgpu::VertexStepMode::Instance,
                 attributes: &instance,
             };
-            let buffers = [Some(vertex), Some(instances)];
+            let buffers = if split_streams {
+                vertex_streams::buffers(true, &instance)
+            } else {
+                vec![Some(vertex), Some(instances)]
+            };
             let world = pack_post::World {
                 atlas,
                 sprite_rects: &sprite_rects,

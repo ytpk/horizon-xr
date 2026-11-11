@@ -1439,6 +1439,9 @@ impl GpuCulling {
         pass.set_vertex_buffer(1, self.origins.buffer.slice(..));
         for &(page, first, size) in &self.pages {
             pass.set_vertex_buffer(0, arena.buffer(page).slice(..));
+            if let Some(attributes) = arena.attribute_binding(page) {
+                pass.set_vertex_buffer(2, attributes);
+            }
             if let Some(group) = group(page) {
                 pass.set_bind_group(1, group, &[]);
             }

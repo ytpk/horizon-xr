@@ -214,3 +214,12 @@ measured scene was close range.
   several times of day: the right-eye artifact showed only in some views.
 - Keep every Quest change gated and switchable. The flat-screen path must not change.
 - Don't commit Mojang files (`tools/check_public_tree.py`). Commits end with the agent's `Co-Authored-By` line.
+
+
+## Split-stream follow-up (cloud implementation)
+
+The opt-in `HORIZON_QUEST_SPLIT_STREAMS=1` path implements 16+8-byte terrain streams,
+including arena growth/compaction and matching vertex bindings. See
+[implementation, validation and A/B steps](quest-split-vertex-streams.md).
+This was software-tested without Quest access; it is not a new headset measurement.
+The compute probe/culling work was deferred when the maintainer prioritized split streams.
