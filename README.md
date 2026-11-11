@@ -58,6 +58,15 @@ terrain and far-detail tiles, so the world may briefly reload. The setting is sa
 Shader packs use normal transparent water even when the preference is enabled.
 Actual Quest FPS improvement still needs testing.
 
+## Experimental foveated multiview
+
+**Active foveation disables standard multiview.** To try both, enable Multiview and the
+separate **Experimental multiview + foveation** option in the room's graphics settings.
+Restart after selecting a foveation level. The experiment attempts direct rendering into
+a native two-layer OpenXR foveated swapchain, with per-eye fallback when unavailable.
+It is off by default and may use more memory. Actual Quest compatibility and FPS are
+unverified; see [details and device checks](docs/quest-foveated-multiview.md).
+
 ## Build the APK
 
 The complete build is currently supported on **Linux x86-64**, including **Ubuntu in WSL2 on Windows**.

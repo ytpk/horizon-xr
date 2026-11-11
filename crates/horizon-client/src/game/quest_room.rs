@@ -285,6 +285,7 @@ impl Room {
                     | Event::Foveation
                     | Event::SuperResolution
                     | Event::OpaqueWater
+                    | Event::FoveatedMultiview
             )
         ) {
             let settings = Arc::make_mut(&mut self.settings.vr);
@@ -293,6 +294,12 @@ impl Room {
                     settings.set_bool(
                         "horizonDynamicResolution",
                         !settings.bool("horizonDynamicResolution"),
+                    );
+                }
+                Some(Event::FoveatedMultiview) => {
+                    settings.set_bool(
+                        "horizonFoveatedMultiview",
+                        !settings.bool("horizonFoveatedMultiview"),
                     );
                 }
                 Some(Event::OpaqueWater) => {

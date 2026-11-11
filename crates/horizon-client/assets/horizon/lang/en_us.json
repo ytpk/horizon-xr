@@ -2543,10 +2543,17 @@
   "horizon.quest.room.graphics.ffr.high": "Fixed foveation: HIGH",
   "horizon.quest.room.graphics.dynamic.note": "Adaptive: up to 15% lower per side, only with GPU pressure.",
   "horizon.quest.room.graphics.mqsr.note": "MQSR is a runtime hint; render size stays your choice.",
-  "horizon.quest.room.graphics.ffr.note": "Foveation needs an app restart; multiview falls back.",
+  "horizon.quest.room.graphics.ffr.note": "Restart for foveation. Standard multiview is disabled; combined mode is experimental.",
   "horizon.quest.room.auth.live_provider": "Microsoft Live: Minecraft for Nintendo Switch (Prismarine-compatible sign-in).",
 "horizon.vr.opaque_water": "Opaque Water",
 "horizon.vr.opaque_water.tooltip": "Draw water without transparency to reduce sorting and blending. Rebuilds terrain; unavailable with shader packs.",
 "horizon.quest.room.graphics.water.on": "Opaque water: ON",
-"horizon.quest.room.graphics.water.off": "Opaque water: OFF"
+"horizon.quest.room.graphics.water.off": "Opaque water: OFF",
+"horizon.vr.foveation.tooltip": "Fixed foveation requires an app restart and disables standard multiview. The experimental Foveated Multiview option attempts a native stereo swapchain; unsupported scenes or runtimes use separate eye passes.",
+"horizon.vr.foveated_multiview": "Experimental Foveated Multiview",
+"horizon.vr.foveated_multiview.tooltip": "Try multiview directly into a two-layer OpenXR foveated swapchain. Requires Multiview ON and active foveation. Off by default; may require more memory. Runtime/pipeline refusal falls back to separate eyes. Quest validation required.",
+"horizon.quest.room.graphics.foveated_multiview.on": "Experimental multiview + foveation: ON",
+"horizon.quest.room.graphics.foveated_multiview.off": "Experimental multiview + foveation: OFF",
+"horizon.vr.multiview": "Multiview",
+"horizon.vr.multiview.tooltip": "Render both eyes in one world pass when compatible. Active foveation disables this unless Experimental Foveated Multiview succeeds."
 }

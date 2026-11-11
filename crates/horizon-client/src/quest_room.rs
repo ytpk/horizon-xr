@@ -103,6 +103,8 @@ pub const KEYS: &[&str] = &[
     "graphics.dynamic.note",
     "graphics.mqsr.note",
     "graphics.ffr.note",
+    "graphics.foveated_multiview.on",
+    "graphics.foveated_multiview.off",
     "graphics.unknown",
     "graphics.multiview.on",
     "graphics.water.on",
@@ -131,6 +133,7 @@ pub enum Event {
     GraphicsExtras(bool),
     DynamicResolution,
     Foveation,
+    FoveatedMultiview,
     SuperResolution,
     OpaqueWater,
 }
@@ -1096,8 +1099,8 @@ impl Canvas<'_, '_> {
                 "graphics.dynamic.off"
             }),
             MARGIN,
-            215.0,
-            54.0,
+            205.0,
+            48.0,
             Look::Secondary,
         );
         let supported = headset_display::snapshot().is_some_and(|i| i.super_resolution_supported);
@@ -1111,8 +1114,8 @@ impl Canvas<'_, '_> {
                 "graphics.mqsr.off"
             }),
             MARGIN,
-            285.0,
-            54.0,
+            265.0,
+            48.0,
             if supported {
                 Look::Secondary
             } else {
@@ -1129,8 +1132,8 @@ impl Canvas<'_, '_> {
             Event::Foveation,
             &t(ffr),
             MARGIN,
-            355.0,
-            54.0,
+            325.0,
+            48.0,
             Look::Secondary,
         );
         self.fit(
@@ -1141,14 +1144,26 @@ impl Canvas<'_, '_> {
                 "graphics.water.off"
             }),
             MARGIN,
-            425.0,
-            54.0,
+            385.0,
+            48.0,
+            Look::Secondary,
+        );
+        self.fit(
+            Event::FoveatedMultiview,
+            &t(if settings.bool("horizonFoveatedMultiview") {
+                "graphics.foveated_multiview.on"
+            } else {
+                "graphics.foveated_multiview.off"
+            }),
+            MARGIN,
+            445.0,
+            48.0,
             Look::Secondary,
         );
         for (y, key) in [
-            (500.0, "graphics.dynamic.note"),
-            (540.0, "graphics.mqsr.note"),
-            (580.0, "graphics.ffr.note"),
+            (520.0, "graphics.dynamic.note"),
+            (555.0, "graphics.mqsr.note"),
+            (590.0, "graphics.ffr.note"),
         ] {
             self.text(
                 Face::Regular,
@@ -1164,8 +1179,8 @@ impl Canvas<'_, '_> {
             Event::GraphicsExtras(false),
             &t("settings.back"),
             MARGIN,
-            630.0,
-            54.0,
+            645.0,
+            48.0,
             Look::Secondary,
         );
     }

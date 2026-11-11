@@ -79,3 +79,7 @@ index restoration. Eye view matrices are also computed once per frame and reused
 rendering paths. Renderer Clippy (`--all-targets -- -D warnings`), formatting, layer and
 public-tree checks passed. Headset CPU time/FPS and the actual per-eye integration still
 require device testing; the GPU fixtures are not a full OpenXR runtime test.
+
+
+Follow-up: [experimental native foveated multiview](quest-foveated-multiview.md)
+adds an opt-in native stereo swapchain path; the default FFR/multiview exclusion remains.

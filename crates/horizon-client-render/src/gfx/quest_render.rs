@@ -109,7 +109,10 @@ impl Renderer {
                     .device
                     .features()
                     .contains(wgpu::Features::TIMESTAMP_QUERY_INSIDE_ENCODERS))
-            && horizon_client_input::headset_display::snapshot().is_none_or(|info| !info.foveated)
+            && horizon_client_input::headset_display::snapshot().is_none_or(|info| {
+                !info.foveated
+                    || horizon_client_input::headset::settings().bool("horizonFoveatedMultiview")
+            })
             && self.hdr.is_none()
             && self.custom_sky_draws.is_empty()
             && frame.world_primitives.is_empty()
@@ -148,8 +151,24 @@ impl Renderer {
             true => headset::Layers::Screen,
         };
         let body_yaw = horizon_client_input::headset::body_yaw();
-        let targets =
-            headset::with(|h| h.begin(&self.device, layers)).unwrap_or(headset::Targets::Skip);
+        // A native array is usable only by the multiview path. Probe the exact pipeline
+        // set before acquiring it; a refused request still returns the normal eye pair.
+        let foveated =
+            horizon_client_input::headset_display::snapshot().is_some_and(|info| info.foveated);
+        let request_array = foveated
+            && horizon_client_input::headset_display::snapshot()
+                .is_some_and(|info| info.foveated_stereo_capable)
+            && layers != headset::Layers::Flat
+            && self.stereo_compatible(frame)
+            && self.swap_stereo_pipelines();
+        if request_array {
+            assert!(self.swap_stereo_pipelines());
+        }
+        let targets = headset::with(|h| {
+            h.request_stereo_array(request_array);
+            h.begin(&self.device, layers)
+        })
+        .unwrap_or(headset::Targets::Skip);
         let drawn = match targets {
             headset::Targets::Skip => {
                 vr_profile::frame_skipped();
@@ -276,20 +295,29 @@ impl Renderer {
                 self.headset_cull = Some(cull);
                 let mut drawn = Ok(false);
                 let masks = headset::with(|h| h.hidden_areas()).flatten();
-                let stereo = self.stereo_compatible(frame) && self.swap_stereo_pipelines();
+                let native_array = eyes[0].0.depth_or_array_layers() == 2;
+                let stereo = (!foveated || native_array)
+                    && self.stereo_compatible(frame)
+                    && self.swap_stereo_pipelines();
                 if stereo {
                     self.stereo_views = Some(eye_views);
                     self.headset_eye = Some((self.stereo_views.unwrap()[0], cull));
-                    if self
-                        .stereo_targets
-                        .as_ref()
-                        .is_none_or(|t| !t.fits(size, self.config.format))
-                    {
+                    if self.stereo_targets.as_ref().is_none_or(|t| {
+                        !t.fits(size, self.config.format) || t.native != native_array
+                    }) {
                         let validation =
                             self.device.push_error_scope(wgpu::ErrorFilter::Validation);
                         let memory = self.device.push_error_scope(wgpu::ErrorFilter::OutOfMemory);
-                        let target =
-                            multiview::Targets::new(&self.device, size, self.config.format);
+                        let target = if native_array {
+                            multiview::Targets::with_color(
+                                &self.device,
+                                size,
+                                self.config.format,
+                                Some(&eyes[0].0),
+                            )
+                        } else {
+                            multiview::Targets::new(&self.device, size, self.config.format)
+                        };
                         let error = pollster::block_on(memory.pop())
                             .or(pollster::block_on(validation.pop()));
                         if let Some(error) = error {
@@ -302,9 +330,13 @@ impl Renderer {
                             self.stereo_targets = Some(target);
                         }
                     }
+                    if native_array && let Some(target) = &mut self.stereo_targets {
+                        target.color = eyes[0].0.clone();
+                    }
                     if let Some(target) = &self.stereo_targets {
                         self.offscreen = Some(target.color.clone());
-                        self.stereo_destinations = Some([eyes[0].0.clone(), eyes[1].0.clone()]);
+                        self.stereo_destinations =
+                            (!native_array).then(|| [eyes[0].0.clone(), eyes[1].0.clone()]);
                         let drawing = Instant::now();
                         drawn = self.render_flat(frame);
                         self.stereo_destinations = None;
@@ -317,10 +349,19 @@ impl Renderer {
                     assert!(self.swap_stereo_pipelines());
                 }
                 let stereo_drawn = stereo && self.stereo_targets.is_some();
+                if native_array && (!stereo_drawn || drawn.is_err()) {
+                    self.stereo_failed = true;
+                    headset::with(|h| h.discard_frame());
+                    log::warn!(
+                        "Quest native foveated multiview frame discarded; using per-eye fallback next frame"
+                    );
+                }
                 if self.stereo_status != Some(stereo_drawn) || self.stereo_sample_size != size {
                     log::info!(
                         "Quest world rendering: {}",
-                        if stereo_drawn {
+                        if stereo_drawn && native_array {
+                            "single-pass multiview (native foveated array)"
+                        } else if stereo_drawn {
                             "single-pass multiview (2 layers)"
                         } else {
                             "separate eye passes (disabled or compatibility fallback)"
@@ -331,7 +372,11 @@ impl Renderer {
                     self.stereo_sample_size = size;
                     horizon_client_input::headset_display::clear_gpu_frame();
                 }
-                for (eye, (image, pose)) in eyes.iter().enumerate().filter(|_| !stereo_drawn) {
+                for (eye, (image, pose)) in eyes
+                    .iter()
+                    .enumerate()
+                    .filter(|_| !stereo_drawn && !native_array)
+                {
                     self.eye_mask = masks
                         .as_ref()
                         .and_then(|m| vis_mask::EyeMask::new(&m[eye], pose.tangents));

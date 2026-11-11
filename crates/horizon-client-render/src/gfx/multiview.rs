@@ -104,10 +104,19 @@ pub fn shader(source: &str) -> String {
 
 pub struct Targets {
     pub color: wgpu::Texture,
+    pub native: bool,
     pub depth: wgpu::TextureView,
 }
 impl Targets {
     pub fn new(device: &wgpu::Device, size: [u32; 2], format: wgpu::TextureFormat) -> Self {
+        Self::with_color(device, size, format, None)
+    }
+    pub fn with_color(
+        device: &wgpu::Device,
+        size: [u32; 2],
+        format: wgpu::TextureFormat,
+        color: Option<&wgpu::Texture>,
+    ) -> Self {
         let make = |label, format, usage| {
             device.create_texture(&wgpu::TextureDescriptor {
                 label: Some(label),
@@ -125,11 +134,14 @@ impl Targets {
             })
         };
         Self {
-            color: make(
-                "Quest stereo color",
-                format,
-                wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
-            ),
+            native: color.is_some(),
+            color: color.cloned().unwrap_or_else(|| {
+                make(
+                    "Quest stereo color",
+                    format,
+                    wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+                )
+            }),
             depth: make(
                 "Quest stereo depth",
                 wgpu::TextureFormat::Depth32Float,
@@ -198,6 +210,14 @@ mod tests {
     #[test]
     #[ignore = "requires a Vulkan adapter with MULTIVIEW; also runs on Mesa lavapipe"]
     fn stereo_pass_projects_and_copies_each_eye_independently() {
+        check_stereo_target(false);
+    }
+    #[test]
+    #[ignore = "requires a Vulkan adapter with MULTIVIEW; also runs on Mesa lavapipe"]
+    fn stereo_pass_draws_directly_into_an_external_color_array() {
+        check_stereo_target(true);
+    }
+    fn check_stereo_target(native: bool) {
         use wgpu::util::DeviceExt;
         let instance = super::super::test_gpu::instance();
         let adapter = pollster::block_on(instance.request_adapter(&Default::default())).unwrap();
@@ -298,7 +318,35 @@ mod tests {
             contents: bytemuck::cast_slice(&vertices),
             usage: wgpu::BufferUsages::VERTEX,
         });
-        let target = Targets::new(&device, [32, 32], wgpu::TextureFormat::Rgba8Unorm);
+        let external = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("mock OpenXR stereo array"),
+            size: wgpu::Extent3d {
+                width: 32,
+                height: 32,
+                depth_or_array_layers: 2,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let target = if native {
+            let target = Targets::with_color(
+                &device,
+                [32, 32],
+                wgpu::TextureFormat::Rgba8Unorm,
+                Some(&external),
+            );
+            assert_eq!(
+                target.color, external,
+                "render directly into the supplied image"
+            );
+            target
+        } else {
+            Targets::new(&device, [32, 32], wgpu::TextureFormat::Rgba8Unorm)
+        };
         let eyes: [_; 2] = std::array::from_fn(|_| {
             device.create_texture(&wgpu::TextureDescriptor {
                 label: None,
@@ -343,10 +391,24 @@ mod tests {
             pass.set_vertex_buffer(0, vertex.slice(..));
             pass.draw(0..3, 0..1);
         }
-        target.copy(&mut encoder, [&eyes[0], &eyes[1]]);
+        if !native {
+            target.copy(&mut encoder, [&eyes[0], &eyes[1]]);
+        }
         for (i, eye) in eyes.iter().enumerate() {
+            let source = if native {
+                wgpu::TexelCopyTextureInfo {
+                    texture: &external,
+                    origin: wgpu::Origin3d {
+                        z: i as u32,
+                        ..Default::default()
+                    },
+                    ..external.as_image_copy()
+                }
+            } else {
+                eye.as_image_copy()
+            };
             encoder.copy_texture_to_buffer(
-                eye.as_image_copy(),
+                source,
                 wgpu::TexelCopyBufferInfo {
                     buffer: &read,
                     layout: wgpu::TexelCopyBufferLayout {
