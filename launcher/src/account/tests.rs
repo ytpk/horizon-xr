@@ -207,6 +207,7 @@ fn serve(mock: Arc<Mutex<Mock>>) -> Endpoints {
         xbox_user: format!("{base}/xbl"),
         xsts: format!("{base}/xsts"),
         minecraft: format!("{base}/mc"),
+        ..Endpoints::azure()
     }
 }
 
@@ -326,6 +327,7 @@ fn notch() -> Account {
 fn secrets(token: &str, owns: bool) -> Secrets {
     Secrets {
         refresh_token: "ms-refresh-1".into(),
+        client_id: None,
         sign_in_required: false,
         minecraft_token: token.into(),
         minecraft_expires_at: now() + 7200,
@@ -341,6 +343,7 @@ fn offline() -> Endpoints {
         xbox_user: "http://127.0.0.1:9/xbl".into(),
         xsts: "http://127.0.0.1:9/xsts".into(),
         minecraft: "http://127.0.0.1:9/mc".into(),
+        ..Endpoints::azure()
     }
 }
 
@@ -376,6 +379,7 @@ fn refresh_only_when_the_token_runs_out() {
     assert!(renewed_account.skin.is_some());
     let revoked = Secrets {
         refresh_token: "revoked".into(),
+        client_id: None,
         minecraft_expires_at: 0,
         ..kept
     };
@@ -818,6 +822,7 @@ fn accounts_keep_secrets_in_the_store_only() {
     };
     let secrets = Secrets {
         refresh_token: "r".into(),
+        client_id: None,
         sign_in_required: false,
         minecraft_token: "mc-secret".into(),
         minecraft_expires_at: 1,
@@ -1120,6 +1125,7 @@ fn session_files_are_private_and_complete() {
     };
     let secrets = Secrets {
         refresh_token: "r".into(),
+        client_id: None,
         sign_in_required: false,
         minecraft_token: "mc-token".into(),
         minecraft_expires_at: 1,
@@ -2058,6 +2064,7 @@ fn a_running_game_gets_a_renewed_session_only_when_ready() {
         &store,
         &Secrets {
             refresh_token: "revoked".into(),
+            client_id: None,
             ..secrets("old-minecraft", true)
         },
     );
@@ -2076,6 +2083,7 @@ fn revoked_refresh_is_remembered_until_a_successful_sign_in() {
         &store,
         &Secrets {
             refresh_token: "revoked".into(),
+            client_id: None,
             ..secrets("old-minecraft", true)
         },
     );
@@ -2405,6 +2413,7 @@ fn splitscreen_stops_renewing_other_accounts_once_out_of_time() {
         xbox_user: url.clone(),
         xsts: url.clone(),
         minecraft: url,
+        ..Endpoints::azure()
     };
     let store = MemoryStore::default();
     let mut accounts = signed_in(&store, &secrets("mc-token", true));

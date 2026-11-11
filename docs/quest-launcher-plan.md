@@ -1,5 +1,10 @@
 # Quest on-headset launcher: analysis and plan
 
+> Update 2026-11-11: the client-ID requirements below describe the original Azure-only plan.
+> The fork now also provides an experimental native Prismarine-compatible Live flow;
+> see [current behavior and validation](quest-live-auth-render-stability.md). Horizon's ID remains excluded.
+
+
 Status: phases 0 to 6 are done (2026-11-08; section 14 has phases 4 to 6, what ran and the headset
 checklist); phases 7 and 8 need a person. Earlier: phases 0 to 3 are done (2026-11-08): the JVM runs on the headset, and sign-in, download
 and prepare exist as crates and were run end to end inside the APK on a Quest 3S. Section 13 has

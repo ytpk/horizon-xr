@@ -10,7 +10,7 @@ with a port of the [Visor](https://github.com/VisorModStudio/Visor) VR mod. It r
 
 ## Install
 
-Published APK releases are currently hidden while this fork obtains its own Microsoft application registration.
+Published APK releases are currently hidden. Source builds include the experimental sign-in modes described below.
 Build an APK using the instructions below, enable developer mode on the headset, then install it with
 [SideQuest](https://sidequestvr.com/) or:
 
@@ -24,20 +24,27 @@ an existing installation. Back up your worlds before uninstalling anything.
 
 ## Microsoft sign-in
 
-**Building the app yourself does not provide a Microsoft client ID or bypass game ownership checks.**
-This fork must use its own Azure application registration and the required
-[Minecraft App ID approval](https://aka.ms/mce-reviewappid). Horizon's application client ID must not be used.
-`HORIZON_MSA_CLIENT_ID` is the configuration variable's name, not an ID supplied by this repository.
-Do not put account passwords, personal access tokens or client secrets in it.
+Microsoft sign-in has two modes, both followed by the Minecraft ownership and profile checks:
 
-Using another launcher's open-source sign-in code does not itself grant permission to use that
-launcher's Microsoft application registration. Signing in to Prism, Legacy or Pojav does not
-currently sign this separate APK in; external-launcher session handoff is not implemented.
+- **No `HORIZON_MSA_CLIENT_ID` configured:** a native Rust adaptation of
+  [prismarine-auth](https://github.com/PrismarineJS/prismarine-auth)'s default Live flow.
+  The browser identifies its application as **Minecraft for Nintendo Switch**. This public client ID
+  belongs to Microsoft's Minecraft title; it is **not** PrismarineJS's or this fork's own registration.
+  No Node.js runtime is included. This compatibility mode is experimental and has not been verified
+  with a real account on Quest; availability depends on Microsoft's services.
+- **Your own approved `HORIZON_MSA_CLIENT_ID`:** Azure OAuth device-code sign-in, as before.
+  Register your application and obtain the required [Minecraft App ID approval](https://aka.ms/mce-reviewappid).
+  Horizon's application client ID must not be used. An explicitly **empty** variable disables sign-in.
 
-Without a configured application client ID, the APK can be built, but Microsoft sign-in is unavailable.
-With a suitable ID, sign in from the launcher room using the displayed code or QR code. Your account
-must own Minecraft: Java Edition. Game files are downloaded from Mojang and prepared on the headset;
-allow at least 3 GB of free space. They are not included in the APK or this repository.
+`HORIZON_MSA_CLIENT_ID` takes an application ID, never an account password, personal access token
+or client secret. Changing applications may require signing in again: credentials issued for one
+application are not silently refreshed through another. Signing into another installed launcher does
+not automatically sign this APK in; external session handoff is not implemented.
+
+**Self-building does not disable the ownership gate.** Sign in from the room using the displayed
+Microsoft code or QR code; the account must own **Minecraft: Java Edition**. Game files are downloaded
+from Mojang and prepared on the headset (at least 3 GB free); they are absent from the APK and repository.
+See [the implementation and validation notes](docs/quest-live-auth-render-stability.md).
 
 ## Build the APK
 
@@ -89,7 +96,7 @@ of GB of free space. Subsequent builds reuse Cargo's build cache and downloaded 
 
    Edit `.quest-build.env`: set `HORIZON_MINECRAFT_DIR` and `HORIZON_SERVER_JAR` to your local files,
    and set SDK/JDK paths if necessary. Set `HORIZON_MSA_CLIENT_ID` only if you have your own suitable
-   application registration. The local configuration is ignored by Git. All paths in it must use
+   application registration; leave it unset for the experimental Live default. The local configuration is ignored by Git. All paths in it must use
    Linux syntax; quote paths containing spaces.
 
 ### Build with one command
@@ -151,9 +158,10 @@ License summary: the Horizon code is MIT (`LICENSE`); `crates/horizon-visor` and
 на Windows — двойной щелчок по `build-apk.cmd` через заранее настроенный Ubuntu/WSL2.
 Инструкция выше описывает Rust, Linux JDK 25, Android SDK/NDK и локальный `.quest-build.env`.
 Результат: `target/quest/horizon-quest.apk`, установка через SideQuest или `adb install -r`.
-Для входа нужен собственный Azure application client ID с необходимым одобрением Minecraft;
-ID Horizon использовать нельзя. Самосборка не отключает проверку покупки игры.
-Без настроенного ID APK собирается, но вход Microsoft недоступен.
+Без указанного ID используется экспериментальный Live-вход по схеме prismarine-auth;
+в браузере приложение называется Minecraft для Nintendo Switch. Это публичный ID приложения Microsoft,
+а не регистрация PrismarineJS или форка. Собственный одобренный Azure ID можно указать отдельно;
+пустое значение отключает вход. ID Horizon использовать нельзя. Проверка покупки Java Edition сохраняется.
 Лицензии: Horizon MIT, Visor MPL-2.0, Vivecraft LGPL-3.0, OpenJDK GPLv2 + Classpath Exception; подробности в `THIRD_PARTY_NOTICES.md`.
 Не одобрено Mojang, Microsoft или Meta.
 

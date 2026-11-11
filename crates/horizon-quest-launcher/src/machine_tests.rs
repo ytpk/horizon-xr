@@ -27,6 +27,7 @@ type Calls = Arc<Mutex<Vec<String>>>;
 fn secrets(owns: bool) -> Secrets {
     Secrets {
         refresh_token: "refresh".into(),
+        client_id: None,
         sign_in_required: false,
         minecraft_token: "mc-token".into(),
         minecraft_expires_at: horizon_account::now() + 86_400,
@@ -97,6 +98,7 @@ impl Accounts for MockAccounts {
             interval: 1,
             expires_at: horizon_account::now() + 900,
             device_code: "secret-device-code".into(),
+            live_cookies: Vec::new(),
         })
     }
     fn wait(&self, _: &DeviceCode, cancelled: &dyn Fn() -> bool) -> Result<MsTokens, String> {

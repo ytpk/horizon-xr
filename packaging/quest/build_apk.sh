@@ -13,8 +13,8 @@
 #                                              # beside the real install (for tests on a headset)
 #
 #   HORIZON_MSA_CLIENT_ID=<id> packaging/quest/build_apk.sh  # your own approved Microsoft application
-#                                              # client ID, built in; without
-#                                              # it the room says sign-in is not configured
+#                                              # client ID for Azure OAuth; unset uses the
+#                                              # Prismarine-compatible Live default (see README)
 #   QUEST_DEV_NO_GATE=1 packaging/quest/build_apk.sh  # a DEVELOPER build that can skip the ownership
 #                                              # gate (launch.txt line HORIZON_QUEST_NO_GATE=1) to try
 #                                              # the download and prepare with no account. Never ship it.

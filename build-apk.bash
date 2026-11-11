@@ -55,8 +55,10 @@ if [[ -z ${PLATFORM_JAR:-} ]]; then
 fi
 [[ -f $PLATFORM_JAR ]] || fail "install platforms;android-34 or set PLATFORM_JAR."
 export BUILD_TOOLS PLATFORM_JAR
-if [[ -z ${HORIZON_MSA_CLIENT_ID:-} ]]; then
-    echo "No Microsoft application client ID configured: the APK will build, but sign-in will be unavailable."
+if [[ ! -v HORIZON_MSA_CLIENT_ID ]]; then
+    echo "Default sign-in: experimental Prismarine-compatible Microsoft Live (Minecraft for Nintendo Switch application)."
+elif [[ -z $HORIZON_MSA_CLIENT_ID ]]; then
+    echo "Microsoft sign-in explicitly disabled by an empty application client ID."
 fi
 if [[ ${1:-} == --check ]]; then
     echo "Build tool checks passed. Minecraft files, network downloads and APK compilation were not tested."

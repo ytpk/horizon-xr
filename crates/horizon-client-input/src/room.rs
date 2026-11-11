@@ -55,6 +55,8 @@ pub struct News {
 #[derive(Clone, Debug, PartialEq)]
 pub struct RoomModel {
     pub page: Page,
+    /// The browser identifies the default Live provider as Minecraft for Nintendo Switch.
+    pub prismarine_live: bool,
     /// The second stage: the sounds.
     pub sounds_stage: bool,
     pub account: Option<String>,
@@ -86,6 +88,7 @@ impl Default for RoomModel {
     fn default() -> Self {
         Self {
             page: Page::NoAccount,
+            prismarine_live: false,
             sounds_stage: false,
             account: None,
             head: None,

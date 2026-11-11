@@ -194,6 +194,8 @@ impl RoomHost for Bridge {
         let v = self.launcher.view();
         let sounds_stage = v.stage == Stage::Sounds;
         RoomModel {
+            prismarine_live: horizon_account::client_id().as_deref()
+                == Some(horizon_account::PRISMARINE_CLIENT_ID),
             page: match v.step {
                 Step::NoAccount => Page::NoAccount,
                 Step::LoginCode => Page::SignIn,

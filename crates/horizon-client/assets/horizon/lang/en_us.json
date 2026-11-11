@@ -2543,5 +2543,6 @@
   "horizon.quest.room.graphics.ffr.high": "Fixed foveation: HIGH",
   "horizon.quest.room.graphics.dynamic.note": "Adaptive: up to 15% lower per side, only with GPU pressure.",
   "horizon.quest.room.graphics.mqsr.note": "MQSR is a runtime hint; render size stays your choice.",
-  "horizon.quest.room.graphics.ffr.note": "Foveation needs an app restart; multiview falls back."
+  "horizon.quest.room.graphics.ffr.note": "Foveation needs an app restart; multiview falls back.",
+  "horizon.quest.room.auth.live_provider": "Microsoft Live: Minecraft for Nintendo Switch (Prismarine-compatible sign-in)."
 }

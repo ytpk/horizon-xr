@@ -465,3 +465,33 @@ state of Starling's `crates/horizon-client-render/src/touch.rs` at the same comm
 
 `crates/horizon-client-render/src/android_runtime.rs` and `android_runtime/tests/` are adapted from the
 input part of Starling's `crates/horizon-client-render/src/android_runtime.rs` at the same commit.
+
+## prismarine-auth
+
+The native Live/Xbox proof-of-possession flow in `crates/horizon-account/src/prismarine.rs`
+is adapted from [PrismarineJS/prismarine-auth](https://github.com/PrismarineJS/prismarine-auth),
+commit `a7f4b0b8f79b7526496c99a4794c1ecc1a36dd51`. No Node.js runtime is bundled.
+
+```text
+MIT License
+
+Copyright (c) 2020 PrismarineJS
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+```

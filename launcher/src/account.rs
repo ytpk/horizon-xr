@@ -10,8 +10,8 @@
 //! Minecraft: Java Edition, as other launchers do, and the game plays as the selected account.
 //! The game binary itself, its harnesses and the servers don't go through the launcher's gate.
 //!
-//! The Azure app (client ID) is Horizon's own and is configuration: `HORIZON_MSA_CLIENT_ID` at
-//! build time, or at run time to override it. Without one, sign-in says it is not configured.
+//! Sign-in configuration is shared with the Quest account crate: an unset client ID selects
+//! experimental Live sign-in; a custom `HORIZON_MSA_CLIENT_ID` selects Azure, and empty disables it.
 pub mod session;
 
 use serde_json::json;
@@ -26,7 +26,7 @@ pub const SERVICE: &str = "dev.playhorizon.launcher";
 // the Quest uses too; the launcher adds its keychains, accounts.json and the game hand-off below.
 pub use horizon_account::*;
 #[cfg(test)]
-use horizon_account::{SEALED_V2 as SEALED, file_key as file_key_v1};
+use horizon_account::{file_key as file_key_v1, SEALED_V2 as SEALED};
 
 /// Registers the launcher's user agent and proxy with the shared sign-in code. Call once at start.
 pub fn init_transport() {
@@ -156,7 +156,6 @@ impl SecretStore for Bounded {
         self.keyring.operations()
     }
 }
-
 
 /// The Secret Service (GNOME Keyring, KWallet) through oo7, as gpui itself uses it.
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]

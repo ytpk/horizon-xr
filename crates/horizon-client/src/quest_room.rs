@@ -15,6 +15,7 @@ use horizon_client_input::room::{Page, RoomAction, RoomModel};
 /// Every language key the room draws (a test reads each in `en_us` and `ru_ru`).
 pub const KEYS: &[&str] = &[
     "sign_in",
+    "auth.live_provider",
     "no_account.title",
     "no_account.body",
     "no_account.eula",
@@ -372,7 +373,7 @@ impl Canvas<'_, '_> {
             color::text(),
             &t("no_account.title"),
         );
-        let y = self.paragraph(
+        let mut y = self.paragraph(
             Face::Regular,
             BODY,
             BODY_LINE,
@@ -382,6 +383,18 @@ impl Canvas<'_, '_> {
             color::muted(),
             &t("no_account.body"),
         );
+        if model.prismarine_live {
+            y = self.paragraph(
+                Face::Regular,
+                SMALL,
+                SMALL_LINE,
+                MARGIN,
+                y + 16.0,
+                (w - 2.0 * MARGIN).min(820.0),
+                color::muted(),
+                &t("auth.live_provider"),
+            );
+        }
         self.fit(
             Event::Action(RoomAction::SignIn),
             &t("sign_in"),
@@ -424,6 +437,17 @@ impl Canvas<'_, '_> {
             color::text(),
             &t("code.title"),
         );
+        if model.prismarine_live {
+            self.text(
+                Face::Regular,
+                SMALL,
+                SMALL_LINE,
+                MARGIN,
+                180.0,
+                color::muted(),
+                &t("auth.live_provider"),
+            );
+        }
         let Some(code) = &model.code else {
             self.text(
                 Face::Regular,

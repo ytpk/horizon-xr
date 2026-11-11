@@ -3,14 +3,17 @@
 //! renewal, and where the secrets are kept ([`SecretStore`]). No UI, no keychain backends (the
 //! launcher adds those), and no tokens in logs, errors or `Debug` output.
 //!
-//! The Azure app (client ID) is configuration: `HORIZON_MSA_CLIENT_ID` at build time, or at run
-//! time to override it (docs/microsoft-account.md).
+//! `HORIZON_MSA_CLIENT_ID` at run time overrides the build-time configuration. An unset ID
+//! selects experimental Prismarine-compatible Live sign-in; a custom ID selects Azure, and
+//! an explicitly empty value disables sign-in (docs/microsoft-account.md).
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+mod prismarine;
+pub use prismarine::DEFAULT_CLIENT_ID as PRISMARINE_CLIENT_ID;
 mod store;
 pub use store::*;
 
@@ -87,19 +90,31 @@ pub const SIGN_IN_AGAIN: &str = "Your Microsoft sign-in expired. Sign in again."
 /// The Minecraft token is renewed when it has less than this left.
 pub const RENEW_BEFORE: u64 = 3600;
 
-/// The configured Azure app, if any: the run-time variable wins over the build-time one, and an
-/// empty value means none.
+/// The configured app: run-time overrides build-time; an empty value disables sign-in.
+/// When neither is set, use prismarine-auth's public Minecraft Switch Live title.
 pub fn client_id() -> Option<String> {
     std::env::var("HORIZON_MSA_CLIENT_ID")
         .ok()
         .or_else(|| option_env!("HORIZON_MSA_CLIENT_ID").map(str::to_owned))
+        .or_else(|| Some(PRISMARINE_CLIENT_ID.to_owned()))
         .map(|id| id.trim().to_owned())
         .filter(|id| !id.is_empty())
+}
+
+/// Microsoft application protocol; cached refresh credentials are bound to their client ID.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MicrosoftFlow {
+    Azure,
+    PrismarineLive,
 }
 
 /// Where the requests go: the real services, or a mock in tests.
 #[derive(Clone, Debug)]
 pub struct Endpoints {
+    pub flow: MicrosoftFlow,
+    pub client_id: Option<String>,
+    pub xbox_device: String,
+    pub xbox_title: String,
     /// The OAuth 2.0 v2 endpoints for personal accounts (`…/devicecode`, `…/token`).
     pub microsoft: String,
     pub xbox_user: String,
@@ -110,6 +125,20 @@ pub struct Endpoints {
 
 impl Endpoints {
     pub fn live() -> Self {
+        let mut ep = Self::azure();
+        ep.client_id = client_id();
+        if ep.client_id.as_deref() == Some(PRISMARINE_CLIENT_ID) {
+            ep.flow = MicrosoftFlow::PrismarineLive;
+            ep.microsoft = std::env::var("HORIZON_MSA_MICROSOFT_ENDPOINT")
+                .ok()
+                .filter(|_| cfg!(debug_assertions))
+                .unwrap_or_else(|| "https://login.live.com".into());
+        }
+        ep
+    }
+
+    /// Azure OAuth v2 endpoints, also a base for isolated service fixtures.
+    pub fn azure() -> Self {
         // Development builds only: `HORIZON_MSA_MICROSOFT_ENDPOINT` points the device-code and
         // token requests at a local mock, to see and screenshot the sign-in panel.
         let microsoft = std::env::var("HORIZON_MSA_MICROSOFT_ENDPOINT")
@@ -117,6 +146,10 @@ impl Endpoints {
             .filter(|_| cfg!(debug_assertions))
             .unwrap_or_else(|| "https://login.microsoftonline.com/consumers/oauth2/v2.0".into());
         Self {
+            flow: MicrosoftFlow::Azure,
+            client_id: None,
+            xbox_device: "https://device.auth.xboxlive.com/device/authenticate".into(),
+            xbox_title: "https://title.auth.xboxlive.com/title/authenticate".into(),
             microsoft,
             xbox_user: "https://user.auth.xboxlive.com/user/authenticate".into(),
             xsts: "https://xsts.auth.xboxlive.com/xsts/authorize".into(),
@@ -190,6 +223,8 @@ pub struct DeviceCode {
     pub interval: u64,
     pub expires_at: u64,
     pub device_code: String,
+    /// Live device-flow cookies; never displayed or included in Debug output.
+    pub live_cookies: Vec<String>,
 }
 
 impl std::fmt::Debug for DeviceCode {
@@ -222,19 +257,30 @@ pub enum Poll {
 }
 
 pub fn device_code(ep: &Endpoints, client_id: &str) -> Result<DeviceCode, String> {
+    if ep.flow == MicrosoftFlow::PrismarineLive {
+        return prismarine::device_code(ep, client_id);
+    }
     let (status, v) = send(
         request_to("POST", &format!("{}/devicecode", ep.microsoft)),
         Some(Body::Form(vec![("client_id", client_id), ("scope", SCOPE)])),
         "Microsoft",
     )?;
+    parse_device_code(status, &v, Vec::new())
+}
+
+fn parse_device_code(
+    status: u16,
+    v: &Value,
+    live_cookies: Vec<String>,
+) -> Result<DeviceCode, String> {
     match (
         status,
-        str_field(&v, "user_code"),
-        str_field(&v, "device_code"),
+        str_field(v, "user_code"),
+        str_field(v, "device_code"),
     ) {
         (200, Some(user_code), Some(device_code)) => Ok(DeviceCode {
             user_code,
-            verification_uri: str_field(&v, "verification_uri")
+            verification_uri: str_field(v, "verification_uri")
                 .unwrap_or_else(|| "https://www.microsoft.com/link".into()),
             interval: v
                 .get("interval")
@@ -243,8 +289,9 @@ pub fn device_code(ep: &Endpoints, client_id: &str) -> Result<DeviceCode, String
                 .max(1),
             expires_at: now() + v.get("expires_in").and_then(Value::as_u64).unwrap_or(900),
             device_code,
+            live_cookies,
         }),
-        _ => Err(oauth_error(&v)),
+        _ => Err(oauth_error(v)),
     }
 }
 
@@ -265,8 +312,26 @@ pub fn oauth_error(v: &Value) -> String {
 
 /// One poll of the token endpoint while the player signs in.
 pub fn poll(ep: &Endpoints, client_id: &str, code: &DeviceCode) -> Result<Poll, String> {
+    let mut request = request_to(
+        "POST",
+        &format!(
+            "{}/{}",
+            ep.microsoft,
+            if ep.flow == MicrosoftFlow::PrismarineLive {
+                "oauth20_token.srf"
+            } else {
+                "token"
+            }
+        ),
+    );
+    if ep.flow == MicrosoftFlow::PrismarineLive {
+        request = request.query("client_id", client_id);
+        if !code.live_cookies.is_empty() {
+            request = request.set("Cookie", &code.live_cookies.join("; "));
+        }
+    }
     let (status, v) = send(
-        request_to("POST", &format!("{}/token", ep.microsoft)),
+        request,
         Some(Body::Form(vec![
             ("grant_type", "urn:ietf:params:oauth:grant-type:device_code"),
             ("client_id", client_id),
@@ -323,12 +388,30 @@ pub fn wait_for_sign_in(
 
 pub fn refresh_ms(ep: &Endpoints, client_id: &str, refresh: &str) -> Result<MsTokens, String> {
     let (status, v) = send(
-        request_to("POST", &format!("{}/token", ep.microsoft)),
+        request_to(
+            "POST",
+            &format!(
+                "{}/{}",
+                ep.microsoft,
+                if ep.flow == MicrosoftFlow::PrismarineLive {
+                    "oauth20_token.srf"
+                } else {
+                    "token"
+                }
+            ),
+        ),
         Some(Body::Form(vec![
             ("grant_type", "refresh_token"),
             ("client_id", client_id),
             ("refresh_token", refresh),
-            ("scope", SCOPE),
+            (
+                "scope",
+                if ep.flow == MicrosoftFlow::PrismarineLive {
+                    prismarine::LIVE_SCOPE
+                } else {
+                    SCOPE
+                },
+            ),
         ])),
         "Microsoft",
     )?;
@@ -360,6 +443,9 @@ pub fn minecraft_login(
     ms_access: &str,
     progress: &dyn Fn(Phase),
 ) -> Result<Minecraft, String> {
+    if ep.flow == MicrosoftFlow::PrismarineLive {
+        return prismarine::minecraft_login(ep, ms_access, progress);
+    }
     progress(Phase::Xbox);
     let (status, xbl) = send(
         request_to("POST", &ep.xbox_user),
@@ -530,6 +616,9 @@ pub fn profile(ep: &Endpoints, token: &str) -> Result<Option<Account>, String> {
 /// What the keychain keeps for one account.
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub struct Secrets {
+    /// Issuing application; old Azure-only stores have no binding.
+    #[serde(default)]
+    pub client_id: Option<String>,
     pub refresh_token: String,
     #[serde(default)]
     pub sign_in_required: bool,
@@ -569,13 +658,16 @@ pub fn finish_sign_in_with_progress(
     }
     progress(Phase::Profile);
     let account = profile(ep, &mc.token)?.ok_or(NO_PROFILE)?;
-    Ok((account, Secrets::new(ms.refresh, mc)))
+    let mut secrets = Secrets::new(ms.refresh, mc);
+    secrets.client_id = ep.client_id.clone();
+    Ok((account, secrets))
 }
 
 impl Secrets {
     pub fn new(refresh_token: String, mc: Minecraft) -> Self {
         Self {
             refresh_token,
+            client_id: None,
             sign_in_required: false,
             minecraft_token: mc.token,
             minecraft_expires_at: mc.expires_at,
@@ -614,6 +706,15 @@ pub fn check_with(
     force: bool,
     progress: &dyn Fn(Phase),
 ) -> Check {
+    if secrets
+        .client_id
+        .as_deref()
+        .is_some_and(|old| Some(old) != client_id)
+        || (secrets.client_id.is_none() && ep.flow == MicrosoftFlow::PrismarineLive)
+    {
+        secrets.sign_in_required = true;
+        return Check::NoAnswer(SIGN_IN_AGAIN.into(), secrets);
+    }
     if secrets.sign_in_required {
         return Check::NoAnswer(SIGN_IN_AGAIN.into(), secrets);
     }
@@ -635,6 +736,7 @@ pub fn check_with(
             Ok(mc) => {
                 secrets = Secrets {
                     owns: secrets.owns,
+                    client_id: ep.client_id.clone(),
                     ..Secrets::new(secrets.refresh_token, mc)
                 }
             }
@@ -671,3 +773,6 @@ pub fn check_with(
         ),
     }
 }
+
+#[cfg(test)]
+mod prismarine_tests;

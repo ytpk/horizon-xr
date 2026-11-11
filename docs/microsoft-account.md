@@ -352,10 +352,12 @@ validators; the script above doesn't send another player's chat.
 
 The Quest app signs in through the same code: `crates/horizon-account` (the flow and the secret
 store, extracted from the launcher's `account.rs`; the launcher re-exports it). It uses
-the fork's own Azure application client ID (`HORIZON_MSA_CLIENT_ID` at build time or run time),
-with the required Minecraft App ID approval. Permission to use Horizon's registration was withdrawn;
-the fork must not embed or ask users to supply Horizon's ID. Building from source does not provide
-an application registration or remove the ownership gate. Without a configured ID, sign-in is unavailable.
+two configurable modes. With no configured ID, the experimental native Prismarine-compatible
+Live flow uses Minecraft for Nintendo Switch's public title ID. This is not a Prismarine-owned
+registration and does not establish approval for this fork. A custom `HORIZON_MSA_CLIENT_ID`
+selects the existing Azure flow and requires a suitable approved registration; an explicitly
+empty ID disables sign-in. Horizon's registration must not be used. Both modes retain the
+Minecraft Java ownership check. See [implementation and validation](quest-live-auth-render-stability.md).
 Tokens live in a file in the app's
 internal folder (`<files>/launcher/`), sealed with ChaCha20-Poly1305 under a random key kept in a
 second file, both mode 0600 (`FileStore::with_key_file`; `/etc/machine-id` does not exist on

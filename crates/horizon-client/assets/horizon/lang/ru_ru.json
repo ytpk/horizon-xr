@@ -2316,5 +2316,6 @@
   "horizon.quest.room.graphics.ffr.high": "Фиксированная фовеация: ВЫСОКАЯ",
   "horizon.quest.room.graphics.dynamic.note": "Динамика: до −15% по стороне, только при нагрузке GPU.",
   "horizon.quest.room.graphics.mqsr.note": "MQSR — запрос runtime; разрешение выбираете вы.",
-  "horizon.quest.room.graphics.ffr.note": "Фовеация требует перезапуска; multiview уступает ей."
+  "horizon.quest.room.graphics.ffr.note": "Фовеация требует перезапуска; multiview уступает ей.",
+  "horizon.quest.room.auth.live_provider": "Microsoft Live: Minecraft для Nintendo Switch (вход, совместимый с Prismarine)."
 }
