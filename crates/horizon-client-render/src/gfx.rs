@@ -7340,7 +7340,11 @@ impl Renderer {
     ) {
         self.world_post.set_sharpness(&self.device, sharpness);
         let taa = taa && self.world_post.supports_taa();
-        self.world_post.scale = scale.clamp(0.25, 2.0);
+        // OpenXR already sized each eye with the saved VR scale. Applying the
+        // window scale as well would multiply supersampling and can hit OOM,
+        // whose fallback to 100% looks like the setting is oscillating.
+        self.world_post.scale =
+            horizon_client_input::headset_display::post_render_scale(headset::installed(), scale);
         self.world_post.antialias = antialias && !taa;
         self.world_post.taa = taa;
         self.world_post.upscale = if taa { upscale.clamp(1.0, 4.0) } else { 1.0 };

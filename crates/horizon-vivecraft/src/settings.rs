@@ -122,6 +122,18 @@ impl Default for VrSettings {
     }
 }
 
+/// Quest uses a linear per-eye scale, not Vivecraft's desktop supersampling range.
+pub const RENDER_SCALE_MIN: f32 = 0.25;
+pub const RENDER_SCALE_MAX: f32 = 2.0;
+
+pub fn render_scale(value: f32) -> f32 {
+    if value.is_finite() && value > 0.0 {
+        value.clamp(RENDER_SCALE_MIN, RENDER_SCALE_MAX)
+    } else {
+        1.0
+    }
+}
+
 impl VrSettings {
     /// What a fresh Horizon install starts with: Vivecraft's defaults, but a render scale a
     /// standalone headset's GPU can sustain.
@@ -222,7 +234,7 @@ impl VrSettings {
                     .is_ok_and(|v| self.set_float("hudDistance", v.clamp(0.25, 5.0))),
                 "renderScale" => value
                     .parse::<f32>()
-                    .is_ok_and(|v| self.set_float("renderScaleFactor", v.clamp(0.1, 9.0))),
+                    .is_ok_and(|v| self.set_float("renderScaleFactor", render_scale(v))),
                 "refreshRate" => value
                     .parse::<f32>()
                     .is_ok_and(|v| self.set_float("horizonRefreshRate", v.clamp(72.0, 120.0))),
@@ -281,8 +293,8 @@ impl VrSettings {
     }
 
     /// Sets a value if it is valid for the key's kind (a bad enum name or number is
-    /// refused). Floats and ints are clamped to the slider range of options that have one,
-    /// except the index sliders.
+    /// refused). Render scale is normalized to the supported headset range; other numeric
+    /// settings retain their parsed value, including values beyond UI slider limits.
     pub fn set(&mut self, key: &str, value: &str) -> bool {
         let Some(d) = def(key) else {
             return false;
@@ -297,7 +309,11 @@ impl VrSettings {
                 Err(_) => return false,
             },
             Kind::Float => match value.parse::<f32>() {
-                Ok(v) if v.is_finite() => java_float(v),
+                Ok(v) if v.is_finite() => java_float(if key == "renderScaleFactor" {
+                    render_scale(v)
+                } else {
+                    v
+                }),
                 _ => return false,
             },
             Kind::Str => value.to_string(),

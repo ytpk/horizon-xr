@@ -261,6 +261,25 @@ mod tests {
     use super::*;
 
     #[test]
+    fn quest_resolution_slider_round_trips_percentages_and_rejects_desktop_ninefold_scale() {
+        let o = info("renderScaleFactor").unwrap();
+        let mut s = VrSettings::horizon();
+        for value in [0.25, 0.4, 0.5, 1.0, 1.5, 2.0] {
+            s.set_float(o.key, value);
+            let (position, steps) = slider(&s, o).unwrap();
+            assert_eq!(steps, 35);
+            set_slider(&mut s, o, position, None);
+            assert!((s.float(o.key) - value).abs() < 0.0001);
+        }
+        s.set_float(o.key, 1.0);
+        assert_eq!(shown(&s, o), Shown::Literal("100%".into()));
+        s.load_json(r#"{"renderScaleFactor":"9.0"}"#);
+        assert_eq!(s.float(o.key), 2.0);
+        set_slider(&mut s, o, 1.0, None);
+        assert_eq!(s.float(o.key), 2.0);
+    }
+
+    #[test]
     fn duplicate_quest_bindings_are_reported_and_unbinding_clears_the_conflict() {
         let mut s = VrSettings::default();
         assert!(!binding_conflict(&s, "questBindJump"));

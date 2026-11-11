@@ -73,6 +73,7 @@ pub struct Quest {
     recommended_eye_size: [u32; 2],
     maximum_eye_size: [u32; 2],
     configured_scale: f32,
+    scale_change: horizon_client_input::headset_display::ScaleChange,
     scale_override: Option<f32>,
     resize_retry: Option<(f32, std::time::Instant)>,
     format: Option<(u32, wgpu::TextureFormat)>,
@@ -311,7 +312,9 @@ impl Quest {
             .ok()
             .and_then(|s| s.parse::<f32>().ok())
             .filter(|s| (0.25..=2.0).contains(s));
-        let scale = scale_override.unwrap_or_else(|| input::settings().float("renderScaleFactor"));
+        let scale = horizon_vivecraft::settings::render_scale(
+            scale_override.unwrap_or_else(|| input::settings().float("renderScaleFactor")),
+        );
         let recommended_eye_size = [
             view.recommended_image_rect_width,
             view.recommended_image_rect_height,
@@ -345,6 +348,7 @@ impl Quest {
             recommended_eye_size,
             maximum_eye_size,
             configured_scale: scale,
+            scale_change: Default::default(),
             scale_override,
             resize_retry: None,
             format: None,
@@ -1669,10 +1673,17 @@ impl Headset for Quest {
         {
             s.retired_eyes.clear();
         }
-        let desired_scale = self
-            .scale_override
-            .unwrap_or_else(|| input::settings().float("renderScaleFactor"));
+        let desired_scale = horizon_vivecraft::settings::render_scale(
+            self.scale_override
+                .unwrap_or_else(|| input::settings().float("renderScaleFactor")),
+        );
+        let scale_ready = self.scale_change.ready(
+            desired_scale,
+            self.configured_scale,
+            std::time::Instant::now(),
+        );
         if layers != Layers::Flat
+            && scale_ready
             && desired_scale.is_finite()
             && desired_scale > 0.0
             && (desired_scale != self.configured_scale

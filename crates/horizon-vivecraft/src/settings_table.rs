@@ -733,7 +733,7 @@ pub const DEFS: &[Def] = &[
         key: "renderScaleFactor",
         kind: Kind::Float,
         default: "1.0",
-        range: Some((0.1f32, 9f32, 0.1f32)),
+        range: Some((0.25f32, 2f32, 0.05f32)),
     },
     Def {
         key: "shouldRenderSelf",

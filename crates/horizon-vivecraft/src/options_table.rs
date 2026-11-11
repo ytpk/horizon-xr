@@ -1007,7 +1007,7 @@ pub const OPTS: &[OptInfo] = &[
     OptInfo {
         key: "renderScaleFactor",
         name: "RENDER_SCALEFACTOR",
-        decimals: 0,
+        decimals: -1,
         on: "options.on",
         off: "options.off",
         class: "",

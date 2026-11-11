@@ -794,6 +794,9 @@ impl H {
                 Some(i as f32 / (LOD_STEPS.len() - 1) as f32)
             }
             H::Workers => Some(g.workers as f32 / max_workers() as f32),
+            H::ResolutionScale if crate::gfx::headset::installed() => {
+                crate::vr_options::VrOpt::by_key("renderScaleFactor").and_then(|o| o.slider(s))
+            }
             H::ResolutionScale => Some((g.resolution_scale as f32 - 50.0) / 150.0),
             H::UpscalingSharpness => Some(g.upscaling_sharpness as f32 / 100.0),
             // Auto, then 10..480 by 10.
@@ -814,6 +817,7 @@ impl H {
             H::EntityCullingPrecheck => Some(32),
             H::UploadBudget => Some((UPLOAD_STEPS.len() - 1) as u32),
             H::Workers => Some(max_workers()),
+            H::ResolutionScale if crate::gfx::headset::installed() => Some(35),
             H::ResolutionScale => Some(30),
             H::UpscalingSharpness => Some(20),
             H::HdrPaperWhite | H::HdrUiBrightness => Some(crate::graphics::NITS_STEPS),
@@ -913,6 +917,11 @@ impl H {
                 ),
                 n => labelled("Worker Threads", n),
             },
+            H::ResolutionScale if crate::gfx::headset::installed() => labelled_percent(
+                "Resolution Scale",
+                (horizon_vivecraft::settings::render_scale(s.vr.float("renderScaleFactor")) * 100.0)
+                    .round() as u32,
+            ),
             H::ResolutionScale => labelled_percent("Resolution Scale", g.resolution_scale),
             H::Antialiasing => labelled(
                 "Anti-aliasing",
@@ -965,6 +974,12 @@ impl H {
         }
     }
     fn set_slider(self, s: &mut Settings, v: f32) {
+        if matches!(self, H::ResolutionScale) && crate::gfx::headset::installed() {
+            if let Some(o) = crate::vr_options::VrOpt::by_key("renderScaleFactor") {
+                o.set_slider(s, v);
+            }
+            return;
+        }
         let g = &mut s.horizon;
         match self {
             H::ChunkUpdates => g.chunk_updates = (v * 64.0).round() as u32,
@@ -1400,7 +1415,15 @@ fn read(s: &Settings) -> impl std::fmt::Debug + '_ {
         &s.language,
         s.force_unicode,
     );
-    (&s.horizon, &s.extras, distances, frames, picture, window)
+    (
+        &s.horizon,
+        &s.extras,
+        distances,
+        frames,
+        picture,
+        window,
+        crate::gfx::headset::installed().then(|| s.vr.float("renderScaleFactor")),
+    )
 }
 
 /// Horizon's graphics screen on the settings shell (`settings_shell`): its pages and rows from
@@ -1499,6 +1522,10 @@ impl Screen for GraphicsScreen {
     /// window manager change.
     fn undo(&mut self, s: &mut Settings, b: &Settings) -> Vec<Output> {
         s.horizon = s.horizon.undone_to(&b.horizon);
+        if crate::gfx::headset::installed() {
+            std::sync::Arc::make_mut(&mut s.vr)
+                .set_float("renderScaleFactor", b.vr.float("renderScaleFactor"));
+        }
         s.render_distance = b.render_distance;
         s.simulation_distance = b.simulation_distance;
         s.gamma = b.gamma;

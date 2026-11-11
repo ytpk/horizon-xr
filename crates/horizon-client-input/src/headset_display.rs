@@ -28,12 +28,40 @@ pub fn update(f: impl FnOnce(&mut DisplayInfo)) {
 
 /// Scale each dimension, retaining the current port's linear scale convention.
 pub fn eye_size(recommended: [u32; 2], maximum: [u32; 2], scale: f32) -> [u32; 2] {
-    let scale = if scale.is_finite() && scale > 0.0 {
-        scale
-    } else {
-        1.0
-    };
+    let scale = horizon_vivecraft::settings::render_scale(scale);
     std::array::from_fn(|i| ((recommended[i] as f32 * scale) as u32).clamp(64, maximum[i].max(64)))
+}
+
+/// OpenXR has already applied the eye scale; do not multiply it by the window scale.
+pub fn post_render_scale(headset: bool, desktop_scale: f32) -> f32 {
+    if headset {
+        1.0
+    } else {
+        desktop_scale.clamp(0.25, 2.0)
+    }
+}
+
+/// Wait for a resolution drag to settle before allocating new XR swapchains.
+#[derive(Default)]
+pub struct ScaleChange {
+    pending: Option<(f32, std::time::Instant)>,
+}
+impl ScaleChange {
+    pub fn ready(&mut self, desired: f32, active: f32, now: std::time::Instant) -> bool {
+        if desired == active {
+            self.pending = None;
+            return true;
+        }
+        match self.pending {
+            Some((value, at)) if value == desired => {
+                now.saturating_duration_since(at) >= std::time::Duration::from_millis(150)
+            }
+            _ => {
+                self.pending = Some((desired, now));
+                false
+            }
+        }
+    }
 }
 
 /// Explicit quality choices; do not change the saved value until the player presses a button.
@@ -100,6 +128,24 @@ pub fn recent_gpu_seconds() -> Option<f32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn slider_transients_do_not_resize_and_window_supersampling_is_not_applied_twice() {
+        use std::time::{Duration, Instant};
+        let now = Instant::now();
+        let mut change = ScaleChange::default();
+        assert!(!change.ready(2.0, 1.0, now));
+        assert!(!change.ready(2.0, 1.0, now + Duration::from_millis(100)));
+        // Drag returned to its saved value: no stale request for the maximum.
+        assert!(change.ready(1.0, 1.0, now + Duration::from_millis(110)));
+        assert!(!change.ready(1.2, 1.0, now + Duration::from_millis(120)));
+        assert!(change.ready(1.2, 1.0, now + Duration::from_millis(270)));
+        for factor in [0.5, 1.0, 2.0, 9.0] {
+            assert_eq!(post_render_scale(true, factor), 1.0);
+        }
+        assert_eq!(post_render_scale(false, 1.5), 1.5);
+        assert_eq!(eye_size([2000, 2200], [8192, 8192], 9.0), [4000, 4400]);
+    }
+
     #[test]
     fn explicit_quality_steps_and_runtime_sizes_do_not_silently_reduce_quality() {
         assert_eq!(step_scale(0.4, 1), 0.5);
