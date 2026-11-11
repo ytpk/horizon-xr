@@ -181,7 +181,9 @@ impl Faces {
                     });
                 Some(group)
             });
-            result.quads.push(group.map_or(u32::MAX, |index| index as u32));
+            result
+                .quads
+                .push(group.map_or(u32::MAX, |index| index as u32));
         }
         result.visible.resize(result.groups.len(), true);
         result

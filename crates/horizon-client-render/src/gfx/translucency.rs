@@ -19,8 +19,9 @@ impl Sorter {
             let [x, y, z] = std::array::from_fn(|j| camera[j] - c[j]);
             (i as u32, x * x + y * y + z * z)
         }));
-        // VertexSorting uses a stable merge sort, preserving mesh order for ties.
-        self.order.sort_by(|a, b| b.1.total_cmp(&a.1));
+        // Preserve vanilla mesh order for ties without stable-sort scratch allocation.
+        self.order
+            .sort_unstable_by(|a, b| b.1.total_cmp(&a.1).then(a.0.cmp(&b.0)));
         self.indices.clear();
         for &(quad, _) in &self.order {
             let v = quad * 4;
@@ -175,7 +176,9 @@ impl SortState {
                     std::array::from_fn(|j| (camera[j] - f64::from(origin[j])) as f32 - c[j]);
                 Some((i as u32, x * x + y * y + z * z))
             }));
-        sorter.order.sort_by(|a, b| b.1.total_cmp(&a.1));
+        sorter
+            .order
+            .sort_unstable_by(|a, b| b.1.total_cmp(&a.1).then(a.0.cmp(&b.0)));
         sorter.indices.clear();
         for &(quad, _) in &sorter.order {
             let v = quad * 4;

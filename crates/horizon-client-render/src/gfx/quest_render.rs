@@ -138,6 +138,7 @@ impl Renderer {
         if self.device_lost() {
             return Err("the graphics device was lost".into());
         }
+        self.water_eye_offsets = None;
         let timed = self.gpu_times.len();
         self.land_frame();
         vr_profile::refresh_often();
@@ -268,14 +269,16 @@ impl Renderer {
                 let size = headset::with(|h| h.eye_size()).unwrap_or([1, 1]);
                 self.set_headset_size(size);
                 let poses = [eyes[0].1, eyes[1].1];
+                let eye_views = poses.map(|pose| View::eye(body_yaw, &pose, frame.depth_far));
+                self.water_eye_offsets =
+                    Some(eye_views.map(|eye| eye.view.inverse().w_axis.truncate()));
                 let cull = headset::cull_view(body_yaw, &poses, frame.depth_far);
                 self.headset_cull = Some(cull);
                 let mut drawn = Ok(false);
                 let masks = headset::with(|h| h.hidden_areas()).flatten();
                 let stereo = self.stereo_compatible(frame) && self.swap_stereo_pipelines();
                 if stereo {
-                    self.stereo_views =
-                        Some(poses.map(|p| View::eye(body_yaw, &p, frame.depth_far)));
+                    self.stereo_views = Some(eye_views);
                     self.headset_eye = Some((self.stereo_views.unwrap()[0], cull));
                     if self
                         .stereo_targets
@@ -332,7 +335,7 @@ impl Renderer {
                     self.eye_mask = masks
                         .as_ref()
                         .and_then(|m| vis_mask::EyeMask::new(&m[eye], pose.tangents));
-                    let view = View::eye(body_yaw, pose, frame.depth_far);
+                    let view = eye_views[eye];
                     self.headset_eye = Some((view, cull));
                     self.offscreen = Some(image.clone());
                     let drawing = Instant::now();
@@ -378,6 +381,7 @@ impl Renderer {
                     vr_profile::scene(self.drawn_scene());
                 }
                 self.headset_eye = None;
+                self.water_eye_offsets = None;
                 self.eye_mask = None;
                 // Back at the panel's size, which the game lays the HUD out for.
                 let size = headset::with(|h| h.menu_size()).unwrap_or([1, 1]);

@@ -1597,6 +1597,8 @@ pub struct Renderer {
     /// On a headset, the eye this pass draws and the view both eyes are culled with.
     headset_eye: Option<(View, View)>,
     stereo_views: Option<[View; 2]>,
+    /// Both eye offsets for a shared conservative water index list, also in mono passes.
+    water_eye_offsets: Option<[Vec3; 2]>,
     stereo_targets: Option<multiview::Targets>,
     stereo_destinations: Option<[wgpu::Texture; 2]>,
     stereo_failed: bool,
@@ -5505,6 +5507,7 @@ impl Renderer {
             acquire_validation_failures: 0,
             headset_eye: None,
             stereo_views: None,
+            water_eye_offsets: None,
             stereo_targets: None,
             stereo_destinations: None,
             stereo_failed: false,
@@ -9399,8 +9402,11 @@ impl Renderer {
             && !native_render::world_drawn_hooked()
             && self.native.is_none()
             && self.pack_post.as_ref().is_none_or(|p| p.1.is_none());
-        let water_eyes = [views.primary(), views.views().last().unwrap()]
-            .map(|eye| (camera + eye.view.inverse().w_axis.truncate().as_dvec3()).to_array());
+        let water_offsets = self.water_eye_offsets.unwrap_or_else(|| {
+            [views.primary(), views.views().last().unwrap()]
+                .map(|eye| eye.view.inverse().w_axis.truncate())
+        });
+        let water_eyes = water_offsets.map(|offset| (camera + offset.as_dvec3()).to_array());
         let count = visible.len() + visible_lods.len();
         let budget = (count / 8).max(15).min(count);
         self.translucency_cursor %= count.max(1);
