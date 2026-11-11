@@ -812,7 +812,11 @@ pub(super) fn make_streaming(
                 registry: pack.assets.clone(),
                 biomes: biomes.clone(),
             }),
-            pack.context_with(biomes.clone()),
+            pack.context_with(biomes.clone()).with_opaque_water(
+                horizon_client::gfx::headset::installed()
+                    && settings.vr.bool("horizonOpaqueWater")
+                    && super::shader_packs::picked_pack(settings).is_empty(),
+            ),
             res.threads(),
         )
     } else if let Some(inner) = flat_vanilla
@@ -841,7 +845,11 @@ pub(super) fn make_streaming(
                 registry: pack.assets.clone(),
                 biomes: biomes.clone(),
             }),
-            pack.context_with(biomes.clone()),
+            pack.context_with(biomes.clone()).with_opaque_water(
+                horizon_client::gfx::headset::installed()
+                    && settings.vr.bool("horizonOpaqueWater")
+                    && super::shader_packs::picked_pack(settings).is_empty(),
+            ),
             res.threads(),
         )
     } else if let Some(inner) = flat {
@@ -855,7 +863,11 @@ pub(super) fn make_streaming(
                 registry: pack.assets.clone(),
                 biomes: biomes.clone(),
             }),
-            pack.context_with(biomes.clone()),
+            pack.context_with(biomes.clone()).with_opaque_water(
+                horizon_client::gfx::headset::installed()
+                    && settings.vr.bool("horizonOpaqueWater")
+                    && super::shader_packs::picked_pack(settings).is_empty(),
+            ),
             res.threads(),
         )
     } else if options.test_terrain && dim == Dim::Overworld {
@@ -867,7 +879,11 @@ pub(super) fn make_streaming(
                 registry: pack.assets.clone(),
                 biomes: biomes.clone(),
             }),
-            pack.context_with(biomes.clone()),
+            pack.context_with(biomes.clone()).with_opaque_water(
+                horizon_client::gfx::headset::installed()
+                    && settings.vr.bool("horizonOpaqueWater")
+                    && super::shader_packs::picked_pack(settings).is_empty(),
+            ),
             res.threads(),
         )
     } else {
@@ -926,7 +942,11 @@ pub(super) fn make_streaming(
                 registry: pack.assets.clone(),
                 biomes: biomes.clone(),
             }),
-            pack.context_with(biomes.clone()),
+            pack.context_with(biomes.clone()).with_opaque_water(
+                horizon_client::gfx::headset::installed()
+                    && settings.vr.bool("horizonOpaqueWater")
+                    && super::shader_packs::picked_pack(settings).is_empty(),
+            ),
             res.threads(),
         )
     };

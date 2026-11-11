@@ -141,6 +141,7 @@ fn scene(
         smooth_lighting,
         cutout_leaves,
         opaque_ice: false,
+        opaque_water: false,
         translucent_layers: &[],
         leaf_culling: LeafCullingMode::Off,
     };

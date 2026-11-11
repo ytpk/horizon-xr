@@ -81,6 +81,7 @@ fn main() -> Result<(), Error> {
     let visibility = models::load_visibility(&root, assets.registry)?;
     let biomes = Arc::new(Biomes::load(&root)?);
     let context = Arc::new(WorkerContext {
+        opaque_water: false,
         tables: Arc::new(MeshTables::new(&assets, &render, &facts, visibility)?),
         light: Arc::new(LightTables::load(&root, assets.registry, &facts)?),
         biomes: biomes.clone(),
@@ -226,6 +227,7 @@ fn mesher<'a>(context: &'a WorkerContext, seed: i64) -> Mesher<'a> {
         smooth_lighting: true,
         cutout_leaves: true,
         opaque_ice: false,
+        opaque_water: context.opaque_water,
         translucent_layers: &[],
         leaf_culling: LeafCullingMode::Off,
         assets: &context.assets,

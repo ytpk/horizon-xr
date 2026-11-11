@@ -208,13 +208,20 @@ pub(super) fn splits_north_east(nw: f32, ne: f32, sw: f32, se: f32) -> bool {
     along_nw < along_ne || along_nw == 0.0
 }
 /// Emits one fluid cell at section-relative `[x, y, z]`.
-/// `(nether, shader_pack_lighting, separate_ao, shader_pack)`: the Nether's face shading, only the
+/// `(nether, shader_pack_lighting, separate_ao, shader_pack, opaque_water)`: the Nether's face shading, only the
 /// up-face value when a shader pack lights the faces (`Mesher::shader_pack_lighting`), whether to
 /// keep pure alpha for separate AO, and whether a `shaders/` pack draws the terrain
 /// (`Mesher::shader_pack`: tops split as Iris splits them, [`splits_north_east`]).
+/// `opaque_water` routes water to the depth-writing solid pass without alpha cutout.
 pub(super) fn tesselate(
     tables: &MeshTables,
-    (nether, shader_pack_lighting, separate_ao, shader_pack): (bool, bool, bool, bool),
+    (nether, shader_pack_lighting, separate_ao, shader_pack, opaque_water): (
+        bool,
+        bool,
+        bool,
+        bool,
+        bool,
+    ),
     pad: &Padded,
     water_color: u32,
     out: &mut SectionMesh,
@@ -341,7 +348,7 @@ pub(super) fn tesselate(
     } else {
         (tables.lava_still, tables.lava_flow, None)
     };
-    let (target, sprite_layers) = if water {
+    let (target, sprite_layers) = if water && !opaque_water {
         (&mut out.translucent, &mut out.sprite_layers)
     } else {
         (&mut out.solid, &mut out.sprite_layers)
@@ -359,6 +366,11 @@ pub(super) fn tesselate(
             color
         } else {
             fluid_face(color, face)
+        };
+        let layer = if water && opaque_water {
+            layer | super::OPAQUE_LAYER
+        } else {
+            layer
         };
         let vertex = |(pos, uv)| TerrainVertex::new(pos, uv, layer, color, light);
         target.extend([vertex(v[0]), vertex(v[1]), vertex(v[2]), vertex(v[3])]);

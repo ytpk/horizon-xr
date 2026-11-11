@@ -204,6 +204,7 @@ fn terrain_source_cpu_multipart_and_waterlogged_faces_keep_their_owner() {
         smooth_lighting: false,
         cutout_leaves: true,
         opaque_ice: false,
+        opaque_water: false,
         translucent_layers: &[],
         leaf_culling: LeafCullingMode::Off,
     };
@@ -301,4 +302,70 @@ fn terrain_source_cpu_partial_metadata_never_inherits_a_previous_face() {
     );
     mesh.clear();
     assert!(mesh.solid_sources.is_empty());
+}
+
+#[test]
+fn opaque_water_routes_fluid_to_depth_writing_mesh_and_preserves_shader_fallback() {
+    let (_scratch, assets, render, tables, biomes) = fixture();
+    let mut chunk = Chunk::with_layout(0, 0, crate::chunk::ColumnLayout::new(0, 16).unwrap());
+    chunk.set(6, 3, 4, 2); // waterlogged fixture block: model + water remain distinct
+    let region = [
+        [None, None, None],
+        [None, Some(&chunk), None],
+        [None, None, None],
+    ];
+    let mut mesher = Mesher {
+        nether_shading: false,
+        shader_pack_lighting: false,
+        separate_ao: false,
+        shader_pack: false,
+        opaque_water: false,
+        assets: &assets,
+        render: &render,
+        tables: &tables,
+        biomes: &biomes,
+        visibility: FaceVisibility::empty(),
+        zoom: BiomeZoom::new(0),
+        blend_radius: 0,
+        smooth_lighting: false,
+        cutout_leaves: true,
+        opaque_ice: false,
+        translucent_layers: &[],
+        leaf_culling: LeafCullingMode::Off,
+    };
+    let normal = mesher.mesh(&region, 0);
+    assert!(!normal.translucent.is_empty());
+    mesher.opaque_water = true;
+    let dense = mesher.mesh(&region, 0);
+    assert!(dense.translucent.is_empty());
+    assert_eq!(
+        dense.solid.len(),
+        normal.solid.len() + normal.translucent.len()
+    );
+    for original in &normal.translucent {
+        assert!(dense.solid.iter().any(|v| v.pos == original.pos
+            && v.uv == original.uv
+            && v.color == original.color
+            && v.light == original.light
+            && v.layer == (original.layer | OPAQUE_LAYER)));
+    }
+    for original in &normal.solid {
+        assert!(
+            dense
+                .solid
+                .iter()
+                .any(|v| bytemuck::bytes_of(v) == bytemuck::bytes_of(original)),
+            "the block model must not change along with its contained water"
+        );
+    }
+    mesher.shader_pack = true;
+    let custom = mesher.mesh(&region, 0);
+    assert!(
+        !custom.translucent.is_empty(),
+        "custom shader water stays in the translucent pass"
+    );
+    mesher.shader_pack = false;
+    mesher.opaque_water = false;
+    let restored = mesher.mesh(&region, 0);
+    assert_eq!(restored.translucent.len(), normal.translucent.len());
 }

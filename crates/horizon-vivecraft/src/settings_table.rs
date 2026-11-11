@@ -1296,6 +1296,12 @@ pub const DEFS: &[Def] = &[
         default: "false",
         range: None,
     },
+    Def {
+        key: "horizonOpaqueWater",
+        kind: Kind::Bool,
+        default: "false",
+        range: None,
+    },
     // Experimental stereo world pass, with automatic compatibility fallback.
     Def {
         key: "horizonMultiview",

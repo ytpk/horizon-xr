@@ -1856,6 +1856,8 @@ pub struct Mesher<'a> {
     pub cutout_leaves: bool,
     /// The `opaqueIce` option: regular ice draws opaque in the solid pass.
     pub opaque_ice: bool,
+    /// Optional depth-writing water; workers capture this at job execution.
+    pub opaque_water: bool,
     /// Sprite layers a shader pack moves into the translucent pass, by layer.
     pub translucent_layers: &'a [bool],
     /// What the worker does with leaf faces inside a canopy.
@@ -1942,6 +1944,7 @@ impl Mesher<'_> {
                             self.shader_pack_lighting,
                             self.separate_ao,
                             self.shader_pack,
+                            self.opaque_water && !self.shader_pack,
                         );
                         fluid::tesselate(self.tables, shade, pad, water, &mut out, [x, y, z]);
                         if self.shader_pack {

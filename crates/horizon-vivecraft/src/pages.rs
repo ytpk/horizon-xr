@@ -199,6 +199,7 @@ pub fn entries(page: PageId, s: &VrSettings, server_limited_teleport: bool) -> V
         ],
         PageId::VRendering => vec![
             Opt("renderScaleFactor"),
+            Opt("horizonOpaqueWater"),
             Entry::Page(PageId::Effects),
             Entry::Page(PageId::Visor),
         ],
@@ -324,6 +325,7 @@ pub fn entries(page: PageId, s: &VrSettings, server_limited_teleport: bool) -> V
             Opt("visorInBlockVignette"),
             Opt("horizonRefreshRate"),
             Opt("horizonDynamicResolution"),
+            Opt("horizonOpaqueWater"),
             Opt("horizonVrProfile"),
             Opt("horizonFoveation"),
             Opt("horizonVisibilityMask"),
@@ -376,6 +378,7 @@ pub fn entries(page: PageId, s: &VrSettings, server_limited_teleport: bool) -> V
             Opt("renderScaleFactor"),
             Opt("horizonRefreshRate"),
             Opt("horizonDynamicResolution"),
+            Opt("horizonOpaqueWater"),
             Opt("horizonVrProfile"),
             Opt("horizonFoveation"),
             Opt("horizonVisibilityMask"),

@@ -119,14 +119,18 @@ impl Mesher {
                     return Styles {
                         faces: [
                             Some(Style {
-                                layer,
+                                layer: if fluid == 1 && context.opaque_water {
+                                    layer | OPAQUE_LAYER
+                                } else {
+                                    layer
+                                },
                                 tint: if fluid == 1 { Tint::Water } else { Tint::None },
-                                translucent: fluid == 1,
+                                translucent: fluid == 1 && !context.opaque_water,
                             }),
                             None,
                         ],
                         fluid,
-                        opaque: fluid == 2,
+                        opaque: fluid == 2 || context.opaque_water,
                     };
                 }
                 let leaves = name.ends_with("_leaves");

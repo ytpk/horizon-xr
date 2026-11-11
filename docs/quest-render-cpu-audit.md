@@ -59,7 +59,10 @@ For a meaningful implementation:
 Expected benefit: less CPU sorting/index traffic and potentially less GPU overdraw.
 The world behind the water is not automatically removed from CPU visibility or submission;
 that requires valid occlusion integration. No FPS percentage is justified before measurements.
-The opaque-water switch is a proposed next feature, not implemented in this audit revision.
+Follow-up: the opaque-water switch is now implemented as `horizonOpaqueWater` (off by
+ default), on the startup-room graphics extras page and the VR rendering pages. Both near
+ and far meshers use an immutable worker-context flag; mode changes rebuild loaded sections
+ and reset LOD. Shader-pack selection uses the normal transparent material path.
 
 ## Suggested implementation sequence
 

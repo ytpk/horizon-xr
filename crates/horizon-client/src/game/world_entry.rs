@@ -207,10 +207,11 @@ impl Game<'_> {
     /// What the chunk and far-terrain workers mesh with: the pack's context,
     /// over the world's biomes when it has its own.
     pub(super) fn worker_context(&self) -> Arc<WorkerContext> {
-        match &self.world_biomes {
+        let context = match &self.world_biomes {
             Some(table) => self.pack.context_with(table.clone()),
             None => self.pack.context.clone(),
-        }
+        };
+        context.with_opaque_water(self.opaque_water_enabled())
     }
     pub(super) fn pack_files(&self) -> horizon_world::loot::PackOverlay<'_> {
         pack_files(&self.world_tables)

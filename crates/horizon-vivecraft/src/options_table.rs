@@ -1941,6 +1941,15 @@ pub const OPTS: &[OptInfo] = &[
         lang: "horizon.visor.in_block_vignette",
     },
     OptInfo {
+        key: "horizonOpaqueWater",
+        name: "HORIZON_OPAQUE_WATER",
+        decimals: 0,
+        on: "options.on",
+        off: "options.off",
+        class: "",
+        lang: "horizon.vr.opaque_water",
+    },
+    OptInfo {
         key: "horizonDynamicResolution",
         name: "HORIZON_DYNAMIC_RESOLUTION",
         decimals: 0,

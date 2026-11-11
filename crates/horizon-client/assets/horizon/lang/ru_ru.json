@@ -2317,5 +2317,9 @@
   "horizon.quest.room.graphics.dynamic.note": "Динамика: до −15% по стороне, только при нагрузке GPU.",
   "horizon.quest.room.graphics.mqsr.note": "MQSR — запрос runtime; разрешение выбираете вы.",
   "horizon.quest.room.graphics.ffr.note": "Фовеация требует перезапуска; multiview уступает ей.",
-  "horizon.quest.room.auth.live_provider": "Microsoft Live: Minecraft для Nintendo Switch (вход, совместимый с Prismarine)."
+  "horizon.quest.room.auth.live_provider": "Microsoft Live: Minecraft для Nintendo Switch (вход, совместимый с Prismarine).",
+"horizon.vr.opaque_water": "Непрозрачная вода",
+"horizon.vr.opaque_water.tooltip": "Убирает прозрачность воды, сокращая сортировку и смешивание. Перестраивает ландшафт; не действует с шейдерпаками.",
+"horizon.quest.room.graphics.water.on": "Непрозрачная вода: ВКЛ",
+"horizon.quest.room.graphics.water.off": "Непрозрачная вода: ВЫКЛ"
 }

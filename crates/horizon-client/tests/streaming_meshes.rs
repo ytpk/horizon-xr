@@ -63,6 +63,7 @@ fn columns_loaded_past_the_render_distance_mesh_when_they_come_in_range() {
     let facts = BlockFacts::load(&root, assets.registry).unwrap();
     let visibility = models::load_visibility(&root, assets.registry).unwrap();
     let context = Arc::new(WorkerContext {
+        opaque_water: false,
         tables: Arc::new(MeshTables::new(&assets, &render, &facts, visibility).unwrap()),
         light: Arc::new(LightTables::load(&root, assets.registry, &facts).unwrap()),
         biomes: Arc::new(Biomes::load(&root).unwrap()),
@@ -161,6 +162,7 @@ fn relit_columns_keep_every_mesh_current() {
     let facts = BlockFacts::load(&root, assets.registry).unwrap();
     let visibility = models::load_visibility(&root, assets.registry).unwrap();
     let context = Arc::new(WorkerContext {
+        opaque_water: false,
         tables: Arc::new(MeshTables::new(&assets, &render, &facts, visibility).unwrap()),
         light: Arc::new(LightTables::load(&root, assets.registry, &facts).unwrap()),
         biomes: Arc::new(Biomes::load(&root).unwrap()),
@@ -237,6 +239,7 @@ fn relit_columns_keep_every_mesh_current() {
             smooth_lighting: true,
             cutout_leaves: true,
             opaque_ice: false,
+            opaque_water: false,
             translucent_layers: &[],
             leaf_culling: LeafCullingMode::Off,
             assets: &context.assets,
@@ -283,6 +286,7 @@ fn every_extra_area_loads_however_the_areas_change() {
     let facts = BlockFacts::load(&root, assets.registry).unwrap();
     let visibility = models::load_visibility(&root, assets.registry).unwrap();
     let context = Arc::new(WorkerContext {
+        opaque_water: false,
         tables: Arc::new(MeshTables::new(&assets, &render, &facts, visibility).unwrap()),
         light: Arc::new(LightTables::load(&root, assets.registry, &facts).unwrap()),
         biomes: Arc::new(Biomes::load(&root).unwrap()),
@@ -347,6 +351,7 @@ fn meshes_waiting_for_upload_hold_back_new_mesh_jobs() {
     let facts = BlockFacts::load(&root, assets.registry).unwrap();
     let visibility = models::load_visibility(&root, assets.registry).unwrap();
     let context = Arc::new(WorkerContext {
+        opaque_water: false,
         tables: Arc::new(MeshTables::new(&assets, &render, &facts, visibility).unwrap()),
         light: Arc::new(LightTables::load(&root, assets.registry, &facts).unwrap()),
         biomes: Arc::new(Biomes::load(&root).unwrap()),

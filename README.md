@@ -46,6 +46,18 @@ Microsoft code or QR code; the account must own **Minecraft: Java Edition**. Gam
 from Mojang and prepared on the headset (at least 3 GB free); they are absent from the APK and repository.
 See [the implementation and validation notes](docs/quest-live-auth-render-stability.md).
 
+## Optional opaque water
+
+Use **Room → Settings → Graphics → additional graphics options → Opaque Water**, or
+**VR Settings → Rendering → Opaque Water**. It is off by default.
+
+When enabled, nearby and distant water draw in the depth-writing solid pass, without
+transparency sorting or blending. Water textures, biome tint and lighting remain; the
+surface hides the bottom and scenery behind it. Changing the setting rebuilds loaded
+terrain and far-detail tiles, so the world may briefly reload. The setting is saved.
+Shader packs use normal transparent water even when the preference is enabled.
+Actual Quest FPS improvement still needs testing.
+
 ## Build the APK
 
 The complete build is currently supported on **Linux x86-64**, including **Ubuntu in WSL2 on Windows**.

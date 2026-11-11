@@ -62,6 +62,7 @@ fn mesh(f: &Fixture, chunk: &Chunk, opaque_ice: bool) -> SectionMesh {
         smooth_lighting: false,
         cutout_leaves: true,
         opaque_ice,
+        opaque_water: false,
         translucent_layers: &[],
         leaf_culling: LeafCullingMode::Off,
     };

@@ -328,6 +328,7 @@ mod tests {
             crate::models::load_visibility(&root, assets.registry)?,
         )?);
         let context = WorkerContext {
+            opaque_water: false,
             light: Arc::new(LightTables::load(&root, assets.registry, &facts)?),
             tables,
             assets: assets.clone(),

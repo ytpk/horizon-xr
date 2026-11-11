@@ -280,7 +280,12 @@ impl Room {
         }
         if matches!(
             event,
-            Some(Event::DynamicResolution | Event::Foveation | Event::SuperResolution)
+            Some(
+                Event::DynamicResolution
+                    | Event::Foveation
+                    | Event::SuperResolution
+                    | Event::OpaqueWater
+            )
         ) {
             let settings = Arc::make_mut(&mut self.settings.vr);
             match event {
@@ -289,6 +294,9 @@ impl Room {
                         "horizonDynamicResolution",
                         !settings.bool("horizonDynamicResolution"),
                     );
+                }
+                Some(Event::OpaqueWater) => {
+                    settings.set_bool("horizonOpaqueWater", !settings.bool("horizonOpaqueWater"));
                 }
                 Some(Event::SuperResolution) => {
                     settings.set_bool(

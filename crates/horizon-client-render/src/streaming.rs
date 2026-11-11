@@ -1040,6 +1040,7 @@ impl<G: ChunkGenerator> Jobs<G> {
                     smooth_lighting: settings.smooth_lighting,
                     cutout_leaves: settings.cutout_leaves,
                     opaque_ice: settings.opaque_ice,
+                    opaque_water: context.opaque_water,
                     translucent_layers: &settings.translucent_layers,
                     leaf_culling: settings.leaf_culling,
                     assets: &context.assets,
@@ -1058,13 +1059,26 @@ impl<G: ChunkGenerator> Jobs<G> {
         Some(done)
     }
 }
+#[derive(Clone)]
 pub struct WorkerContext {
+    pub opaque_water: bool,
     pub assets: Arc<crate::assets::Assets>,
     pub render: Arc<crate::assets::RenderAssets>,
     pub tables: Arc<MeshTables>,
     pub biomes: Arc<crate::biome::Biomes>,
     pub light: Arc<LightTables>,
 }
+impl WorkerContext {
+    pub fn with_opaque_water(self: &Arc<Self>, enabled: bool) -> Arc<Self> {
+        if self.opaque_water == enabled {
+            return self.clone();
+        }
+        let mut context = (**self).clone();
+        context.opaque_water = enabled;
+        Arc::new(context)
+    }
+}
+
 mod bounded;
 mod relight_now;
 use bounded::nearest_first;
@@ -1184,6 +1198,9 @@ impl Streaming {
     /// Shares generation resources, but gives distant work its own worker state.
     pub fn lod_source(&self) -> Arc<dyn LodSource> {
         self.saves.clone()
+    }
+    pub fn opaque_water(&self) -> bool {
+        self.shared.context.read().unwrap().opaque_water
     }
     /// Resource packs reloaded (`LevelExtractor.allChanged`): mesh with the new
     /// models and sprites, and rebuild every loaded section. Meshes in flight

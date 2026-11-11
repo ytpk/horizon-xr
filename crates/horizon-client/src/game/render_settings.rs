@@ -130,10 +130,21 @@ impl Game<'_> {
         Ok(())
     }
 
+    pub(super) fn opaque_water_enabled(&self) -> bool {
+        horizon_client::gfx::headset::installed()
+            && self.settings.vr.bool("horizonOpaqueWater")
+            && super::shader_packs::picked_pack(&self.settings).is_empty()
+    }
+
     pub(super) fn apply_settings(&mut self) {
         // LocalPlayer.refreshChatAbilities: the chat shows what the Chat option allows.
         let abilities = self.chat_abilities();
         self.ui.chat.set_abilities(&self.gui.atlas.font, abilities);
+        let water_changed = self.streaming.opaque_water() != self.opaque_water_enabled();
+        if water_changed {
+            let context = self.worker_context();
+            self.streaming.reload_resources(&mut self.world, context);
+        }
         let render_distance_changed = self.streaming.radius != self.settings.render_distance;
         self.streaming.radius = self.settings.render_distance;
         // Options.renderDistance, biomeBlendRadius, ambientOcclusion,
@@ -141,7 +152,8 @@ impl Game<'_> {
         // LevelExtractor.allChanged when they change.
         let leaf_culling = self.effective_leaf_culling();
         let (s, st) = (&self.settings, &self.streaming);
-        let reload = render_distance_changed
+        let reload = water_changed
+            || render_distance_changed
             || (
                 s.biome_blend,
                 s.smooth_lighting,

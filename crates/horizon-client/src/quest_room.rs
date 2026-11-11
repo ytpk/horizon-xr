@@ -105,6 +105,8 @@ pub const KEYS: &[&str] = &[
     "graphics.ffr.note",
     "graphics.unknown",
     "graphics.multiview.on",
+    "graphics.water.on",
+    "graphics.water.off",
     "graphics.multiview.off",
 ];
 
@@ -130,6 +132,7 @@ pub enum Event {
     DynamicResolution,
     Foveation,
     SuperResolution,
+    OpaqueWater,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -1094,7 +1097,7 @@ impl Canvas<'_, '_> {
             }),
             MARGIN,
             215.0,
-            64.0,
+            54.0,
             Look::Secondary,
         );
         let supported = headset_display::snapshot().is_some_and(|i| i.super_resolution_supported);
@@ -1108,8 +1111,8 @@ impl Canvas<'_, '_> {
                 "graphics.mqsr.off"
             }),
             MARGIN,
-            310.0,
-            64.0,
+            285.0,
+            54.0,
             if supported {
                 Look::Secondary
             } else {
@@ -1126,8 +1129,20 @@ impl Canvas<'_, '_> {
             Event::Foveation,
             &t(ffr),
             MARGIN,
-            405.0,
-            64.0,
+            355.0,
+            54.0,
+            Look::Secondary,
+        );
+        self.fit(
+            Event::OpaqueWater,
+            &t(if settings.bool("horizonOpaqueWater") {
+                "graphics.water.on"
+            } else {
+                "graphics.water.off"
+            }),
+            MARGIN,
+            425.0,
+            54.0,
             Look::Secondary,
         );
         for (y, key) in [
@@ -1150,7 +1165,7 @@ impl Canvas<'_, '_> {
             &t("settings.back"),
             MARGIN,
             630.0,
-            64.0,
+            54.0,
             Look::Secondary,
         );
     }
