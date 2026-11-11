@@ -115,11 +115,32 @@ pub fn gpu_supports(adapter: &wgpu::Adapter) -> Result<(), String> {
     }
 }
 
+/// Ordinary wgpu depth images need this feature in a foveated multiview pass.
+pub fn non_subsampled_images(adapter: &wgpu::Adapter) -> bool {
+    use wgpu::hal::api::Vulkan;
+    let Some(hal) = (unsafe { adapter.as_hal::<Vulkan>() }) else {
+        return false;
+    };
+    let mut density = vk::PhysicalDeviceFragmentDensityMapFeaturesEXT::default();
+    let mut features = vk::PhysicalDeviceFeatures2::default().push_next(&mut density);
+    // Safety: physical device belongs to this live adapter/instance.
+    unsafe {
+        hal.shared_instance()
+            .raw_instance()
+            .get_physical_device_features2(hal.raw_physical_device(), &mut features);
+    }
+    density.fragment_density_map_non_subsampled_images == vk::TRUE
+}
+
 /// The feature struct to chain into device creation, made once and kept for the process
 /// (wgpu-hal borrows it for the callback's lifetime).
-pub fn device_feature() -> &'static mut vk::PhysicalDeviceFragmentDensityMapFeaturesEXT<'static> {
+pub fn device_feature(
+    non_subsampled: bool,
+) -> &'static mut vk::PhysicalDeviceFragmentDensityMapFeaturesEXT<'static> {
     Box::leak(Box::new(
-        vk::PhysicalDeviceFragmentDensityMapFeaturesEXT::default().fragment_density_map(true),
+        vk::PhysicalDeviceFragmentDensityMapFeaturesEXT::default()
+            .fragment_density_map(true)
+            .fragment_density_map_non_subsampled_images(non_subsampled),
     ))
 }
 
@@ -295,17 +316,22 @@ impl DensityImage {
 pub unsafe fn density_view(
     device: &ash::Device,
     image: vk::Image,
+    layers: u32,
 ) -> Result<vk::ImageView, String> {
     let info = vk::ImageViewCreateInfo::default()
         .image(image)
-        .view_type(vk::ImageViewType::TYPE_2D)
+        .view_type(if layers == 1 {
+            vk::ImageViewType::TYPE_2D
+        } else {
+            vk::ImageViewType::TYPE_2D_ARRAY
+        })
         .format(vk::Format::R8G8_UNORM)
         .subresource_range(vk::ImageSubresourceRange {
             aspect_mask: vk::ImageAspectFlags::COLOR,
             base_mip_level: 0,
             level_count: 1,
             base_array_layer: 0,
-            layer_count: 1,
+            layer_count: layers,
         });
     // Safety: a valid image of this device.
     unsafe { device.create_image_view(&info, None) }

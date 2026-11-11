@@ -10,6 +10,8 @@ pub struct DisplayInfo {
     pub current_hz: Option<f32>,
     pub scale_override: Option<f32>,
     pub foveated: bool,
+    /// Device can attempt the native array path; runtime creation may still refuse it.
+    pub foveated_stereo_capable: bool,
     pub super_resolution_supported: bool,
 }
 

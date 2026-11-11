@@ -80,6 +80,7 @@ pub struct Quest {
     /// Foveation asked for and possible so far (the runtime's extensions, then the GPU's); `Off`
     /// when not wanted or when something is missing (logged).
     fov_level: foveation::Level,
+    foveated_stereo_images: bool,
     session: Option<Session>,
 }
 
@@ -98,6 +99,11 @@ struct Session {
     head_space: xr::Space,
     eyes: [Chain; 2],
     retired_eyes: Vec<[Chain; 2]>,
+    stereo_array: Option<Chain>,
+    retired_stereo: Vec<Chain>,
+    stereo_array_failed: bool,
+    request_stereo_array: bool,
+    discard_world: bool,
     menu: Chain,
     /// The overlay panels' images (the menu panel's size), when the game wants one this frame
     /// (`input::overlay_at`): Visor's hotbar wheel hung in front of the hand, the chat, the
@@ -192,6 +198,8 @@ enum Pending {
         screen: bool,
         /// The vignette's image was acquired to be filled.
         filling: bool,
+        /// One native two-layer swapchain instead of two mono swapchains.
+        array: bool,
         /// Each overlay panel's image holds the game's overlay this frame.
         overlay: [bool; input::OVERLAYS],
     },
@@ -353,6 +361,7 @@ impl Quest {
             resize_retry: None,
             format: None,
             fov_level,
+            foveated_stereo_images: false,
             session: None,
         })
     }
@@ -442,7 +451,10 @@ impl Quest {
         if let Some(f) = &foveation {
             log::info!("Horizon XR: foveation {:?} on", f.level);
         }
-        horizon_client_input::headset_display::update(|info| info.foveated = foveation.is_some());
+        horizon_client_input::headset_display::update(|info| {
+            info.foveated = foveation.is_some();
+            info.foveated_stereo_capable = foveation.is_some() && self.foveated_stereo_images;
+        });
         let menu = chain(MENU_SIZE, "menu panel", None)?;
         let overlays = std::array::from_fn(|_| None);
         let vignette = chain([VIGNETTE_SIZE; 2], "comfort vignette", None)?;
@@ -451,6 +463,11 @@ impl Quest {
         self.session = Some(Session {
             foveation,
             retired_eyes: Vec::new(),
+            stereo_array: None,
+            retired_stereo: Vec::new(),
+            stereo_array_failed: false,
+            request_stereo_array: false,
+            discard_world: false,
             dynres: dynres::DynamicScale::default(),
             last_begin: None,
             tracking,
@@ -686,6 +703,29 @@ impl Chain {
         label: &str,
         foveation: Option<&foveation::Foveation>,
     ) -> Result<Self, String> {
+        Self::new_layers(
+            session,
+            device,
+            format,
+            wgpu_format,
+            size,
+            label,
+            foveation,
+            1,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn new_layers(
+        session: &xr::Session<xr::Vulkan>,
+        device: &wgpu::Device,
+        format: u32,
+        wgpu_format: wgpu::TextureFormat,
+        size: [u32; 2],
+        label: &str,
+        foveation: Option<&foveation::Foveation>,
+        layers: u32,
+    ) -> Result<Self, String> {
         let mut usage = xr::SwapchainUsageFlags::COLOR_ATTACHMENT
             | xr::SwapchainUsageFlags::SAMPLED
             | xr::SwapchainUsageFlags::TRANSFER_SRC
@@ -704,7 +744,7 @@ impl Chain {
                         width: size[0],
                         height: size[1],
                         face_count: 1,
-                        array_size: 1,
+                        array_size: layers,
                         mip_count: 1,
                     })
                     .map_err(xr_error("creating a swapchain"))?;
@@ -724,7 +764,7 @@ impl Chain {
                     width: size[0],
                     height: size[1],
                     face_count: 1,
-                    array_size: 1,
+                    array_size: layers,
                     mip_count: 1,
                 };
                 // Safety: a swapchain of this session, as the same call without foveation makes.
@@ -736,7 +776,7 @@ impl Chain {
         let extent = wgpu::Extent3d {
             width: size[0],
             height: size[1],
-            depth_or_array_layers: 1,
+            depth_or_array_layers: layers,
         };
         let hal = unsafe { device.as_hal::<Vulkan>() }.ok_or("not a Vulkan device")?;
         let mut foveated = Vec::new();
@@ -761,7 +801,7 @@ impl Chain {
                 // The runtime's density map for this image: the render passes into it take it.
                 if let Some(map) = density.get(i) {
                     // Safety: the runtime's map of this swapchain's image, on this device.
-                    match unsafe { foveation::density_view(hal.raw_device(), map.image) } {
+                    match unsafe { foveation::density_view(hal.raw_device(), map.image, layers) } {
                         Ok(view) => {
                             // Safety: the extension and feature are on (checked at device
                             // creation), and the view lives as long as the device.
@@ -1576,6 +1616,9 @@ impl Headset for Quest {
                 }
             }
         };
+        let non_subsampled = density && foveation::non_subsampled_images(adapter);
+        self.foveated_stereo_images = non_subsampled;
+        log::info!("Horizon XR: foveated multiview non-subsampled image support {non_subsampled}");
         let open = {
             // Safety: only opened from here; dropped before wgpu takes the adapter back.
             let hal = unsafe { adapter.as_hal::<Vulkan>() }.ok_or("not a Vulkan adapter")?;
@@ -1603,7 +1646,8 @@ impl Headset for Quest {
                                 }
                                 // The feature joins the head of the create info's chain.
                                 let info = *args.create_info;
-                                *args.create_info = info.push_next(foveation::device_feature());
+                                *args.create_info =
+                                    info.push_next(foveation::device_feature(non_subsampled));
                             }
                         },
                     )),
@@ -1666,12 +1710,13 @@ impl Headset for Quest {
             log::warn!("Horizon XR: beginning a frame: {e}");
             return Targets::Skip;
         }
-        if !s.retired_eyes.is_empty()
+        if (!s.retired_eyes.is_empty() || !s.retired_stereo.is_empty())
             && device
                 .poll(wgpu::PollType::Poll)
                 .is_ok_and(|status| status.is_queue_empty())
         {
             s.retired_eyes.clear();
+            s.retired_stereo.clear();
         }
         let desired_scale = horizon_vivecraft::settings::render_scale(
             self.scale_override
@@ -1815,6 +1860,69 @@ impl Headset for Quest {
                 }
             }
         }
+        s.discard_world = false;
+        let wants_array = self.foveated_stereo_images
+            && s.request_stereo_array
+            && layers != Layers::Flat
+            && s.foveation.is_some()
+            && !s.stereo_array_failed;
+        if wants_array
+            && s.stereo_array
+                .as_ref()
+                .is_none_or(|chain| chain.size != self.eye_size)
+        {
+            // Keep old images until submitted work has finished, as for mono resize.
+            if s.retired_stereo.len() < 2 {
+                let made = self
+                    .format
+                    .ok_or_else(|| "no stereo format".to_string())
+                    .and_then(|(format, gpu_format)| {
+                        Chain::new_layers(
+                            &s.session,
+                            device,
+                            format,
+                            gpu_format,
+                            self.eye_size,
+                            "foveated stereo eyes",
+                            s.foveation.as_ref(),
+                            2,
+                        )
+                    })
+                    .and_then(|chain| {
+                        if chain
+                            .density
+                            .as_ref()
+                            .is_some_and(|(_, maps)| maps.len() == chain.images.len())
+                        {
+                            Ok(chain)
+                        } else {
+                            Err("incomplete stereo density maps".to_string())
+                        }
+                    });
+                match made {
+                    Ok(chain) => {
+                        if let Some(old) = s.stereo_array.replace(chain) {
+                            s.retired_stereo.push(old);
+                        }
+                        log::info!("Horizon XR: experimental native foveated stereo array ready");
+                    }
+                    Err(error) => {
+                        s.stereo_array_failed = true;
+                        horizon_client_input::headset_display::update(|info| {
+                            info.foveated_stereo_capable = false
+                        });
+                        log::warn!(
+                            "Horizon XR: foveated multiview unavailable, keeping per-eye rendering: {error}"
+                        );
+                    }
+                }
+            }
+        }
+        let use_array = wants_array
+            && !s.stereo_array_failed
+            && s.stereo_array
+                .as_ref()
+                .is_some_and(|chain| chain.size == self.eye_size);
         let time = state.predicted_display_time;
         s.sync_input(time, menu, layers == Layers::Flat);
         let views = match s.session.locate_views(VIEW_TYPE, time, &s.space) {
@@ -1863,8 +1971,22 @@ impl Headset for Quest {
         } else {
             let screen = layers == Layers::Screen;
             let poses = s.eye_poses(&views);
-            s.eyes[0].acquire().and_then(|left| {
-                let right = s.eyes[1].acquire().inspect_err(|_| s.eyes[0].release())?;
+            let eye_images = if use_array {
+                let acquired = s.stereo_array.as_mut().unwrap().acquire();
+                if acquired.is_err() {
+                    s.stereo_array_failed = true;
+                    horizon_client_input::headset_display::update(|info| {
+                        info.foveated_stereo_capable = false
+                    });
+                }
+                acquired.map(|image| [image.clone(), image])
+            } else {
+                s.eyes[0].acquire().and_then(|left| {
+                    let right = s.eyes[1].acquire().inspect_err(|_| s.eyes[0].release())?;
+                    Ok([left, right])
+                })
+            };
+            eye_images.map(|[left, right]| {
                 // The HUD goes on the menu panel's swapchain, shown on its own panel.
                 let shown = if screen {
                     s.panel.is_some()
@@ -1913,13 +2035,10 @@ impl Headset for Quest {
                     hud: hud.is_some(),
                     screen,
                     filling: upload.is_some(),
+                    array: use_array,
                     overlay: std::array::from_fn(|i| overlay[i].is_some()),
                 });
-                Ok(Targets::Eyes(
-                    [(left, poses[0]), (right, poses[1])],
-                    hud,
-                    upload,
-                ))
+                Targets::Eyes([(left, poses[0]), (right, poses[1])], hud, upload)
             })
         };
         diag::waited(2, waiting.elapsed());
@@ -1932,6 +2051,17 @@ impl Headset for Quest {
                 self.end();
                 Targets::Skip
             }
+        }
+    }
+
+    fn request_stereo_array(&mut self, enabled: bool) {
+        if let Some(s) = self.session.as_mut() {
+            s.request_stereo_array = enabled;
+        }
+    }
+    fn discard_frame(&mut self) {
+        if let Some(s) = self.session.as_mut() {
+            s.discard_world = true;
         }
     }
 
@@ -1973,10 +2103,15 @@ impl Headset for Quest {
                 hud,
                 screen,
                 filling,
+                array,
                 overlay,
             } => {
-                s.eyes[0].release();
-                s.eyes[1].release();
+                if array {
+                    s.stereo_array.as_mut().unwrap().release();
+                } else {
+                    s.eyes[0].release();
+                    s.eyes[1].release();
+                }
                 if hud {
                     s.menu.release();
                 }
@@ -1989,154 +2124,177 @@ impl Headset for Quest {
                     s.vignette.release();
                     s.vignette_filled = true;
                 }
-                let projection_views = [
-                    xr::CompositionLayerProjectionView::new()
-                        .pose(views[0].pose)
-                        .fov(views[0].fov)
-                        .sub_image(s.eyes[0].sub_image()),
-                    xr::CompositionLayerProjectionView::new()
-                        .pose(views[1].pose)
-                        .fov(views[1].fov)
-                        .sub_image(s.eyes[1].sub_image()),
-                ];
-                let layer = xr::CompositionLayerProjection::new()
-                    .space(&s.space)
-                    .views(&projection_views);
-                let filter = layer_filter::settings(
-                    self.instance.exts().fb_composition_layer_settings.is_some(),
-                    input::settings().bool("horizonSuperResolution"),
-                );
-                let layer = layer_filter::apply(layer, filter.as_ref());
-                // The HUD over the world, its transparent parts showing it
-                // (premultiplied: the HUD's alpha blending onto a clear image).
-                let panel = if screen { s.panel } else { s.hud_at };
-                // The HUD's opacity scales its premultiplied colour and alpha alike.
-                let opacity = if screen {
-                    1.0
+                if s.discard_world {
+                    s.stream.end(time, self.blend, &[])
                 } else {
-                    input::settings().float("hudOpacity")
-                };
-                let fade = xr::sys::CompositionLayerColorScaleBiasKHR {
-                    ty: xr::sys::CompositionLayerColorScaleBiasKHR::TYPE,
-                    next: std::ptr::null(),
-                    color_scale: xr::Color4f {
-                        r: opacity,
-                        g: opacity,
-                        b: opacity,
-                        a: opacity,
-                    },
-                    color_bias: xr::Color4f {
-                        r: 0.0,
-                        g: 0.0,
-                        b: 0.0,
-                        a: 0.0,
-                    },
-                };
-                let fades = opacity < 1.0
-                    && self
-                        .instance
-                        .exts()
-                        .khr_composition_layer_color_scale_bias
-                        .is_some();
-                let quad = panel.filter(|_| hud).map(|panel| {
-                    let quad = xr::CompositionLayerQuad::new()
+                    let projection_views = [
+                        xr::CompositionLayerProjectionView::new()
+                            .pose(views[0].pose)
+                            .fov(views[0].fov)
+                            .sub_image(if array {
+                                s.stereo_array
+                                    .as_ref()
+                                    .unwrap()
+                                    .sub_image()
+                                    .image_array_index(0)
+                            } else {
+                                s.eyes[0].sub_image()
+                            }),
+                        xr::CompositionLayerProjectionView::new()
+                            .pose(views[1].pose)
+                            .fov(views[1].fov)
+                            .sub_image(if array {
+                                s.stereo_array
+                                    .as_ref()
+                                    .unwrap()
+                                    .sub_image()
+                                    .image_array_index(1)
+                            } else {
+                                s.eyes[1].sub_image()
+                            }),
+                    ];
+                    let layer = xr::CompositionLayerProjection::new()
                         .space(&s.space)
-                        .layer_flags(xr::CompositionLayerFlags::BLEND_TEXTURE_SOURCE_ALPHA)
-                        .eye_visibility(xr::EyeVisibility::BOTH)
-                        .sub_image(s.menu.sub_image())
-                        .pose(panel.pose())
-                        .size(panel.size());
-                    if !fades {
-                        return quad;
-                    }
-                    let mut raw = quad.into_raw();
-                    raw.next = std::ptr::from_ref(&fade).cast();
-                    // Safety: the same layer with the extension's struct chained
-                    // on; `fade` outlives the frame's end below.
-                    unsafe { xr::CompositionLayerQuad::from_raw(raw) }
-                });
-                // The comfort vignette, fixed to the head: the further it closes
-                // in, the smaller its quad (its clear middle shrinks with it).
-                let vignette = (s.vignette_filled && s.vignette_level > 0.02).then(|| {
-                    let width = VIGNETTE_WIDTH / s.vignette_level;
-                    xr::CompositionLayerQuad::new()
-                        .space(&s.head_space)
-                        .layer_flags(xr::CompositionLayerFlags::BLEND_TEXTURE_SOURCE_ALPHA)
-                        .eye_visibility(xr::EyeVisibility::BOTH)
-                        .sub_image(s.vignette.sub_image())
-                        .pose(xr::Posef {
-                            orientation: xr::Quaternionf::IDENTITY,
-                            position: xr::Vector3f {
-                                x: 0.0,
-                                y: 0.0,
-                                z: -1.0,
-                            },
-                        })
-                        .size(xr::Extent2Df {
-                            width,
-                            height: width,
-                        })
-                });
-                // The overlay panel: where the game put it (the play space's hand frame, turned
-                // back into the room's), shown with the HUD's blending over the world.
-                let rest = s.rest.unwrap_or(Vec3::ZERO);
-                let scale = input::world_scale();
-                let overlay_quads: Vec<xr::CompositionLayerQuad<'_, xr::Vulkan>> = (0
-                    ..input::OVERLAYS)
-                    .filter_map(|i| {
-                        if !overlay[i] {
-                            return None;
+                        .views(&projection_views);
+                    let filter = layer_filter::settings(
+                        self.instance.exts().fb_composition_layer_settings.is_some(),
+                        input::settings().bool("horizonSuperResolution"),
+                    );
+                    let layer = layer_filter::apply(layer, filter.as_ref());
+                    // The HUD over the world, its transparent parts showing it
+                    // (premultiplied: the HUD's alpha blending onto a clear image).
+                    let panel = if screen { s.panel } else { s.hud_at };
+                    // The HUD's opacity scales its premultiplied colour and alpha alike.
+                    let opacity = if screen {
+                        1.0
+                    } else {
+                        input::settings().float("hudOpacity")
+                    };
+                    let fade = xr::sys::CompositionLayerColorScaleBiasKHR {
+                        ty: xr::sys::CompositionLayerColorScaleBiasKHR::TYPE,
+                        next: std::ptr::null(),
+                        color_scale: xr::Color4f {
+                            r: opacity,
+                            g: opacity,
+                            b: opacity,
+                            a: opacity,
+                        },
+                        color_bias: xr::Color4f {
+                            r: 0.0,
+                            g: 0.0,
+                            b: 0.0,
+                            a: 0.0,
+                        },
+                    };
+                    let fades = opacity < 1.0
+                        && self
+                            .instance
+                            .exts()
+                            .khr_composition_layer_color_scale_bias
+                            .is_some();
+                    let quad = panel.filter(|_| hud).map(|panel| {
+                        let quad = xr::CompositionLayerQuad::new()
+                            .space(&s.space)
+                            .layer_flags(xr::CompositionLayerFlags::BLEND_TEXTURE_SOURCE_ALPHA)
+                            .eye_visibility(xr::EyeVisibility::BOTH)
+                            .sub_image(s.menu.sub_image())
+                            .pose(panel.pose())
+                            .size(panel.size());
+                        if !fades {
+                            return quad;
                         }
-                        // The handles' strip is placed in the room by the panel; the others by
-                        // the game, in the play space's hand frame.
-                        let (at, q, width, height) = if i == input::OVERLAY_HANDLES {
-                            let (at, q, w, h) = s.handles_at?;
-                            (at, q, w, h)
-                        } else {
-                            let spec = input::overlay_at(i)?;
-                            let relative =
-                                (spec.pos - Vec3::new(0.0, (scale - 1.0) * rest.y, 0.0)) / scale;
-                            (
-                                rest + relative,
-                                spec.rot,
-                                spec.width / scale,
-                                spec.height / scale,
+                        let mut raw = quad.into_raw();
+                        raw.next = std::ptr::from_ref(&fade).cast();
+                        // Safety: the same layer with the extension's struct chained
+                        // on; `fade` outlives the frame's end below.
+                        unsafe { xr::CompositionLayerQuad::from_raw(raw) }
+                    });
+                    // The comfort vignette, fixed to the head: the further it closes
+                    // in, the smaller its quad (its clear middle shrinks with it).
+                    let vignette = (s.vignette_filled && s.vignette_level > 0.02).then(|| {
+                        let width = VIGNETTE_WIDTH / s.vignette_level;
+                        xr::CompositionLayerQuad::new()
+                            .space(&s.head_space)
+                            .layer_flags(xr::CompositionLayerFlags::BLEND_TEXTURE_SOURCE_ALPHA)
+                            .eye_visibility(xr::EyeVisibility::BOTH)
+                            .sub_image(s.vignette.sub_image())
+                            .pose(xr::Posef {
+                                orientation: xr::Quaternionf::IDENTITY,
+                                position: xr::Vector3f {
+                                    x: 0.0,
+                                    y: 0.0,
+                                    z: -1.0,
+                                },
+                            })
+                            .size(xr::Extent2Df {
+                                width,
+                                height: width,
+                            })
+                    });
+                    // The overlay panel: where the game put it (the play space's hand frame, turned
+                    // back into the room's), shown with the HUD's blending over the world.
+                    let rest = s.rest.unwrap_or(Vec3::ZERO);
+                    let scale = input::world_scale();
+                    let overlay_quads: Vec<xr::CompositionLayerQuad<'_, xr::Vulkan>> = (0
+                        ..input::OVERLAYS)
+                        .filter_map(|i| {
+                            if !overlay[i] {
+                                return None;
+                            }
+                            // The handles' strip is placed in the room by the panel; the others by
+                            // the game, in the play space's hand frame.
+                            let (at, q, width, height) = if i == input::OVERLAY_HANDLES {
+                                let (at, q, w, h) = s.handles_at?;
+                                (at, q, w, h)
+                            } else {
+                                let spec = input::overlay_at(i)?;
+                                let relative = (spec.pos
+                                    - Vec3::new(0.0, (scale - 1.0) * rest.y, 0.0))
+                                    / scale;
+                                (
+                                    rest + relative,
+                                    spec.rot,
+                                    spec.width / scale,
+                                    spec.height / scale,
+                                )
+                            };
+                            Some(
+                                xr::CompositionLayerQuad::new()
+                                    .space(&s.space)
+                                    .layer_flags(
+                                        xr::CompositionLayerFlags::BLEND_TEXTURE_SOURCE_ALPHA,
+                                    )
+                                    .eye_visibility(xr::EyeVisibility::BOTH)
+                                    .sub_image(s.overlays[i].as_ref()?.sub_image())
+                                    .pose(xr::Posef {
+                                        orientation: xr::Quaternionf {
+                                            x: q.x,
+                                            y: q.y,
+                                            z: q.z,
+                                            w: q.w,
+                                        },
+                                        position: xr::Vector3f {
+                                            x: at.x,
+                                            y: at.y,
+                                            z: at.z,
+                                        },
+                                    })
+                                    .size(xr::Extent2Df { width, height }),
                             )
-                        };
-                        Some(
-                            xr::CompositionLayerQuad::new()
-                                .space(&s.space)
-                                .layer_flags(xr::CompositionLayerFlags::BLEND_TEXTURE_SOURCE_ALPHA)
-                                .eye_visibility(xr::EyeVisibility::BOTH)
-                                .sub_image(s.overlays[i].as_ref()?.sub_image())
-                                .pose(xr::Posef {
-                                    orientation: xr::Quaternionf {
-                                        x: q.x,
-                                        y: q.y,
-                                        z: q.z,
-                                        w: q.w,
-                                    },
-                                    position: xr::Vector3f {
-                                        x: at.x,
-                                        y: at.y,
-                                        z: at.z,
-                                    },
-                                })
-                                .size(xr::Extent2Df { width, height }),
-                        )
-                    })
-                    .collect();
-                let mut layers: Vec<&xr::CompositionLayerBase<'_, xr::Vulkan>> = vec![&layer];
-                if let Some(quad) = &quad {
-                    layers.push(quad);
+                        })
+                        .collect();
+                    let mut layers: Vec<&xr::CompositionLayerBase<'_, xr::Vulkan>> = vec![&layer];
+                    if let Some(quad) = &quad {
+                        layers.push(quad);
+                    }
+                    for quad in &overlay_quads {
+                        layers.push(quad);
+                    }
+                    if let Some(vignette) = &vignette {
+                        layers.push(vignette);
+                    }
+                    s.stream.end(time, self.blend, &layers)
                 }
-                for quad in &overlay_quads {
-                    layers.push(quad);
-                }
-                if let Some(vignette) = &vignette {
-                    layers.push(vignette);
-                }
-                s.stream.end(time, self.blend, &layers)
             }
             Pending::Menu {
                 time,

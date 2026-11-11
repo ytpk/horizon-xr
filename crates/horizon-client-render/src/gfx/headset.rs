@@ -42,8 +42,11 @@ pub enum Layers {
 pub enum Targets {
     /// The runtime wants no frame drawn now (session not visible, not running).
     Skip,
-    /// The world, one image per eye (left, right) sized like `Headset::eye_size`,
-    /// and the panel's image (`Headset::menu_size`, drawn over a transparent
+    /// The world, normally one image per eye (left, right) sized like `Headset::eye_size`.
+    /// After an accepted `request_stereo_array`, both entries may instead be clones
+    /// of one two-layer texture: layer 0 is left, layer 1 right. That image must
+    /// only be drawn with multiview, never through the mono fallback.
+    /// Also includes the panel's image (`Headset::menu_size`, drawn over a transparent
     /// background) with the HUD or the open screen, which the runtime shows in
     /// front of the world: a HUD drawn into the eyes' images would sit at the
     /// same place for both eyes, as if infinitely far, over blocks nearer than
@@ -89,6 +92,10 @@ pub trait Headset: Send {
     fn eye_size(&self) -> [u32; 2];
     /// Pixels of the menu panel's image.
     fn menu_size(&self) -> [u32; 2];
+    /// Ask for a native two-layer image only after stereo compatibility was checked.
+    fn request_stereo_array(&mut self, _enabled: bool) {}
+    /// Release acquired images normally, but submit no projection for a failed frame.
+    fn discard_frame(&mut self) {}
     /// Waits for the runtime's next frame and acquires the images `layers` need.
     fn begin(&mut self, device: &wgpu::Device, layers: Layers) -> Targets;
     /// The frame drawn into `begin`'s images is submitted: hand them to the runtime.
