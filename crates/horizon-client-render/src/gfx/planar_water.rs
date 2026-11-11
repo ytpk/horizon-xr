@@ -100,6 +100,113 @@ pub fn classify(vertices: &[[f32; 3]]) -> Option<Plane> {
     Some(Plane { y, up })
 }
 
+/// Conservative face rejection for mixed shore sections. Only rectangular,
+/// axis-aligned quads are classified; slopes and arbitrary models stay intact.
+#[derive(Default)]
+pub struct Faces {
+    groups: Vec<(usize, bool, f64)>,
+    quads: Vec<u32>,
+    visible: Vec<bool>,
+}
+impl Faces {
+    pub fn new(vertices: &[[f32; 3]]) -> Self {
+        let mut result = Self::default();
+        let mut groups = BTreeMap::new();
+        for q in vertices.as_chunks::<4>().0 {
+            let group = (0..3).find_map(|axis| {
+                let offset = q[0][axis];
+                if q.iter()
+                    .any(|p| !p.iter().all(|v| v.is_finite()) || p[axis] != offset)
+                {
+                    return None;
+                }
+                // Rotate axes cyclically so the planar classifier's +Y winding
+                // becomes +X/+Y/+Z respectively, without changing orientation.
+                let q = q.map(|p| match axis {
+                    0 => [p[2], p[0], p[1]],
+                    1 => p,
+                    _ => [p[1], p[2], p[0]],
+                });
+                let low = [
+                    q.iter().map(|p| p[0]).fold(f32::INFINITY, f32::min),
+                    q.iter().map(|p| p[2]).fold(f32::INFINITY, f32::min),
+                ];
+                let high = [
+                    q.iter().map(|p| p[0]).fold(f32::NEG_INFINITY, f32::max),
+                    q.iter().map(|p| p[2]).fold(f32::NEG_INFINITY, f32::max),
+                ];
+                if low[0] >= high[0] || low[1] >= high[1] {
+                    return None;
+                }
+                let mut corners = 0;
+                for p in q {
+                    let x = if p[0] == low[0] {
+                        0
+                    } else if p[0] == high[0] {
+                        1
+                    } else {
+                        return None;
+                    };
+                    let z = if p[2] == low[1] {
+                        0
+                    } else if p[2] == high[1] {
+                        1
+                    } else {
+                        return None;
+                    };
+                    corners |= 1 << (2 * x + z);
+                }
+                if corners != 15 {
+                    return None;
+                }
+                let normal = |a: [f32; 3], b: [f32; 3], c: [f32; 3]| {
+                    (b[2] - a[2]) * (c[0] - a[0]) - (b[0] - a[0]) * (c[2] - a[2])
+                };
+                let (n, n2) = (normal(q[0], q[1], q[2]), normal(q[2], q[3], q[0]));
+                if !n.is_finite()
+                    || !n2.is_finite()
+                    || n == 0.0
+                    || n2 == 0.0
+                    || (n > 0.0) != (n2 > 0.0)
+                {
+                    return None;
+                }
+                let positive = n > 0.0;
+                let group = *groups
+                    .entry((axis, positive, key(offset)))
+                    .or_insert_with(|| {
+                        let group = result.groups.len();
+                        result.groups.push((axis, positive, f64::from(offset)));
+                        group
+                    });
+                Some(group)
+            });
+            result.quads.push(group.map_or(u32::MAX, |index| index as u32));
+        }
+        result.visible.resize(result.groups.len(), true);
+        result
+    }
+    pub fn classified(&self) -> bool {
+        !self.groups.is_empty()
+    }
+    pub fn update(&mut self, eyes: [[f64; 3]; 2], origin: [i32; 3]) -> bool {
+        let mut changed = false;
+        for (i, &(axis, positive, offset)) in self.groups.iter().enumerate() {
+            let plane = f64::from(origin[axis]) + offset;
+            let sign = if positive { 1.0 } else { -1.0 };
+            // Keep faces on the plane and those visible to either eye.
+            let visible = eyes.iter().any(|eye| (eye[axis] - plane) * sign >= -0.0001);
+            changed |= self.visible[i] != visible;
+            self.visible[i] = visible;
+        }
+        changed
+    }
+    pub fn keep(&self, quad: usize) -> bool {
+        let group = self.quads[quad];
+        group == u32::MAX || self.visible[group as usize]
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

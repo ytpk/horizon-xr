@@ -36,6 +36,8 @@ pub struct SortState {
     bounds: Option<[glam::Vec3; 2]>,
     plane: Option<super::planar_water::Plane>,
     facing: Option<u8>,
+    faces: super::planar_water::Faces,
+    filtered: bool,
     index_count: u32,
 }
 
@@ -48,6 +50,8 @@ impl SortState {
             bounds: None,
             plane: None,
             facing: None,
+            faces: Default::default(),
+            filtered: false,
             index_count,
         }
     }
@@ -74,8 +78,11 @@ impl SortState {
             }
             let pad = glam::Vec3::splat(crate::mesher::SectionMesh::BOUNDS_PAD);
             state.bounds = Some([low - pad, high + pad]);
-            state.plane =
-                super::planar_water::classify(&vertices.iter().map(|v| v.pos).collect::<Vec<_>>());
+            let positions: Vec<_> = vertices.iter().map(|v| v.pos).collect();
+            state.plane = super::planar_water::classify(&positions);
+            if state.plane.is_none() {
+                state.faces = super::planar_water::Faces::new(&positions);
+            }
         }
         state
     }
@@ -90,7 +97,9 @@ impl SortState {
         self.index_count
     }
     pub fn needs_headset_update(&self, enabled: bool) -> bool {
-        self.facing.is_some() || enabled && self.plane.is_some()
+        self.facing.is_some()
+            || self.filtered
+            || enabled && (self.plane.is_some() || self.faces.classified())
     }
 
     /// Disjoint coplanar faces cannot blend over each other. Their original
@@ -134,10 +143,69 @@ impl SortState {
         }
     }
 
-    fn restore_regular(&mut self) {
-        if self.facing.take().is_some() {
+    /// Mixed meshes retain vanilla ordering, but omit axis-aligned back faces
+    /// before vertex processing. Cache group visibility rather than walking all
+    /// water quads every frame. Full eye positions matter at vertical banks.
+    pub fn update_headset_eyes<'a>(
+        &mut self,
+        camera: [f64; 3],
+        origin: [i32; 3],
+        eyes: [[f64; 3]; 2],
+        sorter: &'a mut Sorter,
+        lod: bool,
+    ) -> Option<&'a [u32]> {
+        if self.plane.is_some() || !self.faces.classified() {
+            return self.update_headset(camera, origin, eyes.map(|eye| eye[1]), sorter, lod);
+        }
+        if self.faces.update(eyes, origin) || !self.filtered {
             self.last = None;
         }
+        self.filtered = true;
+        if !self.resort_needed(camera, origin, lod) {
+            return None;
+        }
+        sorter.order.clear();
+        sorter
+            .order
+            .extend(self.centers.iter().enumerate().filter_map(|(i, c)| {
+                if !self.faces.keep(i) {
+                    return None;
+                }
+                let [x, y, z] =
+                    std::array::from_fn(|j| (camera[j] - f64::from(origin[j])) as f32 - c[j]);
+                Some((i as u32, x * x + y * y + z * z))
+            }));
+        sorter.order.sort_by(|a, b| b.1.total_cmp(&a.1));
+        sorter.indices.clear();
+        for &(quad, _) in &sorter.order {
+            let v = quad * 4;
+            sorter.indices.extend([v, v + 1, v + 2, v + 2, v + 3, v]);
+        }
+        self.index_count = sorter.indices.len() as u32;
+        Some(&sorter.indices)
+    }
+
+    fn resort_needed(&mut self, camera: [f64; 3], origin: [i32; 3], lod: bool) -> bool {
+        let block = camera.map(|v| v.floor() as i32);
+        let pov = if lod {
+            [0; 3]
+        } else {
+            std::array::from_fn(|i| ((block[i] >> 4) - (origin[i] >> 4)).clamp(-1, 1))
+        };
+        if self.last.is_some_and(|(last, previous)| {
+            previous == pov && (last == block || !lod && !pov.contains(&0))
+        }) {
+            return false;
+        }
+        self.last = Some((block, pov));
+        true
+    }
+
+    fn restore_regular(&mut self) {
+        if self.facing.take().is_some() || self.filtered {
+            self.last = None;
+        }
+        self.filtered = false;
         self.index_count = self.centers.len() as u32 * 6;
     }
 
@@ -206,6 +274,64 @@ mod tests {
             .chain(q.into_iter().rev())
             .map(|p| crate::mesher::TerrainVertex::new(p, [0.0; 2], 0, 0, 0))
             .collect()
+    }
+
+    #[test]
+    fn mixed_water_keeps_sort_order_and_rechecks_both_eyes_inside_one_block() {
+        let mut mesh = plane_mesh();
+        let wall: Vec<_> = plane_mesh()
+            .into_iter()
+            .map(|mut v| {
+                // +Y/-Y becomes +X/-X at x=0.5.
+                v.pos = [v.pos[1] - 0.5, v.pos[2], v.pos[0]];
+                v
+            })
+            .collect();
+        mesh.extend(wall);
+        let mut state = SortState::from_vertices(&mesh, true);
+        assert!(state.plane.is_none()); // the old all-flat fast path rejects this shore
+        let mut sorter = Sorter::default();
+        let eye = [0.6, 3.0, 0.5];
+        let indices = state
+            .update_headset_eyes(eye, [0; 3], [eye; 2], &mut sorter, false)
+            .unwrap()
+            .to_vec();
+        let mut reference = Sorter::default();
+        let expected: Vec<_> = reference
+            .sort(&state.centers, eye.map(|v| v as f32))
+            .as_chunks::<6>()
+            .0
+            .iter()
+            .filter(|q| matches!(q[0] / 4, 0 | 2))
+            .flatten()
+            .copied()
+            .collect();
+        assert_eq!(indices, expected);
+        assert_eq!(state.index_count(), 12);
+        assert!(
+            state
+                .update_headset_eyes(eye, [0; 3], [eye; 2], &mut sorter, false)
+                .is_none()
+        );
+        // Eye separation crosses the wall without changing the camera's block.
+        let other_eye = [0.4, 3.0, 0.5];
+        assert_eq!(
+            state
+                .update_headset_eyes(eye, [0; 3], [eye, other_eye], &mut sorter, false)
+                .unwrap()
+                .len(),
+            18
+        );
+        assert_eq!(state.index_count(), 18);
+        // A custom shader path must restore all original geometry and indices.
+        assert!(state.update(eye, [0; 3], &mut sorter).is_some());
+        assert_eq!(state.index_count(), 24);
+        assert!(
+            state
+                .update_headset_eyes(eye, [0; 3], [eye; 2], &mut sorter, false)
+                .is_some()
+        );
+        assert_eq!(state.index_count(), 12);
     }
 
     #[test]

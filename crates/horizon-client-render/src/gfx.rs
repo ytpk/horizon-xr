@@ -9395,13 +9395,12 @@ impl Renderer {
         // (at least 15) of the visible list. Cached views avoid needless sorts.
         self.translucent_draws.clear();
         let vr_transparency = self.headset_eye.is_some()
+            && !warp_on
             && !native_render::world_drawn_hooked()
             && self.native.is_none()
             && self.pack_post.as_ref().is_none_or(|p| p.1.is_none());
-        let eye_y = [
-            camera.y + f64::from(views.primary().view.inverse().w_axis.y),
-            camera.y + f64::from(views.views().last().unwrap().view.inverse().w_axis.y),
-        ];
+        let water_eyes = [views.primary(), views.views().last().unwrap()]
+            .map(|eye| (camera + eye.view.inverse().w_axis.truncate().as_dvec3()).to_array());
         let count = visible.len() + visible_lods.len();
         let budget = (count / 8).max(15).min(count);
         self.translucency_cursor %= count.max(1);
@@ -9426,10 +9425,10 @@ impl Renderer {
                     || scheduled
                     || s.sort.needs_headset_update(vr_transparency))
                     && let Some(indices) = if vr_transparency {
-                        s.sort.update_headset(
+                        s.sort.update_headset_eyes(
                             camera.to_array(),
                             origin,
-                            eye_y,
+                            water_eyes,
                             &mut self.translucent_sorter,
                             false,
                         )
@@ -9480,10 +9479,10 @@ impl Renderer {
                     || scheduled
                     || s.sort.needs_headset_update(vr_transparency))
                     && let Some(indices) = if vr_transparency {
-                        s.sort.update_headset(
+                        s.sort.update_headset_eyes(
                             camera.to_array(),
                             v.key.origin(),
-                            eye_y,
+                            water_eyes,
                             &mut self.translucent_sorter,
                             true,
                         )
