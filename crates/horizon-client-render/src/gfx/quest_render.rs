@@ -77,6 +77,9 @@ impl Renderer {
             &mut self.stars.pipeline,
             &mut self.weather.pipeline,
         ];
+        if let Some(lean) = &mut self.lean_cutout {
+            slots.push(lean);
+        }
         slots.extend(self.screen_pipelines.iter_mut());
         if let Some(pipelines) = &mut self.screen_world_pipelines {
             slots.extend(pipelines.iter_mut());

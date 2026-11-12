@@ -6,6 +6,7 @@
 mod fluid;
 mod leaf_culling;
 mod lighting;
+mod merge;
 pub mod packed;
 mod sides;
 #[cfg(test)]
@@ -29,6 +30,10 @@ use horizon_world::{
     block_render::FaceVisibility,
     fluid::{FluidKind, FluidState},
     registry::BlockStateId,
+};
+pub use merge::{
+    MERGED_STEP, Stats as MergeStats, merge_faces, merging, shrink_plants, shrinking_plants,
+    stats as merge_stats,
 };
 #[cfg(test)]
 pub(crate) use sides::sort_tinted;
@@ -473,6 +478,17 @@ impl SectionMesh {
             + self.block_entities.capacity() * std::mem::size_of::<([i32; 3], u32)>()
             + self.lights.capacity() * std::mem::size_of::<([i32; 3], u32)>()
             + self.sprite_layers.capacity() * std::mem::size_of::<u16>()
+    }
+    /// Merges the solid quads that are equal block faces side by side (`merge`), before
+    /// `sort_solid`. A mesh with per-quad sources (a shader pack's) keeps every quad.
+    pub fn merge_solid(&mut self) {
+        if self.solid_sources.is_empty() && self.translucent_sources.is_empty() {
+            if !self.solid_tints.is_empty() {
+                self.solid_tints
+                    .resize(self.solid.len() / 4, packed::UNKNOWN_TINT);
+            }
+            merge::merge(&mut self.solid, &mut self.solid_tints, &self.translucent);
+        }
     }
     /// Sorts the solid quads by the side they face, for the renderer to
     /// leave out those facing away from the eye (`sides`).
@@ -2218,13 +2234,25 @@ impl Mesher<'_> {
                 &mut push,
             )
         };
+        // A plant's crossed quad over the part of its sprite that draws (`shrink_plants`),
+        // where nothing varies over the quad (a cross has no ambient occlusion) and no
+        // connected texture cuts or covers it.
+        let shrunk = face.shrunk.as_deref().filter(|_| {
+            merge::shrinking_plants()
+                && matches!(pick, Pick::Keep)
+                && count == 0
+                && gray == [gray[0]; 4]
+                && coords == [coords[0]; 4]
+                && ao_factor == [ao_factor[0]; 4]
+        });
+        let positions = shrunk.map_or(&q.positions, |s| &s.positions);
         let vertex = |tint: Option<u32>, i: usize, uv: [u16; 2]| {
             let g = gray[i] as u32;
             let rgb = match tint {
                 Some(t) => [16, 8, 0].map(|shift| g * (t >> shift & 255) / 255),
                 None => [g; 3],
             };
-            let p = q.positions[i];
+            let p = positions[i];
             let color = if self.separate_ao {
                 let ao_byte = (ao_factor[i] * 255.0).round().clamp(0.0, 255.0) as u32;
                 ao_byte << 24 | (pack_rgb(rgb) & 0x00FF_FFFF)
@@ -2251,7 +2279,10 @@ impl Mesher<'_> {
             vertices(tint, standard())
         } else {
             // The face's own UVs, already packed: no per-vertex rounding.
-            std::array::from_fn(|i| (vertex(tint, i, face.uv_fixed[i]), q.uv[i]))
+            match shrunk {
+                Some(s) => std::array::from_fn(|i| (vertex(tint, i, s.uv_fixed[i]), s.uv[i])),
+                None => std::array::from_fn(|i| (vertex(tint, i, face.uv_fixed[i]), q.uv[i])),
+            }
         };
         // Opaque leaves (forceOpaque), leaves a leaf-culling mode proved internal and Opaque
         // Ice draw in the solid layer whatever their sprite.

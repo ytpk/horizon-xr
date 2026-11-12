@@ -684,18 +684,13 @@ impl NativeShadow {
             pipeline_with(layout, vertex, buffers, fragment)
         };
         let instanced = layout(None);
-        let solid = pipeline(
-            &instanced,
-            "horizon_shadow_vs",
-            &[Some(vertices.clone()), Some(instances.clone())],
-            false,
-        );
-        let translucent = pipeline(
-            &instanced,
-            "horizon_shadow_vs",
-            &[Some(vertices.clone()), Some(instances)],
-            true,
-        );
+        let buffers = if shape.split_streams {
+            super::vertex_streams::buffers(true, &instance_attributes)
+        } else {
+            vec![Some(vertices.clone()), Some(instances)]
+        };
+        let solid = pipeline(&instanced, "horizon_shadow_vs", &buffers, false);
+        let translucent = pipeline(&instanced, "horizon_shadow_vs", &buffers, true);
         let flat_layout = shape.flat.map(|group| layout(Some(group)));
         let flat_pipeline = |translucent| {
             flat_layout.as_ref().map(|layout| {

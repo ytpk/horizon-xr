@@ -1051,6 +1051,9 @@ impl<G: ChunkGenerator> Jobs<G> {
                 };
                 let recycled = shared.meshes.lock().unwrap().take();
                 let mut mesh = mesher.mesh_reusing(&borrow(&region), sy, recycled, mesh_scratch);
+                if crate::mesher::merging() {
+                    mesh.merge_solid();
+                }
                 mesh.sort_solid();
                 *faces = Some((context.tables.clone(), mesher.visibility));
                 Done::Meshed(x, sy, z, mesh, seq)

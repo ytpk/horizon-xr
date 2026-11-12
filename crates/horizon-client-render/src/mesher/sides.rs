@@ -183,6 +183,7 @@ impl Sides {
                 _ if !self.split => true,
                 Part::Opaque => !cutout,
                 Part::Cutout => cutout,
+                Part::CutoutAligned => cutout && bucket != OTHER,
             };
             match (wanted && seen(bucket), run) {
                 (true, None) => run = Some(start),
@@ -207,6 +208,9 @@ pub enum Part {
     All,
     Opaque,
     Cutout,
+    /// The cutout quads that lie in an axis plane: all but the other bucket's, which are
+    /// the crossed quads of plants (short grass, flowers, saplings) and little else.
+    CutoutAligned,
 }
 
 /// The bucket of a quad: the axis plane it lies in and the side its
@@ -619,6 +623,75 @@ mod tests {
         assert_eq!(both([8.0, 8.0, 8.0], 0.5), [(0, 3)]);
         // The sides depend on x and z alone.
         assert_eq!(both([-8.0, 8.0, -8.0], -8.0), [(2, 4)]);
+    }
+
+    /// A plant's crossed quads lie in no axis plane: the aligned cutout part
+    /// leaves them out and keeps every other cutout quad the eye faces.
+    #[test]
+    fn the_aligned_cutout_part_leaves_out_crossed_quads() {
+        const PLANT: u16 = 100;
+        let mut unsorted = cube([0.0; 3], OPAQUE_LAYER);
+        // A cutout block's faces as layers 1 to 6.
+        for (i, q) in cube([4.0, 0.0, 0.0], 0).chunks(4).enumerate() {
+            unsorted.extend(q.iter().map(|v| TerrainVertex {
+                layer: i as u16 + 1,
+                ..*v
+            }));
+        }
+        // The two planes of a cross, both sides of each.
+        for corners in [
+            [
+                [2.0, 0.0, 2.0],
+                [3.0, 0.0, 3.0],
+                [3.0, 1.0, 3.0],
+                [2.0, 1.0, 2.0],
+            ],
+            [
+                [3.0, 0.0, 3.0],
+                [2.0, 0.0, 2.0],
+                [2.0, 1.0, 2.0],
+                [3.0, 1.0, 3.0],
+            ],
+            [
+                [2.0, 0.0, 3.0],
+                [3.0, 0.0, 2.0],
+                [3.0, 1.0, 2.0],
+                [2.0, 1.0, 3.0],
+            ],
+            [
+                [3.0, 0.0, 2.0],
+                [2.0, 0.0, 3.0],
+                [2.0, 1.0, 3.0],
+                [3.0, 1.0, 2.0],
+            ],
+        ] {
+            unsorted.extend(quad(corners, PLANT));
+        }
+        for grouped in [false, true] {
+            let mut solid = unsorted.clone();
+            let sides = sort_parts(&mut solid, grouped);
+            let layers: Vec<u16> = solid
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .map(|q| q[0].layer)
+                .collect();
+            let eye = [10.0, 5.0, 8.0];
+            let quads = |part| {
+                let mut out = Vec::new();
+                sides.visible_from(eye, eye[1], part, |first, count| {
+                    out.extend_from_slice(&layers[first as usize..(first + count) as usize])
+                });
+                out.sort_unstable();
+                out
+            };
+            let cutout = quads(Part::Cutout);
+            assert_eq!(cutout.iter().filter(|&&l| l == PLANT).count(), 4);
+            let without: Vec<u16> = cutout.iter().copied().filter(|&l| l != PLANT).collect();
+            // +X, +Y and +Z of the cutout block face this eye.
+            assert_eq!(without, [1, 3, 5]);
+            assert_eq!(quads(Part::CutoutAligned), without);
+        }
     }
 
     /// Opaque and cutout quads of each bucket split: each pass's runs hold

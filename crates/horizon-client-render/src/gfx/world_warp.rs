@@ -151,6 +151,8 @@ pub(super) struct Kit {
     pub sprite_constants: [(&'static str, f64); 2],
     /// Whether the display offers HDR output: the solid terrain is built lit by it too.
     pub hdr_output: bool,
+    /// Whether the terrain arena holds its vertices in two streams (`vertex_streams`).
+    pub split_streams: bool,
 }
 
 /// The warp's pipelines, in place of the renderer's while it is on.
@@ -316,7 +318,11 @@ impl WorldWarps {
             step_mode: wgpu::VertexStepMode::Vertex,
             attributes: &TERRAIN_ATTRIBUTES,
         };
-        let buffered = [Some(vertices), Some(instances.clone())];
+        let buffered = if self.kit.split_streams {
+            super::vertex_streams::buffers(true, &instance_attributes)
+        } else {
+            vec![Some(vertices), Some(instances.clone())]
+        };
         let pulled = [None, Some(instances)];
         // As gfx.rs's: a float frame takes light where others take marks.
         let write_light = (

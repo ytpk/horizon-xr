@@ -429,6 +429,36 @@ fn left_out() -> TerrainOut {
     return to_wire(terrain_vertex(position, terrain_uv(uv, origin.w), layer, color, light, origin.xyz,
         origin.w));
 }
+// The opaque pass's interpolants without HDR output (gfx.rs's `lean_opaque`): `fs_opaque`
+// with `HDR_LIGHTING` off reads only these, so `local`, `scene`, `height`, `emission` and
+// `fade` stay in the vertex stage: 3 locations (8 floats, 2 integers) instead of 5. Each
+// vertex is shaded once per view and once more for the tile binning on a tiled GPU, and
+// pays for every location it writes.
+struct OpaqueWire {
+    @builtin(position) clip: vec4<f32>,
+    // The colour and `visibility`.
+    @location(0) a: vec4<f32>,
+    // `uv`, `spherical` and `cylindrical`.
+    @location(1) b: vec4<f32>,
+    // `layer` and `emissive_layer`.
+    @location(2) @interpolate(flat) c: vec2<u32>,
+}
+fn to_opaque_wire(o: TerrainOut) -> OpaqueWire {
+    var w: OpaqueWire;
+    w.clip = o.clip;
+    w.a = vec4(o.color.rgb, o.visibility);
+    w.b = vec4(o.uv, o.spherical, o.cylindrical);
+    w.c = vec2(o.layer, o.emissive_layer);
+    return w;
+}
+@vertex fn vs_terrain_opaque_lean(
+    @location(0) position: vec3<f32>, @location(1) uv: vec2<u32>,
+    @location(2) layer: u32, @location(3) color: vec4<f32>, @location(4) light: vec2<u32>,
+    @location(5) origin: vec4<f32>) -> OpaqueWire {
+    if !opaque_quad(layer, origin.w) { return to_opaque_wire(left_out()); }
+    return to_opaque_wire(terrain_vertex(position, terrain_uv(uv, origin.w), layer, color, light,
+        origin.xyz, origin.w));
+}
 @vertex fn vs_terrain_cutout(
     @location(0) position: vec3<f32>, @location(1) uv: vec2<u32>,
     @location(2) layer: u32, @location(3) color: vec4<f32>, @location(4) light: vec2<u32>,
@@ -436,6 +466,36 @@ fn left_out() -> TerrainOut {
     if opaque_quad(layer, origin.w) { return to_wire(left_out()); }
     return to_wire(terrain_vertex(position, terrain_uv(uv, origin.w), layer, color, light, origin.xyz,
         origin.w));
+}
+// The cutout pass's interpolants without HDR output, for the lists that are not fading
+// (gfx.rs's `lean_cutout`): as the opaque pass's `OpaqueWire`, since without `HDR_LIGHTING`
+// and a fade `fs_solid` reads nothing else.
+@vertex fn vs_terrain_cutout_lean(
+    @location(0) position: vec3<f32>, @location(1) uv: vec2<u32>,
+    @location(2) layer: u32, @location(3) color: vec4<f32>, @location(4) light: vec2<u32>,
+    @location(5) origin: vec4<f32>) -> OpaqueWire {
+    if opaque_quad(layer, origin.w) { return to_opaque_wire(left_out()); }
+    return to_opaque_wire(terrain_vertex(position, terrain_uv(uv, origin.w), layer, color, light,
+        origin.xyz, origin.w));
+}
+// `fs_solid` over `OpaqueWire` for a list that is not fading, built with `HDR_LIGHTING` off
+// only. The texel's alpha is the pixel's (the vertex colour's is 1, and the fade-in mixes
+// colours of one alpha), so the cutout comes first, before any other work.
+@fragment fn fs_cutout_lean(wire: OpaqueWire) -> @location(0) vec4<f32> {
+    let texel = sprite(wire.b.xy, wire.c.x & 0x7fffu);
+    if texel.a < 0.5 && (wire.c.x & 0x8000u) == 0u { discard; }
+    var in: TerrainOut;
+    in.clip = wire.clip;
+    in.color = vec4(wire.a.rgb, 1.0);
+    in.visibility = wire.a.w;
+    in.uv = wire.b.xy;
+    in.spherical = wire.b.z;
+    in.cylindrical = wire.b.w;
+    in.layer = wire.c.x;
+    in.emissive_layer = wire.c.y;
+    var color = texel * in.color;
+    color = mix(globals.fog_color * vec4(1.0, 1.0, 1.0, color.a), color, in.visibility);
+    return solid_finish(in, texel, color);
 }
 @vertex fn vs_terrain_flat_opaque(
     @builtin(vertex_index) vertex: u32,
@@ -740,6 +800,23 @@ fn hdr_mark(tier: u32, y: f32) -> f32 {
     if HDR_LIGHTING && globals.hdr_light.z != 0.0 {
         hdr_normal = normalize(cross(dpdy(in.local), dpdx(in.local)));
     }
+    let texel = sprite(in.uv, in.layer & 0x7fffu);
+    var color = texel * in.color;
+    color = mix(globals.fog_color * vec4(1.0, 1.0, 1.0, color.a), color, in.visibility);
+    return solid_finish(in, texel, color);
+}
+// `fs_opaque` over `OpaqueWire`, for pipelines built with `HDR_LIGHTING` off only: the
+// values the wire leaves out are the ones HDR output's lighting reads.
+@fragment fn fs_opaque_lean(wire: OpaqueWire) -> @location(0) vec4<f32> {
+    var in: TerrainOut;
+    in.clip = wire.clip;
+    in.color = vec4(wire.a.rgb, 1.0);
+    in.visibility = wire.a.w;
+    in.uv = wire.b.xy;
+    in.spherical = wire.b.z;
+    in.cylindrical = wire.b.w;
+    in.layer = wire.c.x;
+    in.emissive_layer = wire.c.y;
     let texel = sprite(in.uv, in.layer & 0x7fffu);
     var color = texel * in.color;
     color = mix(globals.fog_color * vec4(1.0, 1.0, 1.0, color.a), color, in.visibility);

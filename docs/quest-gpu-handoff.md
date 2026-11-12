@@ -223,3 +223,187 @@ including arena growth/compaction and matching vertex bindings. See
 [implementation, validation and A/B steps](quest-split-vertex-streams.md).
 This was software-tested without Quest access; it is not a new headset measurement.
 The compute probe/culling work was deferred when the maintainer prioritized split streams.
+
+## Lean opaque varyings and split streams, measured on the headset
+
+Quest 3S, VisorTest at render distance 24 (`--render-distance 24` after `#AB`), the player's
+position in tall grass: a fragment-heavy view (about 71% of GPU time in fragments), 3.33 M indices,
+not the 10.4 ms reference view. Each pair was run back to back in both orders.
+
+| Run | GPU ms | fps | ALU / vertex | Bytes / vertex |
+|---|---|---|---|---|
+| Interleaved, `TerrainWire` | 20.9–21.1 | 45.2–45.4 | 114 | 19.7 |
+| `HORIZON_QUEST_SPLIT_STREAMS=1` | 20.5–20.6 | 46.0–46.2 | 114 | 15.0 |
+| Lean opaque varyings | 20.1–20.3 | 47.0–47.2 | 103 | 19.7 |
+| Both | 19.6–20.0 | 47.4–47.7 | 103 | 15.0 |
+
+- **Lean opaque varyings** (`terrain.wgsl` `OpaqueWire`, `vs_terrain_opaque_lean`, `fs_opaque_lean`;
+  `gfx.rs` `lean_opaque`): the opaque pass's pipeline without HDR lighting exports 3 locations
+  instead of 5. On by default on a headset's Qualcomm Vulkan only; `HORIZON_QUEST_LEAN_OPAQUE=0`
+  turns it off. The HDR pipeline and every other backend keep `TerrainWire`.
+- **Split streams** stay opt-in. Improved Transparency, world warps and native shader packs'
+  material and shadow pipelines now take the arena's layout; `[displacement]` displaces nothing
+  while the arena is split. None of those four was run on the headset.
+- `adb exec-out screencap` is black on the native foveated array path. For a screenshot, set
+  `horizonFoveatedMultiview` to `false` in `vivecraft-client-config.json` and
+  `HORIZON_XR_FOVEATION=off` for that run (`single-pass multiview (2 layers)`), then restore it.
+- `--render-distance` in `launch.txt` is written back to `options.txt`: restore the file after.
+- What is left in the vertex stage in that view: `HORIZON_TERRAIN_EXPERIMENT=nolightmap` on top of
+  the lean varyings gave 20.1 → 19.1 ms (ALU 103 → 99), `clip` 20.0 → 18.8 ms; `fsplain` nothing.
+
+## Which pass owns the grass view, and the cutout pass (headset, render distance 24, no LODs)
+
+Same view as the section above (VisorTest, standing in tall grass), `--render-distance 24`,
+`lodDistance:0` in `horizon-graphics.txt` for the run, each pair back to back in both orders.
+
+**Dynamic resolution was on in every earlier number on this page.** The player's
+`horizonDynamicResolution` is `true`, and at 20 ms a frame it sat at its floor (0.85: eyes of
+1432x1496 instead of 1680x1760). `HORIZON_XR_DYNRES=0` now turns it off whatever the setting says
+(`horizon-xr/src/lib.rs` `dynres_wanted`); every number below has it off, so the baseline is
+21.9 ms, not 20. No MSAA anywhere (sample count 1). Foveation (Low) is applied on the native array
+path: `HORIZON_XR_FOVEATION=off` costs 0.9 ms (21.7 -> 22.6).
+
+### Pass by pass
+
+`HORIZON_QUEST_EXPERIMENT=a,b` (`gfx/multiview.rs` `experiment`) leaves parts of the stereo world
+pass out: `noopaque`, `nocutout`, `notranslucent`, `nosky`, `noscreen`, `scissor` (a sixteenth of
+each eye). New `HORIZON_TERRAIN_EXPERIMENT` names: `cutoutnodiscard`, `cutoutcheap`, `opaquecheap`.
+
+| Run | GPU ms | fps |
+|---|---|---|
+| Baseline | 21.7–21.9 | 43.4–44.0 |
+| `nocutout` | 13.6 | 68 |
+| `noopaque` | 12.8 | 72 |
+| `notranslucent` | 21.8 | 44 |
+| `nosky` | 20.9 | 45.5 |
+| `noscreen` | no change | |
+| `noopaque,nocutout,notranslucent` (sky, entities, hand, screen) | 2.9 | 120 |
+| `scissor` | 11.2–11.4 | 81 |
+| `scissor,nocutout` | 6.4 | 120 |
+| `cutoutnodiscard` (cutout pass with the depth test first) | 16.6 | 56.5 |
+| `nolightmap` | 20.6 | 46 |
+| `fsnotex` | 20.5 | 46 |
+| `opaquecheap` / `cutoutcheap` / both (lean cutout on, baseline 21.1) | 19.8 / 20.7 / 19.1 | |
+
+- The frame is about 3 ms of everything else (0.8 of it the sky), 10–11 ms of opaque terrain and
+  8 ms of cutout terrain. Translucent terrain and the screen effects cost nothing here.
+- **The fragment shaders' own work is 2 ms of the 21**, both passes together (`opaquecheap`,
+  `cutoutcheap`); texturing 1.4. The profiler's "71–77% time shading fragments" is not shader
+  work: do not optimise the shaders' arithmetic further.
+- The cutout pass: crossed plants farther than 64 blocks are 0.46 M of the 3.34 M indices and
+  1.5 ms (geometry). What is left, about 6 ms, is the grass within 32 blocks (a few tens of
+  thousands of indices): fragments that reach the late depth test. With the depth test before the
+  shader (`cutoutnodiscard`) 5 ms of it go. Drawing the cutout lists farthest first costs 0.45 ms
+  more, so finer front to back sorting has at most that to give.
+- The `Fragments Shaded` counter is not the game's alone (15 M a frame with no terrain at all).
+
+### Tried and removed: a depth pre-pass for the cutout quads
+
+Cutout depth first through a minimal alpha-test shader, then colour with compare Equal, no discard,
+`@invariant` positions and a coverage blend (for a grass block's side overlay, which lies in its
+opaque face's plane). The picture was right in both eyes, and it was **5.4 ms slower**: 27.2–27.5
+against 21.8–22.1 ms, both orders. The pre-pass's fragments cost what the cutout pass's did (their
+number counts, not their shader), and the second pass adds the cutout geometry again. Not kept.
+An explicit mip level in place of `textureSampleGrad` changed nothing either.
+
+### Kept
+
+| Run | GPU ms | fps |
+|---|---|---|
+| `HORIZON_QUEST_LEAN_CUTOUT=0` | 21.9–22.1 | 42.9–43.4 |
+| Default (lean cutout) | 21.1–21.2 | 44.7–45.0 |
+| Default + `HORIZON_QUEST_PLANT_DISTANCE=64` | 19.8 | 47.7–48.2 |
+| Default + `HORIZON_QUEST_PLANT_DISTANCE=32` | 19.6–19.8 | 48.0–48.6 |
+
+- **Lean cutout** (`gfx.rs` `lean_cutout`, `terrain.wgsl` `vs_terrain_cutout_lean`,
+  `fs_cutout_lean`): the cutout lists that are not fading go through `OpaqueWire` (3 locations
+  instead of 5) with the alpha test first; fading lists keep `fs_solid` in a third draw group
+  after them. Same picture. On by default on a headset's Qualcomm Vulkan without HDR output and
+  without flat draws; `HORIZON_QUEST_LEAN_CUTOUT=0` turns it off.
+- **Plant distance** (`gfx.rs` `plant_distance`, `mesher::Part::CutoutAligned`):
+  `HORIZON_QUEST_PLANT_DISTANCE=<blocks>` leaves the crossed cutout quads (grass, ferns, flowers,
+  saplings) out of sections whose centre is farther. It changes the picture, a section at a time,
+  so it is off unless set. Sharpness is untouched.
+
+### What is left at render distance 24 without LODs, toward 11.1 ms
+
+Both terrain passes are bound by how many triangles and fragments reach the GPU, not by what the
+shaders compute.
+
+1. **Fewer triangles from the same chunks** (opaque pass, 10 ms for about 2.2 M indices): merge
+   coplanar full-block faces with the same sprite, tint, light and occlusion into one quad with a
+   repeated UV (`tile_uv` already repeats a sprite per block for the far tiles). Same picture, real
+   chunks. This is the only lever of that size.
+2. **Crossed plants as two quads drawn without back-face culling instead of four** (halves their
+   vertices; the back shows the sprite mirrored), and **quads shrunk to their sprite's opaque
+   bounds** (fewer late-test fragments near the camera; a dandelion fills a fifth of its quad).
+3. The lightmap fetch in the vertex shader: 1.1 ms (`nolightmap`).
+4. The sky after the opaque terrain with a depth test: at most 0.5 ms.
+5. `HORIZON_QUEST_PLANT_DISTANCE` as a setting, if the maintainer accepts the look.
+
+## Merged block faces and shrunk plant quads (headset, render distance 24, no LODs)
+
+Same view and rules as the section above (`--render-distance 24`, `lodDistance:0`,
+`HORIZON_XR_DYNRES=0`), back to back in both orders. The player's `ao` option is `false`
+(flat lighting): every number here is without smooth lighting.
+
+| Run (in this order) | GPU ms | fps | Indices |
+|---|---|---|---|
+| Default | 21.0 | 45.2 | 3,335,063 |
+| `HORIZON_QUEST_MERGE_FACES=1` | 20.2 | 46.9 | 2,731,864 |
+| `HORIZON_QUEST_MERGE_FACES=1` | 20.3–20.4 | 46.4–46.6 | 2,728,002 |
+| Default | 21.0–21.2 | 44.7–45.2 | 3,339,498 |
+
+### Merged block faces (`mesher/merge.rs`, off unless `HORIZON_QUEST_MERGE_FACES=1`)
+
+- Whole opaque block faces on the grid, side by side in one plane and facing one way, become one
+  quad when each has one colour and one light at its four corners and both have the same
+  colour, light, sprite layer, tint and UV orientation, and no other quad lies on either (a
+  grass block's side under its overlay keeps its own four corners: the overlay draws at its
+  depth). Greedy rectangles up to 16 by 16, in the meshing worker before `sort_solid`
+  (`streaming.rs`); the merged quad takes the place of its first face, the other quads keep
+  their order. Far tiles, shader-pack meshes (per-quad sources) and every other GPU are untouched.
+- UV: a merged quad counts blocks down from 1. Packed values above 32768 mean
+  `-(v - 32768) / 2048` (`MERGED_STEP`), so 15 blocks below 0 fit the same 16 bits; faces that
+  are not merged are packed as before. `gfx.rs` `terrain_merged` rewrites `terrain_uv` and
+  `tile_uv` in the terrain shader's text while merging is on (every shader built from
+  `terrain_shader()` gets it); the shader file itself and the default build are unchanged.
+  Below 0 `tile_uv`'s result keeps `tiled_face` false, so a merged face samples through
+  `sprite_grad` as the separate faces did. Both wraps give 2^-13 of a sprite to the block the
+  quad ends on, so rounding at a merged quad's outer edge cannot read the texel across the sprite.
+- What merged (summed over all sections meshed in a run, flat lighting): of 7.40 M opaque quads,
+  2.88 M went into merged quads (8.54 M solid quads became 6.80 M, -20%); 3.68 M could merge
+  and had no equal neighbour (another light level, sprite, or random rotation beside them);
+  0.70 M are no whole block face; 0.14 M lie under an overlay; none was shaded across its
+  corners, since smooth lighting is off on this headset. **With smooth lighting on the rate is
+  not measured**: the stats line (`Horizon XR: merged block faces: Stats {..}`, logged with the
+  frame profile) reports it as `shaded`.
+- The frame: -18% indices for -0.7 ms. The opaque pass does not scale with its triangle count
+  alone here; the merged triangles are the large flat ones.
+- Screenshots (copy path, both eyes), same place, a few seconds apart: no seam, wrong repeat
+  or missing face seen in a still. Not checked: the picture in motion (merged quads meet their
+  neighbours at T-junctions, which can show single flickering pixels), smooth lighting, far
+  tiles with LODs on, emissive packs, the split-stream path. Off by default until that is done.
+- Meshing CPU time was not measured.
+
+### Shrunk plant quads (off unless `HORIZON_QUEST_SHRINK_PLANTS=1`; never run on the headset)
+
+- `Sprites::drawn_bounds` (the box of a sprite's texels that are not fully clear, over all
+  frames), `models/catalog.rs` `shrink_quad` and `BakedFace::shrunk` (baked for cutout quads in
+  no axis plane), used by `Mesher::face` when the switch is on and the quad is lit flat with no
+  connected texture on it. Unit-tested; not built into an APK, not measured, no screenshot.
+- The box is the full-size sprite's. `MipmapGenerator` raises alpha on the smaller levels to
+  keep a cutout's coverage (a box over every level is the whole sprite), so far away a shrunk
+  quad may lose up to a pixel of fringe. Near the camera, where the cost is, it is exact.
+- Expected gain is small in the grass view: `short_grass` draws in 88% of its quad,
+  `tall_grass_top` 88%, `tall_grass_bottom` and `large_fern_bottom` 100%; flowers 21–38%.
+
+### Next
+
+1. Merging: check motion and smooth lighting on the headset, then turn it on by default there.
+   If smooth lighting leaves little to merge, a second switch could merge faces whose corner
+   values differ (changes the picture).
+2. The 3.68 M faces without an equal neighbour: see which key differs most (light level in
+   caves, random rotation of dirt/stone/sand) before widening the rule.
+3. Not started: the lightmap fetch in the vertex shader (1.1 ms) and the sky after the opaque
+   terrain (at most 0.5 ms).

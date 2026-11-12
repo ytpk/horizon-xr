@@ -53,13 +53,116 @@ fn split_solid_gpu(info: &wgpu::AdapterInfo) -> bool {
     }
 }
 
+/// Whether the opaque solid pass without HDR output exports terrain.wgsl's `OpaqueWire` (3
+/// interpolant locations) instead of `TerrainWire` (5): a headset's Adreno shades each vertex
+/// about 2.5 times a frame (once per view, once for binning) and pays for every location. On
+/// a Quest 3S at 24 chunks it took 10% of the ALU per vertex and 0.9 ms of 21 off the frame.
+/// The picture is the same. Only there, and `HORIZON_QUEST_LEAN_OPAQUE=0` keeps `TerrainWire`.
+fn lean_opaque(info: &wgpu::AdapterInfo) -> bool {
+    headset::installed()
+        && info.backend == wgpu::Backend::Vulkan
+        && info.vendor == 0x5143
+        && std::env::var("HORIZON_QUEST_LEAN_OPAQUE").as_deref() != Ok("0")
+}
+
+/// Whether the cutout solid pass without HDR output draws its lists that are not fading
+/// through terrain.wgsl's `vs_terrain_cutout_lean` and `fs_cutout_lean`: `OpaqueWire`'s 3
+/// interpolant locations instead of `TerrainWire`'s 5, and the cutout before any other work
+/// (as `lean_opaque`, for the same GPU). The fading lists keep `fs_solid`, in a group of their
+/// own after them. The picture is the same. `HORIZON_QUEST_LEAN_CUTOUT=0` turns it off.
+fn lean_cutout(info: &wgpu::AdapterInfo) -> bool {
+    headset::installed()
+        && info.backend == wgpu::Backend::Vulkan
+        && info.vendor == 0x5143
+        && split_solid_gpu(info)
+        && std::env::var("HORIZON_QUEST_LEAN_CUTOUT").as_deref() != Ok("0")
+}
+
+/// `HORIZON_QUEST_PLANT_DISTANCE=<blocks>`: on a headset's Adreno, sections whose centre is
+/// farther than this leave out their crossed cutout quads (`Quads::CutoutAligned`): short and
+/// tall grass, ferns, flowers, saplings. It changes the picture (the plants appear a section
+/// at a time as the player nears them), so it is off unless set; the squared distance.
+fn plant_distance(info: &wgpu::AdapterInfo) -> Option<f64> {
+    static BLOCKS: std::sync::OnceLock<Option<f64>> = std::sync::OnceLock::new();
+    let blocks = *BLOCKS.get_or_init(|| {
+        std::env::var("HORIZON_QUEST_PLANT_DISTANCE")
+            .ok()?
+            .parse::<f64>()
+            .ok()
+            .filter(|d| *d > 0.0)
+    });
+    blocks
+        .filter(|_| headset::installed() && info.vendor == 0x5143)
+        .map(|d| d * d)
+}
+
 fn light_marks(format: wgpu::TextureFormat, hdr: bool) -> bool {
     hdr && format != LINEAR_FRAME
 }
 
 fn terrain_shader() -> String {
     let source = include_str!("hdr_light.wgsl").to_owned() + include_str!("terrain.wgsl");
+    let source = if crate::mesher::merging() {
+        terrain_merged(source)
+    } else {
+        source
+    };
     terrain_experiments(source)
+}
+
+/// Whether section meshes merge their coplanar block faces (`mesher::merge`): on a headset's
+/// Adreno, whose frame is bound by how many triangles the terrain has, where solid terrain
+/// draws in two passes and no shader pack reads the quads' sources. The picture is the same:
+/// only faces whose four corners share one colour and light merge. `HORIZON_QUEST_MERGE_FACES=1`
+/// turns it on.
+fn merge_faces_gpu(info: &wgpu::AdapterInfo, shader_pack: bool) -> bool {
+    headset::installed()
+        && info.backend == wgpu::Backend::Vulkan
+        && info.vendor == 0x5143
+        && split_solid_gpu(info)
+        && !shader_pack
+        && std::env::var("HORIZON_QUEST_MERGE_FACES").as_deref() == Ok("1")
+}
+
+/// Whether plants' crossed quads are meshed over the part of their sprite that draws
+/// (`mesher::shrink_plants`): on a headset's Adreno, where the pixels the cutout pass throws
+/// away cost as much as the ones it keeps. `HORIZON_QUEST_SHRINK_PLANTS=1` turns it on.
+fn shrink_plants_gpu(info: &wgpu::AdapterInfo, shader_pack: bool) -> bool {
+    headset::installed()
+        && info.backend == wgpu::Backend::Vulkan
+        && info.vendor == 0x5143
+        && !shader_pack
+        && std::env::var("HORIZON_QUEST_SHRINK_PLANTS").as_deref() == Ok("1")
+}
+
+/// The terrain shader for meshes with merged faces (`mesher::merge`). A merged quad's packed
+/// UV above 1 counts blocks below 0 (`mesher::MERGED_STEP`), and `tile_uv` wraps those too,
+/// each block taking the sprite again; a UV in [0, 1] stays as it is, so every other quad
+/// samples as before. Both wraps give a hair (`2^-13` of a sprite) to the block the quad
+/// ends on, so a merged quad's outer edge never takes the texel across the sprite.
+fn terrain_merged(source: String) -> String {
+    let edits = [
+        (
+            "    return vec2<f32>(packed) * instance_step(w);\n",
+            "    let step = instance_step(w);\n    let raw = vec2<f32>(packed);\n    if step < 0.001 {\n        return select(raw * step, (32768.0 - raw) * (1.0 / MERGED_STEP), raw > vec2(32768.0));\n    }\n    return raw * step;\n",
+        ),
+        (
+            "    return uv - max(ceil(uv) - 1.0, vec2(0.0));\n",
+            "    return uv - max(ceil(uv - 0.0001220703125) - 1.0, vec2(0.0))\n        - min(floor(uv + 0.0001220703125), vec2(0.0));\n",
+        ),
+    ];
+    let mut source = source;
+    for (from, to) in edits {
+        assert!(
+            source.contains(from),
+            "terrain.wgsl changed under terrain_merged"
+        );
+        source = source.replace(from, to);
+    }
+    format!(
+        "const MERGED_STEP: f32 = {}.0;\n{source}",
+        crate::mesher::MERGED_STEP
+    )
 }
 
 /// Developer A/B switches for the terrain's vertex work, measured on a headset's GPU
@@ -68,7 +171,10 @@ fn terrain_shader() -> String {
 /// coloured light loops), `clip` (only the position leaves the vertex shader), `fsnohdr` (no
 /// HDR lighting code in the fragment shaders), `fsnooverlay` (no emissive overlay branch),
 /// `fsplain` (one plain sample in place of the nearest/RGSS filtering), `fsnotex` (no block
-/// texture). Most of them change the picture: for measuring only.
+/// texture), `cutoutnodiscard` (`fs_solid` keeps every pixel: the cutout pass with the depth
+/// test before its shader), `cutoutcheap` and `opaquecheap` (the lean cutout and opaque
+/// fragment shaders stop at the vertex colour: what their shading itself costs). Most of
+/// them change the picture: for measuring only.
 fn terrain_experiments(mut source: String) -> String {
     let Ok(wanted) = std::env::var("HORIZON_TERRAIN_EXPERIMENT") else {
         return source;
@@ -113,6 +219,26 @@ fn terrain_experiments(mut source: String) -> String {
             "fsnotex",
             "let texel = sprite(in.uv, in.layer & 0x7fffu);",
             "let texel = vec4(1.0);",
+        ),
+        (
+            "cutoutnodiscard",
+            "if color.a < 0.5 && (in.layer & 0x8000u) == 0u { discard; }",
+            "",
+        ),
+        (
+            "cutoutnodiscard",
+            "if faded(in.fade, in.local, dx, dy) { discard; }",
+            "",
+        ),
+        (
+            "cutoutcheap",
+            "    if texel.a < 0.5 && (wire.c.x & 0x8000u) == 0u { discard; }\n",
+            "    if texel.a < 0.5 && (wire.c.x & 0x8000u) == 0u { discard; }\n    if true { return vec4(wire.a.rgb, 1.0); }\n",
+        ),
+        (
+            "opaquecheap",
+            "    in.emissive_layer = wire.c.y;\n    let texel = sprite(in.uv, in.layer & 0x7fffu);",
+            "    in.emissive_layer = wire.c.y;\n    if true { return vec4(in.color.rgb, 1.0); }\n    let texel = sprite(in.uv, in.layer & 0x7fffu);",
         ),
         ("clip", "w.a = o.color;", "w.a = vec4(1.0);"),
         (
@@ -1290,6 +1416,8 @@ pub struct Renderer {
     /// `solid` split in two passes for the world pass (terrain.wgsl's `opaque_quad`).
     solid_opaque: SolidPipeline,
     solid_cutout: SolidPipeline,
+    /// The cutout pass's pipeline for the lists that are not fading (`lean_cutout`).
+    lean_cutout: Option<wgpu::RenderPipeline>,
     translucent: wgpu::RenderPipeline,
     translucent_mark: wgpu::RenderPipeline,
     /// A native mod's world warp (`world_warp`): nothing made until a mod gives one.
@@ -3212,6 +3340,16 @@ impl Renderer {
         let pipelines_step = crate::spans::startup::step("renderer.pipelines_textures");
         let terrain_step = crate::spans::startup::step("renderer.terrain_pipelines");
         let gpu_timer = timing::GpuTimer::new(&device, &queue);
+        // Before any terrain shader is built: it reads merged UVs where the meshes have them.
+        let merge_faces = merge_faces_gpu(&adapter.get_info(), shader_pack);
+        crate::mesher::merge_faces(merge_faces);
+        let shrink_plants = shrink_plants_gpu(&adapter.get_info(), shader_pack);
+        crate::mesher::shrink_plants(shrink_plants);
+        if headset::installed() {
+            log::info!(
+                "Quest terrain merged block faces: {merge_faces}, shrunk plant quads: {shrink_plants}"
+            );
+        }
         let shader = kept.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Horizon terrain"),
             source: wgpu::ShaderSource::Wgsl(terrain_shader().into()),
@@ -3458,31 +3596,45 @@ impl Renderer {
         };
         // A solid terrain pipeline (back faces culled, depth written, no blend) without HDR
         // output's lighting, and with it where the display offers HDR output.
+        // `plain`: the entry points of the pipeline without the lighting, where they differ
+        // (`lean_opaque`).
+        let solid_with =
+            |layout: &wgpu::PipelineLayout,
+             label: &str,
+             vertex: &str,
+             fragment: &str,
+             plain: Option<(&str, &str)>,
+             buffers: &[Option<wgpu::VertexBufferLayout<'_>>]| {
+                let build = |constants: &[(&str, f64)], vertex: &str, fragment: &str| {
+                    pipeline_with(
+                        constants,
+                        layout,
+                        label,
+                        vertex,
+                        fragment,
+                        buffers,
+                        wgpu::PrimitiveTopology::TriangleList,
+                        Some(wgpu::Face::Back),
+                        true,
+                        true,
+                        None,
+                        None,
+                    )
+                };
+                let (plain_vertex, plain_fragment) = plain.unwrap_or((vertex, fragment));
+                SolidPipeline {
+                    plain: build(&plain_constants, plain_vertex, plain_fragment),
+                    hdr: hdr_output
+                        .is_some()
+                        .then(|| build(&sprite_constants, vertex, fragment)),
+                }
+            };
         let solid_in = |layout: &wgpu::PipelineLayout,
                         label: &str,
                         vertex: &str,
                         fragment: &str,
                         buffers: &[Option<wgpu::VertexBufferLayout<'_>>]| {
-            let build = |constants: &[(&str, f64)]| {
-                pipeline_with(
-                    constants,
-                    layout,
-                    label,
-                    vertex,
-                    fragment,
-                    buffers,
-                    wgpu::PrimitiveTopology::TriangleList,
-                    Some(wgpu::Face::Back),
-                    true,
-                    true,
-                    None,
-                    None,
-                )
-            };
-            SolidPipeline {
-                plain: build(&plain_constants),
-                hdr: hdr_output.is_some().then(|| build(&sprite_constants)),
-            }
+            solid_with(layout, label, vertex, fragment, None, buffers)
         };
         let pipeline = |label: &str,
                         vertex: &str,
@@ -3517,11 +3669,16 @@ impl Renderer {
         // `solid` in two passes (terrain.wgsl's `opaque_quad`, `mesher::Part`), for the
         // world pass without a shader pack: no cutout first, through a shader that never
         // discards, then the rest.
-        let solid_opaque = solid_in(
+        let lean_opaque = lean_opaque(&adapter.get_info());
+        if headset::installed() {
+            log::info!("Quest terrain lean opaque varyings: {lean_opaque}");
+        }
+        let solid_opaque = solid_with(
             &layout,
             "Terrain solid opaque",
             "vs_terrain_opaque",
             "fs_opaque",
+            lean_opaque.then_some(("vs_terrain_opaque_lean", "fs_opaque_lean")),
             &terrain_buffers,
         );
         let solid_cutout = solid_in(
@@ -3531,6 +3688,32 @@ impl Renderer {
             "fs_solid",
             &terrain_buffers,
         );
+        // The cutout pass's lists that are not fading, where they draw lean (`lean_cutout`).
+        let lean_cutout = (lean_cutout(&adapter.get_info())
+            && frame_format != LINEAR_FRAME
+            && !flat::wanted(&adapter, &device))
+        .then(|| {
+            pipeline_with(
+                &plain_constants,
+                &layout,
+                "Terrain solid cutout (lean)",
+                "vs_terrain_cutout_lean",
+                "fs_cutout_lean",
+                &terrain_buffers,
+                tri,
+                Some(wgpu::Face::Back),
+                true,
+                true,
+                None,
+                None,
+            )
+        });
+        if headset::installed() {
+            log::info!(
+                "Quest terrain lean cutout varyings: {}",
+                lean_cutout.is_some()
+            );
+        }
         // The water mirror's camera sees the world from the other side of the plane, which
         // flips the winding: its solid terrain culls the front.
         let solid_mirror = pipeline(
@@ -5257,6 +5440,7 @@ impl Renderer {
             format: frame_format,
             sprite_constants,
             hdr_output: hdr_output.is_some(),
+            split_streams,
         });
         let visbuf = flat
             .as_ref()
@@ -5434,6 +5618,7 @@ impl Renderer {
             solid,
             solid_opaque,
             solid_cutout,
+            lean_cutout,
             translucent,
             translucent_mark,
             world_warps,
@@ -7883,6 +8068,7 @@ impl Renderer {
             entities: &self.entity_bindings,
             weather_groups: [&self.weather.entity_layout, &self.weather.time_layout],
             pbr: self.pbr_maps.as_ref().and_then(|arrays| arrays.first()),
+            split_streams: self.arena.split(),
         };
         let (pack, labels) = native_pack::NativePack::new(
             &self.device,
@@ -9345,7 +9531,9 @@ impl Renderer {
         // `[displacement]`: the solid quads of the sections it reaches, nearest first.
         if let Some(d) = self.native.as_mut().and_then(|n| n.displacement.as_mut()) {
             let near: smallvec::SmallVec<[displace::Near<'_>; displace::MAX_SECTIONS]> =
-                if frame.title {
+                // Its copy reads whole 24-byte vertices from the page: with the arena in two
+                // streams (`Arena::split`) there are none, so it displaces nothing.
+                if frame.title || self.arena.split() {
                     smallvec::SmallVec::new()
                 } else {
                     visible
@@ -9409,14 +9597,28 @@ impl Renderer {
         // then the rest; phase 2 likewise. A fading list's quads all draw in the
         // cutout pass.
         let split_solid = split_solid_gpu(&self.info) && !warp_on && !gpu_frame;
-        let parts = |fading: bool| -> &'static [(u8, Quads)] {
+        // The cutout quads through the lean pipeline (`lean_cutout`): then the fading lists,
+        // whose quads all dither away through `fs_solid`, are a third group after them.
+        let lean_cutout = split_solid
+            && self.lean_cutout.is_some()
+            && cull.is_none()
+            && self.flat.is_none()
+            && self.hdr.is_none()
+            && self.native.is_none();
+        let plant_distance = plant_distance(&self.info);
+        let parts = |fading: bool, distance: u64| -> &'static [(u8, Quads)] {
+            let far = plant_distance.is_some_and(|d| f64::from_bits(distance) > d);
             match (split_solid, fading) {
                 (false, _) => &[(0, Quads::All)],
+                (true, false) if far => &[(0, Quads::Opaque), (1, Quads::CutoutAligned)],
                 (true, false) => &[(0, Quads::Opaque), (1, Quads::Cutout)],
+                (true, true) if lean_cutout => &[(2, Quads::All)],
                 (true, true) => &[(1, Quads::All)],
             }
         };
-        let (mut opaque_draws, mut phase2_opaque) = (0, 0);
+        // Phase 1's draws in each group.
+        let mut group_draws = [0usize; 3];
+        let mut phase2_opaque = 0;
         // In a GPU frame the GPU draws the solid quads of the whole sections within the
         // render distance that have records (`SectionGpu::gpu_draws_solid`), and the walk
         // listed those among them with translucent quads. Here stay those fading in or out
@@ -9457,7 +9659,7 @@ impl Renderer {
             };
             let instances = u32::from(first_phase);
             let mut indices = 0;
-            let parts = parts(fade_code(s, &v.key) != 0);
+            let parts = parts(fade_code(s, &v.key) != 0, v.distance);
             // Each part's (group, first draw, draws).
             let mut runs = [(0, 0, 0); 2];
             for (run, &(group, part)) in runs.iter_mut().zip(parts) {
@@ -9473,9 +9675,7 @@ impl Renderer {
             let runs = &runs[..parts.len()];
             if first_phase {
                 for &(group, start, len) in runs {
-                    if group == 0 {
-                        opaque_draws += len;
-                    }
+                    group_draws[usize::from(group)] += len;
                     self.solid_runs
                         .push_in(group, v.distance, s.page, start, len, [0; 3]);
                 }
@@ -9528,7 +9728,7 @@ impl Renderer {
             };
             let instances = u32::from(first_phase);
             let mut indices = 0;
-            let parts = parts(v.fade != 0);
+            let parts = parts(v.fade != 0, 0);
             let mut runs = [(0, 0, 0); 2];
             for (run, &(group, part)) in runs.iter_mut().zip(parts) {
                 let start = draws.len();
@@ -9543,9 +9743,7 @@ impl Renderer {
             let runs = &runs[..parts.len()];
             let (Some(bounds), Some(c)) = (tested, &mut cull) else {
                 for &(group, start, len) in runs {
-                    if group == 0 {
-                        opaque_draws += len;
-                    }
+                    group_draws[usize::from(group)] += len;
                     self.solid_runs
                         .push_in(group, v.distance, s.page, start, len, [0; 3]);
                 }
@@ -9553,9 +9751,7 @@ impl Renderer {
             };
             if first_phase {
                 for &(group, start, len) in runs {
-                    if group == 0 {
-                        opaque_draws += len;
-                    }
+                    group_draws[usize::from(group)] += len;
                     self.solid_runs
                         .push_in(group, v.distance, s.page, start, len, [0; 3]);
                 }
@@ -9587,11 +9783,14 @@ impl Renderer {
             .regroup(&mut self.draws, &mut self.draw_pages, 0);
         let phase1_draws = self.draws.len() as u32;
         // Draws `[..opaque_end]` hold opaque quads, `[cutout_start..phase1_draws]` cutout ones.
+        let opaque_draws = group_draws[0];
         let (opaque_end, cutout_start) = if split_solid {
             (opaque_draws, opaque_draws)
         } else {
             (phase1_draws as usize, 0)
         };
+        // The lean cutout pipeline's draws end here, and the fading lists follow.
+        let cutout_end = (opaque_draws + group_draws[1]) as u32;
         self.draws.extend_from_slice(&self.phase2_draws);
         self.draw_pages.extend_from_slice(&self.phase2_pages);
         // The two phases; recall has one, and only tests at its end.
@@ -10727,6 +10926,7 @@ impl Renderer {
                 self.weather.pipeline().get_bind_group_layout(1),
                 self.border_pipeline.get_bind_group_layout(0),
             ];
+            let split = self.arena.split();
             self.oit
                 .get_or_insert_with(|| {
                     oit::Oit::new(
@@ -10737,6 +10937,7 @@ impl Renderer {
                         [&clouds[0], &clouds[1]],
                         sprites,
                         format,
+                        split,
                     )
                 })
                 .prepare(
@@ -11199,6 +11400,10 @@ impl Renderer {
             });
             pass.set_bind_group(0, &self.group, &[]);
             pack_frame(&mut pass);
+            if self.stereo_views.is_some() && multiview::experiment().scissor {
+                let size = world_depth.texture().size();
+                pass.set_scissor_rect(0, 0, size.width / 4, size.height / 4);
+            }
             // The headset's hidden area first: depth only, at the nearest depth, so nothing
             // behind it is shaded.
             if let Some(vis) = &self.vis_mask {
@@ -11213,7 +11418,8 @@ impl Renderer {
             if let Some(t) = self.own_timing.as_mut() {
                 t.section(&mut pass, Some("sky + solid chunks"));
             }
-            if frame.title || (sky_visible && (frame.skybox || frame.end_sky)) {
+            let no_sky = self.stereo_views.is_some() && multiview::experiment().no_sky;
+            if !no_sky && (frame.title || (sky_visible && (frame.skybox || frame.end_sky))) {
                 if !frame.title && frame.skybox && !pack_draws_sky && !native_sky_pass {
                     match self
                         .native
@@ -11447,7 +11653,17 @@ impl Renderer {
                     // and phase 2's lists with quads for it.
                     let (opaque, cutout) = (opaque_end as u32, cutout_start as u32);
                     type Draws = std::ops::Range<u32>;
+                    let none = phase1_draws..phase1_draws;
                     let passes: &[(&wgpu::RenderPipeline, Draws, Draws)] = match material {
+                        None if let Some(lean) =
+                            self.lean_cutout.as_ref().filter(|_| lean_cutout) =>
+                        {
+                            &[
+                                (self.solid_opaque.get(hdr), 0..opaque, none.clone()),
+                                (lean, cutout..cutout_end, none.clone()),
+                                (self.solid_cutout.get(hdr), cutout_end..phase1_draws, none),
+                            ]
+                        }
                         None if split_solid => &[
                             (
                                 self.solid_opaque.get(hdr),
@@ -11534,7 +11750,15 @@ impl Renderer {
                                     .then(|| self.flat.as_ref()?.page_group(page))
                                     .flatten()
                             };
-                            for (pipeline, draws, _) in passes {
+                            let experiment = self
+                                .stereo_views
+                                .filter(|_| split_solid)
+                                .map(|_| multiview::experiment())
+                                .unwrap_or_default();
+                            for (n, (pipeline, draws, _)) in passes.iter().enumerate() {
+                                if [experiment.no_opaque, experiment.no_cutout][n.min(1)] {
+                                    continue;
+                                }
                                 pass.set_pipeline(pipeline);
                                 // GPU culling's draws first, all within the render distance.
                                 if let Some(gpu) = gpu {
@@ -12099,6 +12323,7 @@ impl Renderer {
                         translucent_draws,
                     );
                 }
+                None if self.stereo_views.is_some() && multiview::experiment().no_translucent => {}
                 None => {
                     pass.set_pipeline(translucent_pipeline);
                     if let Some(group) = warp_group {
@@ -12264,7 +12489,10 @@ impl Renderer {
                     self.draw_hand(&mut pass, hand_quads, first);
                 }
             }
-            if screen_in_world && let Some(pipelines) = &self.screen_world_pipelines {
+            if screen_in_world
+                && !multiview::experiment().no_screen
+                && let Some(pipelines) = &self.screen_world_pipelines
+            {
                 pass.set_bind_group(0, &self.entity_group, &[]);
                 pass.set_index_buffer(self.indices.slice(..), wgpu::IndexFormat::Uint32);
                 pass.set_vertex_buffer(0, self.screen_buffer.slice(..));
@@ -14931,7 +15159,7 @@ mod tests {
         .unwrap();
         let stage = naga::ShaderStage::Fragment;
         let constants = [("HDR_LIGHTING".to_owned(), 0.0)].into_iter().collect();
-        for entry in ["fs_solid", "fs_opaque"] {
+        for entry in ["fs_solid", "fs_opaque", "fs_opaque_lean"] {
             let (module, info) = naga::back::pipeline_constants::process_overrides(
                 &module,
                 &info,
@@ -15455,6 +15683,81 @@ mod tests {
         // A merged face's UV counts blocks: each takes the sprite from its own corner.
         assert_eq!(tile_uv(1.25, 2.0), [0.25, 1.0]);
         assert_eq!(tile_uv(1023.5, 3.75), [0.5, 0.75]);
+    }
+    /// Naga's value of a constant `vec2<f32>` WGSL expression.
+    fn constant_vec2(prelude: &str, expr: &str) -> [f32; 2] {
+        let wgsl = format!("{prelude}\nconst UV: vec2<f32> = {expr};");
+        let module = naga::front::wgsl::parse_str(&wgsl).unwrap_or_else(|e| panic!("{wgsl}: {e}"));
+        let (_, constant) = module
+            .constants
+            .iter()
+            .find(|(_, c)| c.name.as_deref() == Some("UV"))
+            .unwrap();
+        let naga::Expression::Compose { components, .. } =
+            &module.global_expressions[constant.init]
+        else {
+            panic!("{wgsl}");
+        };
+        let value = |c: &naga::Handle<naga::Expression>| match module.global_expressions[*c] {
+            naga::Expression::Literal(naga::Literal::F32(x)) => x,
+            ref e => panic!("{e:?}"),
+        };
+        [value(&components[0]), value(&components[1])]
+    }
+    /// The terrain shader for merged faces (`terrain_merged`): a merged quad's packed UV
+    /// decodes to blocks below 0, every block of it samples the sprite from its own corner,
+    /// and what was drawn before (sprite UVs in [0, 1], distant tiles past 1) reads as it did.
+    #[test]
+    fn merged_faces_repeat_their_sprite_below_zero() {
+        let source = super::terrain_merged(
+            include_str!("hdr_light.wgsl").to_owned() + include_str!("terrain.wgsl"),
+        );
+        let module = naga::front::wgsl::parse_str(&source).unwrap();
+        naga::valid::Validator::new(
+            naga::valid::ValidationFlags::all(),
+            naga::valid::Capabilities::all(),
+        )
+        .validate(&module)
+        .unwrap();
+
+        let body = source.split("fn terrain_uv(").nth(1).unwrap();
+        let body = body.split("return ").nth(1).unwrap();
+        let expr = &body[..body.find(';').unwrap()];
+        let section = 1.0 / crate::mesher::UV_STEPS;
+        let terrain_uv = |u: u16, v: u16| {
+            constant_vec2(
+                &format!(
+                    "const MERGED_STEP: f32 = {}.0;\nconst step: f32 = {section:?};\n\
+                     const raw: vec2<f32> = vec2<f32>({u}.0, {v}.0);",
+                    crate::mesher::MERGED_STEP
+                ),
+                expr,
+            )
+        };
+        assert_eq!(terrain_uv(0, 32768), [0.0, 1.0]);
+        assert_eq!(terrain_uv(8192, 16384), [0.25, 0.5]);
+        // One block below 0, then fifteen: the far corners of 2 and 16 block faces.
+        assert_eq!(terrain_uv(32768 + 2048, 32768 + 15 * 2048), [-1.0, -15.0]);
+
+        let body = source.split("fn tile_uv(").nth(1).unwrap();
+        let body = body.split("return ").nth(1).unwrap();
+        let expr = &body[..body.find(';').unwrap()];
+        let tile_uv = |u: f32, v: f32| {
+            constant_vec2("", &expr.replace("uv", &format!("vec2<f32>({u:?}, {v:?})")))
+        };
+        for (u, v) in [(0.0, 1.0), (0.25, 0.75), (1.0, 0.0)] {
+            assert_eq!(tile_uv(u, v), [u, v]);
+        }
+        assert_eq!(tile_uv(1.25, 2.0), [0.25, 1.0]);
+        assert_eq!(tile_uv(1023.5, 3.75), [0.5, 0.75]);
+        // Below 0: the block from -3 to -2 runs 0 to 1, as the block from 0 to 1 does.
+        assert_eq!(tile_uv(-2.75, -0.5), [0.25, 0.5]);
+        assert_eq!(tile_uv(-14.5, -3.0), [0.5, 0.0]);
+        // Rounding a hair past a merged quad's ends stays on that end's texel, which the
+        // clamped sampler reads from just outside the sprite: no texel from across it.
+        let [above, below] = tile_uv(1.000001, -3.000001);
+        assert!((1.0..1.00001).contains(&above), "{above}");
+        assert!((-0.00001..0.0).contains(&below), "{below}");
     }
     #[test]
     fn shader_globals_match_the_rust_layout() {

@@ -281,6 +281,8 @@ pub struct TerrainShape<'a> {
     pub format: wgpu::TextureFormat,
     /// The pack's tags of each tagged sprite layer, as `(layer, bits)`
     /// (`Manifest::sprite_tags`).
+    /// Whether the terrain arena holds its vertices in two streams (`vertex_streams`).
+    pub split_streams: bool,
     pub sprite_tags: &'a [(u32, u32)],
     /// The pack's material id of each sprite layer with one, as `(layer, id)`
     /// (`Manifest::sprite_materials`).
@@ -532,7 +534,11 @@ impl NativeMaterial {
         };
         let blend = Some(wgpu::BlendState::ALPHA_BLENDING);
         let instanced = layout(None);
-        let buffers = [Some(vertices.clone()), Some(instances)];
+        let buffers = if shape.split_streams {
+            super::vertex_streams::buffers(true, &instance_attributes)
+        } else {
+            vec![Some(vertices.clone()), Some(instances)]
+        };
         let solid = pipeline(
             &instanced,
             "horizon_material_vs",

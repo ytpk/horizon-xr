@@ -366,6 +366,7 @@ mod tests {
             entities: &empty,
             weather_groups: [&empty, &empty],
             pbr: None,
+            split_streams: false,
         };
         let manifest = "schema = 1\nid = \"t\"\nname = \"T\"\nversion = \"1\"\napi = \"0.1\"\n\
             [sky]\nfile = \"sky.wgsl\"\n";

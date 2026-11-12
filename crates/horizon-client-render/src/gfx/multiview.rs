@@ -69,6 +69,36 @@ pub fn occlusion_recall() -> bool {
     *ON.get_or_init(|| std::env::var("HORIZON_QUEST_OCCLUSION").as_deref() == Ok("1"))
 }
 
+/// `HORIZON_QUEST_EXPERIMENT=a,b`: what the stereo world pass leaves out, for measuring which
+/// part of the frame owns the GPU time on a headset (only back to back runs tell there):
+/// `noopaque` and `nocutout` (the two solid terrain passes), `notranslucent` (water, glass),
+/// `nosky`, `noscreen` (the screen effects at the pass's end), `scissor` (only a sixteenth of each eye is drawn: what is left is the vertex
+/// work). They break the picture: for measuring only.
+#[derive(Clone, Copy, Default)]
+pub struct Experiment {
+    pub no_opaque: bool,
+    pub no_cutout: bool,
+    pub no_translucent: bool,
+    pub no_sky: bool,
+    pub scissor: bool,
+    pub no_screen: bool,
+}
+pub fn experiment() -> Experiment {
+    static ON: std::sync::OnceLock<Experiment> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        let text = std::env::var("HORIZON_QUEST_EXPERIMENT").unwrap_or_default();
+        let has = |name| text.split(',').any(|part| part.trim() == name);
+        Experiment {
+            no_opaque: has("noopaque"),
+            no_cutout: has("nocutout"),
+            no_translucent: has("notranslucent"),
+            no_sky: has("nosky"),
+            scissor: has("scissor"),
+            no_screen: has("noscreen"),
+        }
+    })
+}
+
 /// `HORIZON_QUEST_SKY_DEBUG=a,b`: what the stereo world pass leaves out of the sky, for finding
 /// which draw a fault is in. `magenta` clears the pass to magenta: a sky pixel that stays
 /// magenta was not covered by the sky's triangle.

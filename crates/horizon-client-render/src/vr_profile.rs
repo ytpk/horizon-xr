@@ -446,6 +446,13 @@ pub fn frame_done() {
         if let Some(report) = g.profile.finish(now) {
             let lines = report.lines();
             log::info!("Horizon XR: frame profile: {}", lines.join(" | "));
+            if crate::mesher::merging() {
+                // Summed over every section meshed so far (remeshed ones count again).
+                log::info!(
+                    "Horizon XR: merged block faces: {:?}",
+                    crate::mesher::merge_stats()
+                );
+            }
             g.last = lines;
         }
     });

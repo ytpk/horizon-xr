@@ -103,8 +103,109 @@ pub struct BakedFace {
     /// The quad's own UVs in `TerrainVertex` fixed point, which the mesh
     /// otherwise recomputes for every face of every block.
     pub uv_fixed: [[u16; 2]; 4],
+    /// A crossed cutout quad cut down to the part of its sprite that draws
+    /// ([`BakedFace::shrink`]); `None` for every other face.
+    pub shrunk: Option<Box<ShrunkQuad>>,
+}
+/// A quad's corners over a smaller box of its sprite: the same plane and the same texels at
+/// the same places, without the clear border.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ShrunkQuad {
+    pub positions: [[f32; 3]; 4],
+    pub uv: [[f32; 2]; 4],
+    /// `uv` in `TerrainVertex` fixed point.
+    pub uv_fixed: [[u16; 2]; 4],
+}
+/// `positions` and `uv` of a flat quad whose UVs are a box of its sprite with one corner of
+/// the quad at each of its corners, cut down to `bounds` (`[u0, v0, u1, v1]`): each corner
+/// moves along the quad's edges to where the box's edge now is. `None` when the quad is not
+/// such a quad, when `bounds` already holds all of its UVs, or holds none of them.
+pub fn shrink_quad(
+    positions: &[[f32; 3]; 4],
+    uv: &[[f32; 2]; 4],
+    bounds: [f32; 4],
+) -> Option<ShrunkQuad> {
+    let range = |k: usize| {
+        let low = uv.iter().map(|c| c[k]).fold(f32::INFINITY, f32::min);
+        let high = uv.iter().map(|c| c[k]).fold(f32::NEG_INFINITY, f32::max);
+        (low < high).then_some((low, high))
+    };
+    let (u, v) = (range(0)?, range(1)?);
+    // The corner at each corner of the UV box: [low u, high u] by [low v, high v].
+    let mut at = [[usize::MAX; 2]; 2];
+    for (i, c) in uv.iter().enumerate() {
+        let end = |x: f32, (low, high): (f32, f32)| match x {
+            x if x == low => Some(0),
+            x if x == high => Some(1),
+            _ => None,
+        };
+        at[end(c[0], u)?][end(c[1], v)?] = i;
+    }
+    if at.iter().flatten().any(|&i| i == usize::MAX) {
+        return None;
+    }
+    // A parallelogram: the UVs then run evenly over it.
+    let p = |a: usize, b: usize| positions[at[a][b]];
+    for k in 0..3 {
+        if (p(0, 0)[k] + p(1, 1)[k] - p(1, 0)[k] - p(0, 1)[k]).abs() > 1e-5 {
+            return None;
+        }
+    }
+    // Each range within the bounds: nothing left, or nothing cut from either, is no shrink.
+    let cut = |(low, high): (f32, f32), least: f32, most: f32| {
+        let (a, b) = (low.max(least), high.min(most));
+        (a < b).then_some((a, b))
+    };
+    let new_u = cut(u, bounds[0], bounds[2])?;
+    let new_v = cut(v, bounds[1], bounds[3])?;
+    if new_u == u && new_v == v {
+        return None;
+    }
+    // A point between two corners, the corners themselves exactly.
+    let between = |a: [f32; 3], b: [f32; 3], t: f32| -> [f32; 3] {
+        if t == 0.0 {
+            a
+        } else if t == 1.0 {
+            b
+        } else {
+            std::array::from_fn(|k| a[k] + (b[k] - a[k]) * t)
+        }
+    };
+    let mut out = ShrunkQuad {
+        positions: *positions,
+        uv: *uv,
+        uv_fixed: [[0; 2]; 4],
+    };
+    for a in 0..2 {
+        for b in 0..2 {
+            let i = at[a][b];
+            let new = [[new_u.0, new_u.1][a], [new_v.0, new_v.1][b]];
+            let (s, t) = ((new[0] - u.0) / (u.1 - u.0), (new[1] - v.0) / (v.1 - v.0));
+            out.positions[i] = between(
+                between(p(0, 0), p(1, 0), s),
+                between(p(0, 1), p(1, 1), s),
+                t,
+            );
+            out.uv[i] = new;
+        }
+    }
+    out.uv_fixed = crate::mesher::baked_uv(out.uv);
+    Some(out)
 }
 impl BakedFace {
+    /// Gives a crossed cutout quad (one in no axis plane: a plant's) its `shrunk` form over
+    /// `bounds`, the part of its sprite that draws (`Sprites::drawn_bounds`).
+    pub fn shrink(&mut self, bounds: [f32; 4]) {
+        if self.crossed_cutout() {
+            self.shrunk = shrink_quad(&self.quad.positions, &self.quad.uv, bounds).map(Box::new);
+        }
+    }
+    /// Whether this is a cutout quad in no axis plane.
+    pub fn crossed_cutout(&self) -> bool {
+        let p = &self.quad.positions;
+        let aligned = (0..3).any(|k| p.iter().all(|v| v[k] == p[0][k]));
+        !self.opaque && !self.translucent && !aligned
+    }
     pub fn new(
         quad: ModelQuad,
         layer: u32,
@@ -122,6 +223,7 @@ impl BakedFace {
             fusion,
             shapes,
             uv_fixed,
+            shrunk: None,
         }
     }
 }
@@ -189,7 +291,16 @@ fn bake_resolved(
                     sprites.region_opaque(layer, &quad.uv),
                 ),
             };
-            Ok(BakedFace::new(quad, layer, opaque, translucent, None))
+            let mut face = BakedFace::new(quad, layer, opaque, translucent, None);
+            // Only a face whose pass its sprite picks: a declared render type may draw
+            // what the sprite's alpha would cut.
+            if face.quad.render_type.is_none()
+                && face.crossed_cutout()
+                && let Some(bounds) = sprites.drawn_bounds(layer)
+            {
+                face.shrink(bounds);
+            }
+            Ok(face)
         })
         .collect::<Result<_>>()?;
     let cube = super::cube::cube_styles(&faces);
@@ -616,6 +727,107 @@ pub fn descriptor(name: &str, overrides: &[(&str, &str)]) -> BlockState {
 mod tests {
     use super::*;
     use crate::model_library::ParsedModels;
+
+    /// One plane of a plant's cross, from the block's (0, 0) edge to its (1, 1) edge, the
+    /// sprite upright on it; `mirrored` is its other side.
+    fn cross_plane(mirrored: bool) -> ([[f32; 3]; 4], [[f32; 2]; 4]) {
+        let (a, b) = if mirrored { (1.0, 0.0) } else { (0.0, 1.0) };
+        (
+            [[a, 1.0, a], [a, 0.0, a], [b, 0.0, b], [b, 1.0, b]],
+            [[0.0, 0.0], [0.0, 1.0], [1.0, 1.0], [1.0, 0.0]],
+        )
+    }
+    /// A sprite that draws only in its middle half across and its lower half: the quad
+    /// ends where the texels do, each corner still on the texel corner it shows.
+    #[test]
+    fn a_crossed_quad_shrinks_to_the_texels_that_draw() {
+        let bounds = [0.25, 0.5, 0.75, 1.0];
+        let (positions, uv) = cross_plane(false);
+        let shrunk = shrink_quad(&positions, &uv, bounds).unwrap();
+        assert_eq!(
+            shrunk.positions,
+            [
+                [0.25, 0.5, 0.25],
+                [0.25, 0.0, 0.25],
+                [0.75, 0.0, 0.75],
+                [0.75, 0.5, 0.75]
+            ]
+        );
+        assert_eq!(
+            shrunk.uv,
+            [[0.25, 0.5], [0.25, 1.0], [0.75, 1.0], [0.75, 0.5]]
+        );
+        assert_eq!(
+            shrunk.uv_fixed,
+            [[8192, 16384], [8192, 32768], [24576, 32768], [24576, 16384]]
+        );
+        // The other side of the plane shows the sprite from x = 1 down: the same texels
+        // are at the same places.
+        let (positions, uv) = cross_plane(true);
+        let shrunk = shrink_quad(&positions, &uv, bounds).unwrap();
+        assert_eq!(
+            shrunk.positions,
+            [
+                [0.75, 0.5, 0.75],
+                [0.75, 0.0, 0.75],
+                [0.25, 0.0, 0.25],
+                [0.25, 0.5, 0.25]
+            ]
+        );
+        assert_eq!(
+            shrunk.uv,
+            [[0.25, 0.5], [0.25, 1.0], [0.75, 1.0], [0.75, 0.5]]
+        );
+    }
+    /// An edge the bounds do not cut keeps its corners to the bit, and a quad showing a
+    /// part of the sprite is cut only where the bounds cross that part.
+    #[test]
+    fn uncut_edges_and_partial_uvs_stay_where_they_are() {
+        // vanilla's cross: 0.8 to 15.2 sixteenths.
+        let (lo, hi) = (0.8 / 16.0, 15.2 / 16.0);
+        let positions = [[lo, 1.0, lo], [lo, 0.0, lo], [hi, 0.0, hi], [hi, 1.0, hi]];
+        let uv = [[0.0, 0.0], [0.0, 1.0], [1.0, 1.0], [1.0, 0.0]];
+        let shrunk = shrink_quad(&positions, &uv, [0.0, 0.125, 1.0, 1.0]).unwrap();
+        assert_eq!(shrunk.positions[1], positions[1]);
+        assert_eq!(shrunk.positions[2], positions[2]);
+        assert_eq!(shrunk.positions[0], [lo, 0.875, lo]);
+        assert_eq!(shrunk.positions[3], [hi, 0.875, hi]);
+        // The quad shows the sprite's left half; the bounds start at a quarter.
+        let half = [[0.0, 0.0], [0.0, 1.0], [0.5, 1.0], [0.5, 0.0]];
+        let (positions, _) = cross_plane(false);
+        let shrunk = shrink_quad(&positions, &half, [0.25, 0.0, 1.0, 1.0]).unwrap();
+        assert_eq!(
+            shrunk.uv,
+            [[0.25, 0.0], [0.25, 1.0], [0.5, 1.0], [0.5, 0.0]]
+        );
+        assert_eq!(
+            shrunk.positions,
+            [
+                [0.5, 1.0, 0.5],
+                [0.5, 0.0, 0.5],
+                [1.0, 0.0, 1.0],
+                [1.0, 1.0, 1.0]
+            ]
+        );
+    }
+    #[test]
+    fn quads_with_nothing_to_cut_or_no_box_of_uvs_are_left() {
+        let (positions, uv) = cross_plane(false);
+        assert_eq!(shrink_quad(&positions, &uv, [0.0, 0.0, 1.0, 1.0]), None);
+        // Nothing of the quad's UVs draws.
+        let left = [[0.0, 0.0], [0.0, 1.0], [0.25, 1.0], [0.25, 0.0]];
+        assert_eq!(shrink_quad(&positions, &left, [0.5, 0.0, 1.0, 1.0]), None);
+        // UVs that are no box (a sheared texture).
+        let sheared = [[0.0, 0.0], [0.25, 1.0], [1.0, 1.0], [0.75, 0.0]];
+        assert_eq!(
+            shrink_quad(&positions, &sheared, [0.25, 0.5, 0.75, 1.0]),
+            None
+        );
+        // A quad that is no parallelogram.
+        let mut bent = positions;
+        bent[3] = [1.0, 2.0, 1.0];
+        assert_eq!(shrink_quad(&bent, &uv, [0.25, 0.5, 0.75, 1.0]), None);
+    }
 
     /// #7013: a pack's blockstate file that defines only some states (here
     /// a fence gate's `powered=true` ones) keeps vanilla's model for the

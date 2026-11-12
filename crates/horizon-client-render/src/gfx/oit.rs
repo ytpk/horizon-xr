@@ -174,20 +174,11 @@ impl Oit {
         clouds: [&wgpu::BindGroupLayout; 2],
         sprites: [f64; 2],
         format: wgpu::TextureFormat,
+        split_streams: bool,
     ) -> Self {
         let instance = wgpu::vertex_attr_array![5=>Float32x4];
-        let buffers = [
-            Some(wgpu::VertexBufferLayout {
-                array_stride: std::mem::size_of::<super::TerrainVertex>() as u64,
-                step_mode: wgpu::VertexStepMode::Vertex,
-                attributes: &super::TERRAIN_ATTRIBUTES,
-            }),
-            Some(wgpu::VertexBufferLayout {
-                array_stride: 16,
-                step_mode: wgpu::VertexStepMode::Instance,
-                attributes: &instance,
-            }),
-        ];
+        // The arena's layout (`Arena::split`): the draws bind its second stream at slot 2.
+        let buffers = super::vertex_streams::buffers(split_streams, &instance);
         let buffers = &buffers[..];
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Horizon improved transparency"),

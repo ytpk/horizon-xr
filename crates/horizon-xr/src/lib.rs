@@ -668,10 +668,13 @@ impl Session {
 /// An sRGB format, so the compositor reads the game's sRGB-encoded colours as
 /// such; wgpu draws through a UNORM view of it (the images are created with
 /// mutable formats). A UNORM-only runtime gets UNORM, a little bright.
-/// Dynamic resolution is on: the `horizonDynamicResolution` setting or `HORIZON_XR_DYNRES=1`.
+/// Dynamic resolution is on: `HORIZON_XR_DYNRES=1`/`0`, else the setting `horizonDynamicResolution`.
 fn dynres_wanted() -> bool {
-    input::settings().bool("horizonDynamicResolution")
-        || std::env::var("HORIZON_XR_DYNRES").is_ok_and(|v| v == "1")
+    match std::env::var("HORIZON_XR_DYNRES").as_deref() {
+        Ok("1") => true,
+        Ok("0") => false,
+        _ => input::settings().bool("horizonDynamicResolution"),
+    }
 }
 
 /// The visibility mask is on: `HORIZON_XR_VISMASK=1`/`0`, else the setting `horizonVisibilityMask`.
