@@ -651,6 +651,14 @@ impl Occlusion {
             self.edits.clear();
             self.changed.clear();
             self.changed_late.clear();
+            // Dropping partial updates also drops the openings they would propagate. Until
+            // the full resend lands, neither the current graph nor an in-flight search can
+            // safely hide a section. Fall back to frustum-only visibility without waiting.
+            if let Some(graph) = self.graph.take() {
+                self.spare = graph;
+                self.generation = next_generation();
+            }
+            self.discard = self.running.is_some();
         }
         if self.resync {
             return;
@@ -1855,5 +1863,38 @@ mod tests {
             reached(&fresh),
             "the worker saw the same world"
         );
+    }
+
+    #[test]
+    fn overflowing_edits_cannot_keep_an_opened_wall_hidden() {
+        for in_flight in [false, true] {
+            let mut o = Occlusion::new(0, 4);
+            let from = (0, 1, 0);
+            let camera = at(from);
+            for (dx, dy, dz) in STEPS {
+                o.set((dx, 1 + dy, dz), 0);
+            }
+            o.settle(camera, 3);
+            assert!(!o.contains((2, 1, 0)));
+            if in_flight {
+                o.start(camera, 3);
+            }
+            let generation = o.generation();
+            // Cave culling is off while edits arrive; the old graph still has a closed wall.
+            for i in 0..=EDIT_CAP {
+                o.set((10, 1, 10), (i & 1) as u64);
+            }
+            o.set((1, 1, 0), ALL_VISIBLE);
+            assert!(o.contains((2, 1, 0)), "no stale graph after overflow");
+            assert_eq!(o.visible_for_camera((2, 1, 0), from), None);
+            assert_ne!(o.generation(), generation);
+            o.collect(true);
+            assert!(
+                o.contains((2, 1, 0)),
+                "an old worker result must be discarded"
+            );
+            o.settle(camera, 3);
+            assert_eq!(o.visible_for_camera((2, 1, 0), from), Some(true));
+        }
     }
 }
