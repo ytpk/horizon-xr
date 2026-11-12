@@ -1567,6 +1567,43 @@ pub const DEFS: &[Def] = &[
         range: None,
     },
     // Horizon only: terrain as one draw call per arena page with back faces left out, instead of one per section: for GPUs with no multi-draw (Quest's Adreno), off
+    // Horizon only: the Experiments page's Quest rendering switches (gfx.rs `quest_switch`), read at start.
+    Def {
+        key: "horizonLeanOpaque",
+        kind: Kind::Bool,
+        default: "true",
+        range: None,
+    },
+    Def {
+        key: "horizonLeanCutout",
+        kind: Kind::Bool,
+        default: "true",
+        range: None,
+    },
+    Def {
+        key: "horizonMergeFaces",
+        kind: Kind::Bool,
+        default: "false",
+        range: None,
+    },
+    Def {
+        key: "horizonShrinkPlants",
+        kind: Kind::Bool,
+        default: "false",
+        range: None,
+    },
+    Def {
+        key: "horizonSplitStreams",
+        kind: Kind::Bool,
+        default: "false",
+        range: None,
+    },
+    Def {
+        key: "horizonPlantDistance",
+        kind: Kind::Float,
+        default: "0.0",
+        range: Some((0.0f32, 128.0f32, 16.0f32)),
+    },
     Def {
         key: "horizonFlatDraws",
         kind: Kind::Bool,

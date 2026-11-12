@@ -48,6 +48,8 @@ pub enum PageId {
     MenuWorld,
     /// Horizon only: the Visor protocol and the performance switches.
     Visor,
+    /// Horizon only: Quest rendering experiments, read when the game starts.
+    Experiments,
     // The pages of Visor's VR settings (`VRSettingsCategory` and the sub-screens its categories
     // open), in its order: Presets, Rendering, VR Body, Controls, Movement, Immersion, GUI, World.
     Presets,
@@ -91,6 +93,7 @@ impl PageId {
             PageId::Radial => "vivecraft.options.screen.radialsettings",
             PageId::MenuWorld => "vivecraft.options.screen.menuworld",
             PageId::Visor => "horizon.visor.page",
+            PageId::Experiments => "horizon.vr.experiments",
             PageId::Presets => "visor.options.presets.button",
             PageId::VRendering => "visor.options.rendering.button",
             PageId::Effects => "visor.options.rendering.effects.button",
@@ -131,6 +134,7 @@ impl PageId {
             PageId::Radial => "vivecraft.options.screen.radialmenu.button",
             PageId::MenuWorld => "vivecraft.options.screen.menuworld.button",
             PageId::Visor => "horizon.visor.page.button",
+            PageId::Experiments => "horizon.vr.experiments.button",
             PageId::Presets => "visor.options.presets.button",
             PageId::VRendering => "visor.options.rendering.button",
             PageId::Effects => "visor.options.rendering.effects.button",
@@ -202,6 +206,7 @@ pub fn entries(page: PageId, s: &VrSettings, server_limited_teleport: bool) -> V
             Opt("horizonMultiview"),
             Opt("horizonFoveatedMultiview"),
             Opt("horizonOpaqueWater"),
+            Entry::Page(PageId::Experiments),
             Entry::Page(PageId::Effects),
             Entry::Page(PageId::Visor),
         ],
@@ -336,6 +341,15 @@ pub fn entries(page: PageId, s: &VrSettings, server_limited_teleport: bool) -> V
             Opt("horizonVrUploadMs"),
             Opt("horizonFlatDraws"),
             Opt("horizonPinBigCores"),
+            Entry::Page(PageId::Experiments),
+        ],
+        PageId::Experiments => vec![
+            Opt("horizonLeanOpaque"),
+            Opt("horizonLeanCutout"),
+            Opt("horizonMergeFaces"),
+            Opt("horizonSplitStreams"),
+            Opt("horizonShrinkPlants"),
+            Opt("horizonPlantDistance"),
         ],
         PageId::Hud => vec![
             Opt("vrHudLockMode"),
@@ -391,6 +405,7 @@ pub fn entries(page: PageId, s: &VrSettings, server_limited_teleport: bool) -> V
             Opt("horizonVrUploadMs"),
             Opt("horizonFlatDraws"),
             Opt("horizonPinBigCores"),
+            Entry::Page(PageId::Experiments),
             Opt("useFsaa"),
             Opt("stencilOn"),
             Entry::Page(PageId::PostEffects),
@@ -577,6 +592,7 @@ mod tests {
                 PageId::Radial,
                 PageId::MenuWorld,
                 PageId::Visor,
+                PageId::Experiments,
                 PageId::Presets,
                 PageId::VRendering,
                 PageId::Effects,

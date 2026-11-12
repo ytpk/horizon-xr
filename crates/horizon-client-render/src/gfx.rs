@@ -53,6 +53,17 @@ fn split_solid_gpu(info: &wgpu::AdapterInfo) -> bool {
     }
 }
 
+/// A Quest rendering switch (the VR settings' Experiments page): the environment variable
+/// `env` set to `1` or `0` decides, else the VR setting `setting`. Read when the renderer
+/// is made, so a change takes a restart.
+fn quest_switch(env: &str, setting: &str) -> bool {
+    match std::env::var(env).as_deref() {
+        Ok("1") => true,
+        Ok("0") => false,
+        _ => headset::installed() && horizon_client_input::headset::settings().bool(setting),
+    }
+}
+
 /// Whether the opaque solid pass without HDR output exports terrain.wgsl's `OpaqueWire` (3
 /// interpolant locations) instead of `TerrainWire` (5): a headset's Adreno shades each vertex
 /// about 2.5 times a frame (once per view, once for binning) and pays for every location. On
@@ -62,7 +73,7 @@ fn lean_opaque(info: &wgpu::AdapterInfo) -> bool {
     headset::installed()
         && info.backend == wgpu::Backend::Vulkan
         && info.vendor == 0x5143
-        && std::env::var("HORIZON_QUEST_LEAN_OPAQUE").as_deref() != Ok("0")
+        && quest_switch("HORIZON_QUEST_LEAN_OPAQUE", "horizonLeanOpaque")
 }
 
 /// Whether the cutout solid pass without HDR output draws its lists that are not fading
@@ -75,7 +86,7 @@ fn lean_cutout(info: &wgpu::AdapterInfo) -> bool {
         && info.backend == wgpu::Backend::Vulkan
         && info.vendor == 0x5143
         && split_solid_gpu(info)
-        && std::env::var("HORIZON_QUEST_LEAN_CUTOUT").as_deref() != Ok("0")
+        && quest_switch("HORIZON_QUEST_LEAN_CUTOUT", "horizonLeanCutout")
 }
 
 /// `HORIZON_QUEST_PLANT_DISTANCE=<blocks>`: on a headset's Adreno, sections whose centre is
@@ -85,11 +96,13 @@ fn lean_cutout(info: &wgpu::AdapterInfo) -> bool {
 fn plant_distance(info: &wgpu::AdapterInfo) -> Option<f64> {
     static BLOCKS: std::sync::OnceLock<Option<f64>> = std::sync::OnceLock::new();
     let blocks = *BLOCKS.get_or_init(|| {
-        std::env::var("HORIZON_QUEST_PLANT_DISTANCE")
-            .ok()?
-            .parse::<f64>()
-            .ok()
-            .filter(|d| *d > 0.0)
+        match std::env::var("HORIZON_QUEST_PLANT_DISTANCE") {
+            Ok(v) => v.parse::<f64>().ok(),
+            Err(_) => headset::installed().then(|| {
+                f64::from(horizon_client_input::headset::settings().float("horizonPlantDistance"))
+            }),
+        }
+        .filter(|d| *d > 0.0)
     });
     blocks
         .filter(|_| headset::installed() && info.vendor == 0x5143)
@@ -121,7 +134,7 @@ fn merge_faces_gpu(info: &wgpu::AdapterInfo, shader_pack: bool) -> bool {
         && info.vendor == 0x5143
         && split_solid_gpu(info)
         && !shader_pack
-        && std::env::var("HORIZON_QUEST_MERGE_FACES").as_deref() == Ok("1")
+        && quest_switch("HORIZON_QUEST_MERGE_FACES", "horizonMergeFaces")
 }
 
 /// Whether plants' crossed quads are meshed over the part of their sprite that draws
@@ -132,7 +145,7 @@ fn shrink_plants_gpu(info: &wgpu::AdapterInfo, shader_pack: bool) -> bool {
         && info.backend == wgpu::Backend::Vulkan
         && info.vendor == 0x5143
         && !shader_pack
-        && std::env::var("HORIZON_QUEST_SHRINK_PLANTS").as_deref() == Ok("1")
+        && quest_switch("HORIZON_QUEST_SHRINK_PLANTS", "horizonShrinkPlants")
 }
 
 /// The terrain shader for meshes with merged faces (`mesher::merge`). A merged quad's packed
@@ -3469,11 +3482,11 @@ impl Renderer {
             && device.limits().max_vertex_buffers >= 3
             && !shader_pack
             && !flat::wanted(&adapter, &device)
-            && std::env::var("HORIZON_QUEST_SPLIT_STREAMS").as_deref() == Ok("1");
+            && quest_switch("HORIZON_QUEST_SPLIT_STREAMS", "horizonSplitStreams");
         if headset::installed() {
             log::info!(
                 "Quest terrain split vertex streams: {split_streams} (requested {}, flat {}, shader pack {shader_pack})",
-                std::env::var("HORIZON_QUEST_SPLIT_STREAMS").as_deref() == Ok("1"),
+                quest_switch("HORIZON_QUEST_SPLIT_STREAMS", "horizonSplitStreams"),
                 flat::wanted(&adapter, &device)
             );
         }
