@@ -165,6 +165,10 @@ static POOL: OnceLock<Pool> = OnceLock::new();
 /// but one, which the render and server threads share with them (they run
 /// ahead of the workers: [`crate::favour_current`], [`crate::behind_server`]).
 pub fn default_threads() -> usize {
+    // The hybrid plan's workers already leave out the two foreground cores: one thread each.
+    if crate::cores::hybrid_plan().is_some() {
+        return crate::worker_count().max(1);
+    }
     crate::worker_count().saturating_sub(1).max(1)
 }
 
