@@ -233,6 +233,7 @@ pub fn entries(page: PageId, s: &VrSettings, server_limited_teleport: bool) -> V
         ],
         PageId::Controls => vec![
             Opt("reverseHands"),
+            Opt("horizonBothHandPointers"),
             Entry::ResetOrigin,
             Entry::Page(PageId::Bindings),
         ],
@@ -520,6 +521,7 @@ pub fn entries(page: PageId, s: &VrSettings, server_limited_teleport: bool) -> V
             Opt("vrWorldRotationIncrement"),
             Opt("vehicleRotation"),
             Opt("reverseHands"),
+            Opt("horizonBothHandPointers"),
             Opt("seatedFreeMove"),
             Blank,
             Opt("rightclickDelay"),

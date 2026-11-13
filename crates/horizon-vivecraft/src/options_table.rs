@@ -1941,6 +1941,15 @@ pub const OPTS: &[OptInfo] = &[
         lang: "horizon.visor.in_block_vignette",
     },
     OptInfo {
+        key: "horizonBothHandPointers",
+        name: "HORIZON_BOTH_HAND_POINTERS",
+        decimals: 0,
+        on: "options.on",
+        off: "options.off",
+        class: "",
+        lang: "horizon.vr.both_hand_pointers",
+    },
+    OptInfo {
         key: "horizonOpaqueWater",
         name: "HORIZON_OPAQUE_WATER",
         decimals: 0,

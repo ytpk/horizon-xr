@@ -317,6 +317,35 @@ drawn under the card.
   horizon-client --lib 798, horizon-client-input 90, render `headset|quest` 14 pass; `cargo check --target aarch64-linux-android`
   passes. APK rebuilt on the same bundle (research-lock equal), installed on the headset with launch.txt untouched.
 
+### Eighth pass: sound, the cursor, a pointer for each hand (user's headset test of the seventh APK)
+Report: clicks work now; no sound at all; the cursor looks fixed at the panel's centre.
+- Sound. Cause: the launch.txt run (`HORIZON_QUEST_PROVISION_TEST`) skips the room and downloaded only `Stage::Core`, so the
+  prepared resources had no `sounds.json` and no sound objects; the audio output itself (cpal 0.16 on AAudio, feature `audio`
+  default in horizon-quest, no `HORIZON_NO_AUDIO` in that path) is not the cause. The room flow already has the second stage
+  (`QuestProvisioner::download(Stage::Sounds)` then `prepare(Stage::Sounds)` = `import_assets("sounds")`, `.sounds-complete`
+  stamp, a retry and an off switch; machine_tests cover it). Fix: `provision.rs` `add_sounds` after the core prepare: skipped
+  when `assets/minecraft/sounds.json` is there, else `download(Stage::Sounds)` (the downloader keeps what is on disk) and
+  `import_assets("sounds")`. Device log lines are in the report of this pass.
+- Cursor. The drawn arrow used `Game::cursor`, which the headset sets only when the laser moves or a button goes down; anything
+  that writes the cursor between the headset's frame and the draw (Starling's Android code has several writers: the virtual
+  mouse's viewport sync, the pad's focus following) showed as a cursor that stays where it was put, and a press worked
+  because the seventh pass re-sent the position on the press edge. Fix: (1) `draw_pad_cursor` draws the arrow at the laser's
+  point of this frame (`headset_laser_points`, `pointer_ui::laser_gui_point`, window pixels over the GUI scale), not at `cursor`;
+  (2) `hud()` first puts `cursor` on the owning laser (`headset_cursor_to_laser`), so hover matches the arrow; (3) `headset_frame`
+  re-sends the position whenever `cursor` is off the laser by more than half a pixel (`cursor_off_laser`) and logs the first
+  five times (`Headset: the cursor ... was taken off the laser`), which names the writer if it still happens.
+- Option `horizonBothHandPointers` (off by default = one pointer, the hand that clicked last, as Visor and Vivecraft): on the
+  VR settings' Controls pages after "Reverse Hands" (`pages.rs`), keys `horizon.vr.both_hand_pointers` (+ `.tooltip`) in en_us
+  and ru_ru. On: `horizon-xr` publishes the off hand's laser as `headset::second_pointer` (point, distance, trigger and face
+  button) beside the main hand's `pointer`; `horizon_client_input::pointer_route::route` (tests) gives the mouse to the hand
+  that presses first (the main hand on a tie) until it lets go; the trigger is a left click and A/X a right click at that
+  hand's point; both lasers are drawn (`headset_pointer_lines`) and both arrows (the off hand's light blue). The sign-in room
+  still uses the main pointer only.
+- Checks: fmt; clippy `-D warnings --all-targets` clean for horizon-client-input, -vivecraft, -xr, -quest-launcher and
+  `-p horizon-client --lib --tests`; tests horizon-client --lib 800, client-input 96, vivecraft 144, visor 123 (+2), quest-launcher
+  37, client-render `headset|quest` 14: pass; `cargo check --target aarch64-linux-android -p horizon-quest -p horizon-android`
+  passes. APK on the same JRE and bundle (research-lock equal), `launch.txt` untouched.
+
 ## Remaining work
 1. Test on the headset: stereo/multiview, SpaceWarp, room, controls, then A/B the switches (including
    `HORIZON_QUEST_LEAN_OPAQUE`, `HORIZON_QUEST_LEAN_CUTOUT`); check the on-device prepare and the download (Range resume).

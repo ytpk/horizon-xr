@@ -285,7 +285,6 @@ mod pickups;
 mod piglins;
 mod piston_push;
 mod player_equip;
-#[cfg(any(target_os = "android", test))]
 mod pointer_ui;
 mod postprocess;
 mod potent_sulfur;
@@ -8370,6 +8369,8 @@ impl Game<'_> {
     #[cfg(not(target_os = "android"))]
     fn draw_phone_offers(&mut self, _batch: &mut HudBatch) {}
     fn hud(&mut self, size: [u32; 2]) -> HudBatch {
+        // A headset's cursor is where its laser meets the panel now, for the hover of what is drawn.
+        self.headset_cursor_to_laser();
         // The pack prompt replaces the connecting screen (setScreen), but
         // in game it opens over the world.
         let mut batch = if (self.server_packs.prompt.is_some()

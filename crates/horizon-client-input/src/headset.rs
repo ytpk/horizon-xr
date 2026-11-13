@@ -148,6 +148,8 @@ struct State {
     pointer: Option<[f32; 2]>,
     /// The pointer's left and right buttons (the triggers while a menu shows).
     pointer_buttons: [bool; 2],
+    /// With both hands pointing (`horizonBothHandPointers`): the off hand's own laser.
+    second_pointer: Option<SecondPointer>,
     /// A screen or the title is open: the headset shows the menu panel.
     menu: bool,
     /// The game's yaw minus the head's: where the play space faces in the world.
@@ -240,6 +242,7 @@ static STATE: Mutex<State> = Mutex::new(State {
     head: None,
     pointer: None,
     pointer_buttons: [false; 2],
+    second_pointer: None,
     menu: true,
     body_yaw: 0.0,
     snap: 0.0,
@@ -431,6 +434,22 @@ pub fn pointer_buttons() -> [bool; 2] {
             [false; 2]
         }
     })
+}
+
+/// The off hand's laser while both hands point (`horizonBothHandPointers`): where it meets the
+/// menu panel (0..1 from its top left), how far it runs, and its trigger and face button.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SecondPointer {
+    pub at: [f32; 2],
+    pub distance: f32,
+    pub buttons: [bool; 2],
+}
+pub fn set_second_pointer(second: Option<SecondPointer>) {
+    with(|s| s.second_pointer = second);
+}
+/// The off hand's laser, only while it meets the panel, the headset runs and both hands point.
+pub fn second_pointer() -> Option<SecondPointer> {
+    with(|s| s.second_pointer.filter(|_| s.active))
 }
 
 /// The game shows a screen (or the title): the headset draws it on a panel.

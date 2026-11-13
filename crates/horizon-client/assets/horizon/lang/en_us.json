@@ -2049,6 +2049,8 @@
   "horizon.quest.room.graphics.mqsr.note": "MQSR is a runtime hint; render size stays your choice.",
   "horizon.quest.room.graphics.ffr.note": "Restart for foveation. Standard multiview is disabled; combined mode is experimental.",
   "horizon.quest.room.auth.live_provider": "Microsoft Live: Minecraft for Nintendo Switch (Prismarine-compatible sign-in).",
+  "horizon.vr.both_hand_pointers": "Pointer for Both Hands",
+  "horizon.vr.both_hand_pointers.tooltip": "Each controller gets its own laser and cursor on a menu. The trigger of either hand clicks where that hand points. Off: one pointer, the hand that clicked last.",
   "horizon.vr.opaque_water": "Opaque Water",
   "horizon.vr.opaque_water.tooltip": "Draw water without transparency to reduce sorting and blending. Rebuilds terrain; unavailable with shader packs.",
   "horizon.quest.room.graphics.water.on": "Opaque water: ON",

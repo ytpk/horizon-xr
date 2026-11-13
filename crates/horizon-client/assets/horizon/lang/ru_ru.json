@@ -1647,6 +1647,8 @@
   "horizon.quest.room.graphics.mqsr.note": "MQSR — запрос runtime; разрешение выбираете вы.",
   "horizon.quest.room.graphics.ffr.note": "Фовеация: нужен перезапуск; обычный multiview отключается. Совместный режим экспериментальный.",
   "horizon.quest.room.auth.live_provider": "Microsoft Live: Minecraft для Nintendo Switch (вход, совместимый с Prismarine).",
+  "horizon.vr.both_hand_pointers": "Указка в обеих руках",
+  "horizon.vr.both_hand_pointers.tooltip": "У каждого контроллера свой лазер и курсор в меню. Курок любой руки кликает там, куда указывает эта рука. Выкл.: одна указка, рука, нажавшая последней.",
   "horizon.vr.opaque_water": "Непрозрачная вода",
   "horizon.vr.opaque_water.tooltip": "Убирает прозрачность воды, сокращая сортировку и смешивание. Перестраивает ландшафт; не действует с шейдерпаками.",
   "horizon.quest.room.graphics.water.on": "Непрозрачная вода: ВКЛ",

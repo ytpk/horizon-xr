@@ -1296,6 +1296,14 @@ pub const DEFS: &[Def] = &[
         default: "false",
         range: None,
     },
+    // A laser and a cursor on the menu panel for each hand (the trigger of either clicks at its own
+    // point); off keeps Visor's and Vivecraft's one pointer, the hand that clicked last.
+    Def {
+        key: "horizonBothHandPointers",
+        kind: Kind::Bool,
+        default: "false",
+        range: None,
+    },
     Def {
         key: "horizonOpaqueWater",
         kind: Kind::Bool,

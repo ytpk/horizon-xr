@@ -91,5 +91,42 @@ pub fn run(app: &AndroidApp, internal: &Path, name: &str) -> Result<PathBuf, Str
         total.elapsed().as_secs_f32(),
         output.display()
     ));
+    add_sounds(&root, &downloads, &output)?;
     Ok(output)
+}
+
+/// The room's second stage without the room: the sounds are fetched (what is on disk already is
+/// reused by the downloader's checks) and copied into the prepared resources, so the game has
+/// something to play. Skipped when the resources have their `sounds.json` and the store has the
+/// objects.
+fn add_sounds(root: &Path, downloads: &Path, resources: &Path) -> Result<(), String> {
+    if resources.join("assets/minecraft/sounds.json").is_file() {
+        say("sounds are in the prepared resources already");
+        return Ok(());
+    }
+    let started = Instant::now();
+    let progress = Progress::new();
+    let cancel = AtomicBool::new(false);
+    launcher::download(
+        &launcher::Download {
+            root,
+            into: downloads,
+            languages: &["ru_ru"],
+            stage: Stage::Sounds,
+            reserve: 1 << 30,
+        },
+        &progress,
+        &cancel,
+        &|line| say(&line),
+    )?;
+    say(&format!(
+        "sounds downloaded in {:.1} s",
+        started.elapsed().as_secs_f32()
+    ));
+    launcher::import_assets("sounds", root, downloads, resources, &|line| say(line))?;
+    say(&format!(
+        "sounds imported (sounds.json: {})",
+        resources.join("assets/minecraft/sounds.json").is_file()
+    ));
+    Ok(())
 }

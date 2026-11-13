@@ -15,6 +15,7 @@ pub mod keybinds;
 pub mod keymapping;
 pub mod modifiers;
 pub mod mouse;
+pub mod pointer_route;
 pub mod room;
 pub mod window;
 

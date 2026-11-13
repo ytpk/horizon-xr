@@ -1574,7 +1574,20 @@ impl Game<'_> {
         if !pointer {
             return;
         }
-        // A headset's pointer is the mouse, which no system pointer shows there.
+        // A headset's pointer is the mouse, which no system pointer shows there: an arrow where
+        // each laser meets the panel this frame (the second hand's tinted), not where the game's
+        // cursor was last put.
+        if horizon_client::headset::active() {
+            let points = self.headset_laser_points();
+            if points.iter().any(Option::is_some) {
+                for (hand, point) in points.into_iter().enumerate() {
+                    if let Some((x, y)) = point {
+                        self.draw_pointer_arrow(batch, x, y, hand == 1);
+                    }
+                }
+                return;
+            }
+        }
         let (x, y) = if self.headset_pointing() {
             self.cursor
         } else {
@@ -1589,9 +1602,18 @@ impl Game<'_> {
             }
             at
         };
-        // An arrow, outlined, pointing up-left at (x, y).
+        self.draw_pointer_arrow(batch, x, y, false);
+    }
+
+    /// An arrow, outlined, pointing up-left at (x, y); the off hand's is light blue.
+    fn draw_pointer_arrow(&self, batch: &mut HudBatch, x: f32, y: f32, off_hand: bool) {
         let atlas = &self.gui.atlas;
         let (x, y) = (x.floor(), y.floor());
+        let fill = if off_hand {
+            rgba(120, 200, 255, 255)
+        } else {
+            rgba(255, 255, 255, 255)
+        };
         const ROWS: [u8; 10] = [1, 2, 3, 4, 5, 6, 7, 4, 2, 1];
         for (i, &w) in ROWS.iter().enumerate() {
             let row = y + i as f32;
@@ -1607,14 +1629,7 @@ impl Game<'_> {
         batch.fill(atlas, x - 1.0, y + 10.0, 2.0, 1.0, rgba(0, 0, 0, 255));
         for (i, &w) in ROWS.iter().enumerate().skip(1).take(8) {
             let row = y + i as f32;
-            batch.fill(
-                atlas,
-                x,
-                row,
-                f32::from(w) - 1.0,
-                1.0,
-                rgba(255, 255, 255, 255),
-            );
+            batch.fill(atlas, x, row, f32::from(w) - 1.0, 1.0, fill);
         }
     }
 

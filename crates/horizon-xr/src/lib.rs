@@ -1186,6 +1186,7 @@ impl Session {
         if !focused {
             input::set_pad(PadState::default());
             input::set_pointer(None);
+            input::set_second_pointer(None);
             input::set_pointer_distance(None);
             input::set_pointer_buttons([false; 2]);
             input::set_hands([None; 2]);
@@ -1494,35 +1495,57 @@ impl Session {
                 self.grab.clear();
                 input::set_screen_handles(input::ScreenHandles::default());
             }
-            // The hand that clicks takes the cursor (`MouseClickHandler.processCursorUpdate`).
-            let triggers = [controls.triggers[main] > 0.5, controls.triggers[off] > 0.5];
             let hits = |hand: usize| {
                 self.panel
                     .as_ref()
                     .zip(controls.aim[hand])
                     .and_then(|(panel, (origin, q))| panel.hit_along(origin, q * Vec3::NEG_Z))
             };
-            if triggers[1] && !self.cursor_triggers[1] && !triggers[0] && hits(off).is_some() {
-                self.cursor_off = true;
-            } else if triggers[0]
-                && !self.cursor_triggers[0]
-                && !triggers[1]
-                && hits(main).is_some()
-            {
+            if settings.bool("horizonBothHandPointers") {
+                // Each hand has its own laser: the main hand's is the pointer, the off hand's the
+                // second one; the game routes the mouse to the hand that clicks.
                 self.cursor_off = false;
+                self.cursor_triggers = [false; 2];
+                input::set_pointer_off(false);
+                let at = hits(main).filter(|_| !holding);
+                input::set_pointer(at.map(|(at, _)| at));
+                input::set_pointer_distance(at.map(|(_, d)| d));
+                input::set_pointer_buttons([
+                    controls.triggers[main] > 0.5 && !holding && at.is_some(),
+                    faces[main].0,
+                ]);
+                let second = hits(off).filter(|_| !holding);
+                input::set_second_pointer(second.map(|(at, distance)| input::SecondPointer {
+                    at,
+                    distance,
+                    buttons: [controls.triggers[off] > 0.5, faces[off].0],
+                }));
+            } else {
+                input::set_second_pointer(None);
+                // The hand that clicks takes the cursor (`MouseClickHandler.processCursorUpdate`).
+                let triggers = [controls.triggers[main] > 0.5, controls.triggers[off] > 0.5];
+                if triggers[1] && !self.cursor_triggers[1] && !triggers[0] && hits(off).is_some() {
+                    self.cursor_off = true;
+                } else if triggers[0]
+                    && !self.cursor_triggers[0]
+                    && !triggers[1]
+                    && hits(main).is_some()
+                {
+                    self.cursor_off = false;
+                }
+                self.cursor_triggers = triggers;
+                let hand = if self.cursor_off { off } else { main };
+                input::set_pointer_off(self.cursor_off);
+                let at = hits(hand).filter(|_| !holding);
+                input::set_pointer(at.map(|(at, _)| at));
+                input::set_pointer_distance(at.map(|(_, d)| d));
+                // The trigger is the left click; A (main hand) and X (off hand) the right.
+                let right = faces[hand].0;
+                input::set_pointer_buttons([
+                    triggers[usize::from(self.cursor_off)] && !holding && at.is_some(),
+                    right,
+                ]);
             }
-            self.cursor_triggers = triggers;
-            let hand = if self.cursor_off { off } else { main };
-            input::set_pointer_off(self.cursor_off);
-            let at = hits(hand).filter(|_| !holding);
-            input::set_pointer(at.map(|(at, _)| at));
-            input::set_pointer_distance(at.map(|(_, d)| d));
-            // The trigger is the left click; A (main hand) and X (off hand) the right.
-            let right = faces[hand].0;
-            input::set_pointer_buttons([
-                triggers[usize::from(self.cursor_off)] && !holding && at.is_some(),
-                right,
-            ]);
         } else {
             // The next menu opens where the player then looks.
             self.panel = None;
@@ -1530,6 +1553,7 @@ impl Session {
             self.grab.clear();
             input::set_screen_handles(input::ScreenHandles::default());
             input::set_pointer(None);
+            input::set_second_pointer(None);
             input::set_pointer_distance(None);
             input::set_pointer_buttons([false; 2]);
         }

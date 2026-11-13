@@ -8,8 +8,10 @@
 use super::event_loop::EventLoopCtl;
 use super::headset_hands::HandFrame;
 use super::input_trace::InputOrigin;
+use super::pointer_ui::{cursor_off_laser, laser_gui_point};
 use super::{Game, Hand};
 use horizon_client::headset;
+use horizon_client::pointer_route;
 use horizon_vivecraft::crosshair::{self, CrosshairContext, Face};
 use winit::dpi::PhysicalPosition;
 use winit::event::{DeviceId, ElementState, MouseButton, WindowEvent};
@@ -71,6 +73,10 @@ pub(super) struct Headset {
     pointer: Option<(f64, f64)>,
     /// The pointer's buttons as last sent.
     buttons: [bool; 2],
+    /// With both hands pointing: the hand (0 main, 1 off) holding a button on the mouse.
+    holder: Option<usize>,
+    /// How many times something took the cursor off the laser (the first few are logged).
+    drift_logs: u32,
     /// "Use" is held for the hand at the mouth (main or off).
     eating: Option<Hand>,
     /// An off-hand click (a swing) waits for the next tick, which aims it
@@ -157,23 +163,41 @@ impl Game<'_> {
             .renderer
             .as_ref()
             .map(|r| (f64::from(r.config.width), f64::from(r.config.height)));
-        let at = headset::pointer()
-            .filter(|_| menu && !self.visor_keyboard_hand_over(headset::pointer_off()))
+        let lasers = self.headset_lasers(menu);
+        let routed = pointer_route::route(lasers, self.pad.headset.holder);
+        self.pad.headset.holder = routed.holder;
+        let at = routed
+            .hand
+            .and_then(|hand| lasers[hand])
             .zip(size)
-            .map(|([u, v], (w, h))| (f64::from(u) * w, f64::from(v) * h));
+            .map(|(laser, (w, h))| (f64::from(laser.at[0]) * w, f64::from(laser.at[1]) * h));
         let device_id = DeviceId::dummy();
         if at.is_none() {
             self.pad.headset.pointer = None;
         }
         // A press lands where the laser points: the cursor goes there first, even where the pointer
-        // has not moved (the pad's menu focus may have taken the cursor to a widget since).
+        // has not moved (the pad's menu focus may have taken the cursor to a widget since). The
+        // same when anything else has taken the cursor off the laser: it is the laser's, every frame.
         let pressing = at.is_some()
-            && headset::pointer_buttons()
+            && routed
+                .buttons
                 .into_iter()
                 .zip(self.pad.headset.buttons)
                 .any(|(now, before)| now && !before);
+        let drifted = at.zip(self.gui_scale()).is_some_and(|(at, b)| {
+            cursor_off_laser(self.cursor, (at.0 as f32, at.1 as f32), b.scale)
+        });
+        if drifted && self.pad.headset.pointer == at && !pressing {
+            self.pad.headset.drift_logs += 1;
+            if self.pad.headset.drift_logs <= 5 {
+                log::info!(
+                    "Headset: the cursor {:?} was taken off the laser {at:?}; put back",
+                    self.cursor
+                );
+            }
+        }
         if let Some(at) = at
-            && (self.pad.headset.pointer != Some(at) || pressing)
+            && (self.pad.headset.pointer != Some(at) || pressing || drifted)
         {
             self.pad.headset.pointer = Some(at);
             self.handle_window_event(
@@ -187,7 +211,9 @@ impl Game<'_> {
             );
         }
         // `MouseClickHandler.processScreen`: a click beside the screen, in a world, closes it.
-        let raw_left = menu && headset::pointer_buttons()[0];
+        let raw_left = menu
+            && (headset::pointer_buttons()[0]
+                || headset::second_pointer().is_some_and(|s| s.buttons[0]));
         let off_panel = raw_left && at.is_none() && !self.visor_keyboard_hovered();
         if off_panel
             && !self.pad.headset.off_panel_click
@@ -201,11 +227,7 @@ impl Game<'_> {
         }
         self.pad.headset.off_panel_click = off_panel;
         // Off the panel nothing is held: a press there ends as the pointer leaves.
-        let buttons = if at.is_some() {
-            headset::pointer_buttons()
-        } else {
-            [false; 2]
-        };
+        let buttons = routed.buttons;
         // Over the on-screen keyboard the pointer types (Vivecraft's keyboard).
         if menu {
             self.headset_auto_keyboard();
@@ -418,6 +440,57 @@ impl Game<'_> {
     /// The headset's pointer is on the menu panel: the pad cursor marks it.
     pub(super) fn headset_pointing(&self) -> bool {
         headset::active() && self.pad.headset.pointer.is_some() && headset::pointer().is_some()
+    }
+
+    /// Both hands point the menu (`horizonBothHandPointers`).
+    pub(super) fn headset_both_pointers(&self) -> bool {
+        headset::settings().bool("horizonBothHandPointers")
+    }
+
+    /// The lasers on the menu panel, main and off, as the headset has them now: the main hand's
+    /// (or the one that clicked last, with one pointer) and, with both pointing, the off hand's.
+    /// A hand over Visor's keyboard types there and has no cursor.
+    pub(super) fn headset_lasers(&self, menu: bool) -> [Option<pointer_route::Laser>; 2] {
+        if !menu || !headset::active() {
+            return [None; 2];
+        }
+        let both = self.headset_both_pointers();
+        let pointer_hand = usize::from(!both && headset::pointer_off());
+        let main = headset::pointer()
+            .filter(|_| !self.visor_keyboard_hand_over(pointer_hand == 1))
+            .map(|at| pointer_route::Laser {
+                at,
+                buttons: headset::pointer_buttons(),
+            });
+        let off = headset::second_pointer()
+            .filter(|_| both && !self.visor_keyboard_hand_over(true))
+            .map(|second| pointer_route::Laser {
+                at: second.at,
+                buttons: second.buttons,
+            });
+        [main, off]
+    }
+
+    /// Where each laser meets the panel in GUI pixels (what `Game::cursor` is in), main and off.
+    pub(super) fn headset_laser_points(&self) -> [Option<(f32, f32)>; 2] {
+        let Some(r) = &self.renderer else {
+            return [None; 2];
+        };
+        let size = [r.config.width, r.config.height];
+        self.headset_lasers(self.pad_in_menu())
+            .map(|laser| laser.map(|l| laser_gui_point(l.at, size)))
+    }
+
+    /// Before a frame's menu is drawn: the cursor is where the laser of the hand that owns the
+    /// mouse meets the panel, whatever moved it since the headset's frame.
+    pub(super) fn headset_cursor_to_laser(&mut self) {
+        let lasers = self.headset_lasers(self.pad_in_menu());
+        let Some(hand) = pointer_route::route(lasers, self.pad.headset.holder).hand else {
+            return;
+        };
+        if let Some(point) = self.headset_laser_points()[hand] {
+            self.cursor = point;
+        }
     }
 
     /// Once per frame: the player looks where the aim (the main hand's
@@ -924,18 +997,25 @@ impl Game<'_> {
                 };
                 on_top.push(menu_pointer_line(camera, body, hand.aim, length));
             }
-            let off = headset::pointer_off();
-            let hand = if off {
-                headset::off_hand()
-            } else {
-                headset::main_hand()
-            };
-            if let Some(hand) = hand
-                && keys[usize::from(off)].is_none()
-            {
-                let length = headset::pointer_distance().unwrap_or(MENU_LASER_MISS);
-                // Drawn over everything, as Visor draws the cursor (`depthFunc(GL_ALWAYS)`).
-                on_top.push(menu_pointer_line(camera, body, hand.aim, length));
+            // The hand(s) that point the menu: the one that clicked last, or both.
+            let both = self.headset_both_pointers();
+            let first = usize::from(!both && headset::pointer_off());
+            let rays = [
+                (first, headset::pointer_distance()),
+                (1, headset::second_pointer().map(|s| s.distance)),
+            ];
+            for (n, (hand, distance)) in rays.into_iter().enumerate() {
+                if n == 1 && !both {
+                    break;
+                }
+                let pose = [headset::main_hand(), headset::off_hand()][hand];
+                if let Some(pose) = pose
+                    && keys[hand].is_none()
+                {
+                    let length = distance.unwrap_or(MENU_LASER_MISS);
+                    // Drawn over everything, as Visor draws the cursor (`depthFunc(GL_ALWAYS)`).
+                    on_top.push(menu_pointer_line(camera, body, pose.aim, length));
+                }
             }
             return;
         }
