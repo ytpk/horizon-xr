@@ -1,0 +1,19 @@
+# Deliberate quality loss, aiming at 120 Hz. FPS is not guaranteed.
+# Append after backup; enable horizonMultiview and horizonFoveatedMultiview in VR settings.
+# Keep the saved eye size; XR_SCALE=1.0 may be much larger than the current setting.
+--render-distance
+24
+HORIZON_XR_HZ=120
+HORIZON_XR_DYNRES=0
+HORIZON_XR_FOVEATION=high
+HORIZON_SPLIT_SOLID=1
+HORIZON_MULTI_DRAW=0
+HORIZON_QUEST_OCCLUSION=0
+HORIZON_QUEST_AGGRESSIVE_MESH=1
+HORIZON_QUEST_PLANT_DENSITY=0
+HORIZON_QUEST_SHRINK_PLANTS=1
+HORIZON_QUEST_SPLIT_STREAMS=1
+HORIZON_QUEST_NEAREST_LIGHTMAP=1
+HORIZON_PIN_BIG_CORES=1
+HORIZON_HYBRID_WORKERS=1
+HORIZON_VR_PROFILE=log

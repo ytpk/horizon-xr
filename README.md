@@ -189,3 +189,5 @@ License summary: the Horizon code is MIT (`LICENSE`); `crates/horizon-visor` and
 Upstream update branch: [integration notes and headset checks](docs/quest-upstream-integration.md).
 
 Latest selective renderer update: [Quest Adreno audit, upstream imports and device checks](docs/quest-adreno-audit-2026-11-12.md).
+
+Дополнительный [аудит RD 24, P/E-ядер и режимов с потерей качества](docs/quest-adreno-audit-2026-11-13.md).
