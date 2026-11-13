@@ -136,15 +136,14 @@ Ours, opt-in: `HORIZON_QUEST_SPLIT_STREAMS`, `_MERGE_FACES`, `_AGGRESSIVE_MESH`,
 `_PLANT_DENSITY`, `_PLANT_DISTANCE`, `_NEAREST_LIGHTMAP`, `HORIZON_TERRAIN_EXPERIMENT`, `HORIZON_QUEST_EXPERIMENT`.
 
 ### Not ported / differences
-- Lean varyings (`lean_opaque`, `lean_cutout`): need upstream's `HDR_LIGHTING` pipeline override; Starling's
-  terrain shader has HDR lighting always in. Removed from the port.
+- Lean varyings: ported in the fourth pass (see below).
 - Upstream-origin changes inside our delta were skipped (light.rs relight scratch, occlusion edit cap and
   resident sort, cull.wgsl box table, frame_gen tests). Occlusion keeps Starling's code; only the worker pin was added.
 - Mesher: no per-quad sources or tints (Starling has none); `shader_pack` guard replaced by plain settings.
 - `held.rs` (Source::Room): Starling's `keys` is a plain set; the room's sneak is a `room_sneaking` flag.
 - GPU-culling `Unsupported` offer for the split path (Starling has no GpuCulling).
-- Tests for several ported files are partly missing (cull stereo GPU test, occlusion/relight benches).
-- Provisioning stays our stack (horizon-quest-launcher, Prismarine sign-in, horizon-fetch, horizon-jvm); not merged with starling-account.
+- Tests still missing: occlusion/relight benches (skipped on purpose). The cull stereo tests are ported.
+- Provisioning: see the fourth pass; the sign-in, runtime and room stay ours.
 - Language keys: en_us and ru_ru only; SpaceWarp keys came from 54ba05033f.
 - `tools/quest_room_sim.py` and harness tests of the fork not ported.
 
@@ -174,9 +173,54 @@ Third pass (2026-11-13). Both assets are now made from this tree:
   Starling's base c4e44c1e0d: not ours. The SpaceWarp GPU tests pass.
 - `cargo check --target aarch64-linux-android -p horizon-quest -p horizon-android`: passes.
 
+## Fourth pass (2026-11-13): lean varyings and provisioning
+
+### A. Lean terrain varyings
+- Starling's terrain.wgsl had no `HDR_LIGHTING` override (HDR lighting was always in). Added `override HDR_LIGHTING: bool = true`
+  (default on: nothing changes for the phone app), guarding the face normal and the emission alpha in `solid_finish`.
+- `OpaqueWire` (3 locations instead of 11), `vs_terrain_{opaque,cutout}_lean`, flat variants `vs_terrain_flat_{opaque,cutout}_lean`,
+  `fs_opaque_lean`, `fs_cutout_lean` (alpha test first, with the fade-in's fog alpha so it discards exactly as `fs_solid`).
+  They honour `SETTLED_TERRAIN`; written with the `in.` naming so the GLES lowering still rewrites them.
+- Overlap kept: Starling's `gfx/solid_paths.rs` (static cutout, settled terrain, flat passes) and `adreno.rs` stay; their
+  passes are built lean where asked (falling back to the usual entry points if the device refuses), plus one lean opaque
+  pass for frames with no settled terrain (the opaque pass has no fade to know). Our source's per-list "fading" group split
+  does not exist in Starling: its lean cutout applies in the frames `solid_paths` proves unfaded, not per list.
+- Switches (headset, Qualcomm Vulkan only, **default on**): `HORIZON_QUEST_LEAN_OPAQUE=0`, `HORIZON_QUEST_LEAN_CUTOUT=0`
+  (as in the source). The `HORIZON_TERRAIN_EXPERIMENT` names `cutoutcheap`, `opaquecheap`, `fsnohdr` match the new shaders.
+- Tests: `solid_paths::tests::lean_passes_draw_the_usual_colours` (static, settled, flat; colours equal to the usual
+  pipelines on the test GPU, alpha excluded) and `lean_opaque_serves_frames_with_fades`; `cull::tests` stereo shader and
+  the real two-eye pass (`a_stereo_pass_sees_the_boxes_either_eye_shows`, `#[ignore]`d, passes with `--include-ignored`).
+  Benches skipped.
+
+### B. Provisioning
+- Unified: the Mojang download. `starling_account::files::download` keeps its API, pins, messages and phone retry policy
+  but plans with `horizon_fetch::mojang::{game_files, objects}` and transfers through `horizon_fetch::fetch_all`: one
+  engine for the phone and the headset (Range resume, size check, free-space check, cancel, progress). horizon-fetch gained
+  `Options::{wait, growing, transient}` (defaults = the headset's old behaviour) and a shared keep-alive agent in `Ureq`
+  (Starling's reason for its own agent). Starling's own `files` tests pass unchanged. Behaviour new on the phone: Range
+  resume, a space check, the logging config file is fetched too.
+- Kept separate, and why:
+  - Sign-in: `horizon-account` already contains the Azure device-code flow (`Endpoints::azure`, `HORIZON_MSA_CLIENT_ID`)
+    beside the Prismarine-compatible Live flow, so a `starling-account` backend would add no capability, needs adapters for
+    five types whose fields are private there, and would activate Starling's Azure client id from the room. Starling's
+    id is still linked into the Quest binary through `horizon-client` (phone accounts code), but the room never uses it.
+  - Java runtime: the Quest bundles the JRE and `horizon-jvm` (offline, tested); `starling_account::java` fetches a Termux
+    runtime at run time and stays the phone's.
+  - Preparer glue: both call `horizon_prepare::prepare` with different JVM supply (`java::supply` and `libstarling_java.so`
+    vs `HORIZON_JAVA_EXE`/`horizon-jvm`) and different post steps (controls textures vs languages/sounds stages); equal in
+    effect, not worth a shared layer. The room's state machine, stages, language/sounds steps and reserve check stay ours.
+
+### Fourth pass: tests, APK
+- fmt clean; clippy `-D warnings --all-targets`: horizon-client-render, horizon-fetch, starling-account, horizon-quest-launcher,
+  horizon-account clean. Tests: horizon-client-render --lib 1409 pass + the 2 known frame_gen failures; horizon-fetch 11,
+  starling-account 26 (+1 ignored), quest-launcher 36, account 7, jvm 3, horizon-client --lib 792: pass.
+  `cargo check --target aarch64-linux-android -p horizon-quest -p horizon-android`: passes.
+- APK: bundle and JRE reused (horizon-prepare and the exporters unchanged); `OUT=target/quest build_apk.sh`:
+  `target/quest/horizon-quest.apk`, 131498824 bytes, sha256 `5a033dfa998bdfce72aa909b0e2d3e0105ecc94825d5cb487010d192b90ae1a3`;
+  exporter guard passed, bundle `research-lock.json` equals the tree's (cmp). Not installed on any headset.
+
 ## Remaining work
-1. Test on the headset: stereo/multiview, SpaceWarp, room, controls, then A/B the switches above.
-2. (done 2026-11-13: JRE and bundle rebuilt from this tree, see APK.) Check on the headset that the on-device prepare passes.
-3. Lean varyings after porting the `HDR_LIGHTING` override; missing tests above.
-4. Merge provisioning with starling-account if wanted.
-5. Translations of new keys in the other languages.
+1. Test on the headset: stereo/multiview, SpaceWarp, room, controls, then A/B the switches (including
+   `HORIZON_QUEST_LEAN_OPAQUE`, `HORIZON_QUEST_LEAN_CUTOUT`); check the on-device prepare and the download (Range resume).
+2. Optional: a `starling-account` sign-in backend behind the room's `Accounts` trait (not cheap, see B).
+3. Translations: not needed (decision); only en_us and ru_ru carry the keys.
