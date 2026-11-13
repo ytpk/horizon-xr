@@ -7,6 +7,8 @@ members = [
     "crates/horizon-narrator",
     "crates/horizon-threads",
     "crates/horizon-hdr",
+    # OpenXR (Meta Quest): the session, swapchains and controllers behind gfx::headset.
+    "crates/horizon-xr",
     "crates/horizon-world",
     "crates/horizon-client",
     # Starling: the game as a NativeActivity library; empty on other targets.
