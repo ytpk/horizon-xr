@@ -36,17 +36,49 @@ impl VrOpt {
         self.info().lang
     }
 
+    fn refresh_rates(self) -> Option<Vec<f32>> {
+        if self.info().key != "horizonRefreshRate" {
+            return None;
+        }
+        let known = horizon_client_input::headset_display::snapshot()
+            .map(|info| horizon_client_input::headset_display::render_rates(&info));
+        Some(known.filter(|rates| !rates.is_empty()).unwrap_or_else(|| {
+            horizon_vivecraft::refresh::RATES
+                .into_iter()
+                .filter(|r| *r >= 72.)
+                .collect()
+        }))
+    }
+
     /// The slider's position (0..1), or `None` for a button that cycles.
     pub fn slider(self, s: &Settings) -> Option<f32> {
+        if let Some(rates) = self.refresh_rates() {
+            let value = horizon_vivecraft::refresh::requested(s.vr.float(self.info().key)).render;
+            let i = rates
+                .iter()
+                .enumerate()
+                .min_by(|(_, a), (_, b)| (*a - value).abs().total_cmp(&(*b - value).abs()))
+                .map_or(0, |(i, _)| i);
+            return Some(i as f32 / rates.len().saturating_sub(1).max(1) as f32);
+        }
         options::slider(&s.vr, self.info()).map(|(at, _)| at)
     }
 
     pub fn steps(self) -> Option<u32> {
+        if let Some(rates) = self.refresh_rates() {
+            return Some(rates.len().saturating_sub(1).max(1) as u32);
+        }
         // The slider's detents are Vivecraft's step over the range.
         Some(options::slider(&Default::default(), self.info())?.1)
     }
 
     pub fn set_slider(self, s: &mut Settings, at: f32) {
+        if let Some(rates) = self.refresh_rates() {
+            let index = (at.clamp(0., 1.) * rates.len().saturating_sub(1) as f32).round() as usize;
+            Arc::make_mut(&mut s.vr).set_float(self.info().key, rates[index]);
+            horizon_vivecraft::refresh::edited_in_ui();
+            return;
+        }
         options::set_slider(Arc::make_mut(&mut s.vr), self.info(), at, None);
     }
 
@@ -57,10 +89,31 @@ impl VrOpt {
     /// The button's text: its caption and value.
     pub fn label(self, s: &Settings) -> Text {
         let tr = |key: &str| Text::translate(key, &[]);
-        let value = match options::shown(&s.vr, self.info()) {
-            Shown::Literal(text) => Text::literal(text),
-            Shown::Lang(key) => tr(&key),
-            Shown::LangArg(key, arg) => Text::translate(&key, &[Text::literal(arg)]),
+        let mode = if self.info().key == "horizonRefreshRate" {
+            horizon_vivecraft::refresh::requested(s.vr.float("horizonRefreshRate"))
+        } else {
+            horizon_vivecraft::refresh::mode(90.)
+        };
+        let value = if self.info().key == "horizonRefreshRate" && mode.spacewarp {
+            Text::translate(
+                if horizon_client_input::headset_display::snapshot()
+                    .is_some_and(|i| !i.spacewarp_supported)
+                {
+                    "horizon.vr.spacewarp_unavailable"
+                } else {
+                    "horizon.vr.spacewarp_mode"
+                },
+                &[
+                    Text::literal(format!("{:.0}", mode.render)),
+                    Text::literal(format!("{:.0}", mode.display)),
+                ],
+            )
+        } else {
+            match options::shown(&s.vr, self.info()) {
+                Shown::Literal(text) => Text::literal(text),
+                Shown::Lang(key) => tr(&key),
+                Shown::LangArg(key, arg) => Text::translate(&key, &[Text::literal(arg)]),
+            }
         };
         let value = if options::binding_conflict(&s.vr, self.info().key) {
             Text::translate("horizon.vr.binding.shared", &[value])

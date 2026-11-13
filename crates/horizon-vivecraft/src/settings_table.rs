@@ -1320,7 +1320,7 @@ pub const DEFS: &[Def] = &[
         key: "horizonRefreshRate",
         kind: Kind::Float,
         default: "90.0",
-        range: Some((72f32, 120f32, 6f32)),
+        range: Some((0f32, 12f32, 1f32)),
     },
     // Horizon only: walk in the room by Vivecraft's `doPlayerMoveInRoom` rules (see
     // `Game::headset_room_walk`) instead of Horizon's own slide-along-walls step.

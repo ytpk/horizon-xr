@@ -70,19 +70,25 @@ pub fn hybrid_plan() -> Option<&'static HybridPlan> {
 }
 
 /// Called once per shared-pool worker. Restores access lost through inherited affinity.
-/// Failure leaves the inherited mask intact; no frame ever waits for this operation.
-pub fn pin_worker(worker: usize) -> Result<Option<usize>, String> {
+/// Rejected targets widen to a live kernel-filtered allowance, reported by readback.
+/// No frame ever waits for this startup operation.
+pub fn pin_worker(worker: usize) -> Result<Option<Vec<usize>>, String> {
     let Some(plan) = hybrid_plan() else {
         return Ok(None);
     };
     pin_to_worker(plan, worker).map(Some)
 }
 
-fn pin_to_worker(plan: &HybridPlan, worker: usize) -> Result<usize, String> {
+fn pin_to_worker(plan: &HybridPlan, worker: usize) -> Result<Vec<usize>, String> {
     let cpu = plan.workers[worker % plan.workers.len()];
     #[cfg(any(target_os = "linux", target_os = "android"))]
-    super::set_affinity(&[cpu])?;
-    Ok(cpu)
+    {
+        pin_masks(&[cpu], &plan.workers)
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "android")))]
+    {
+        Ok(vec![cpu])
+    }
 }
 
 /// Optional affinity for async work whose result the frame does not wait for.
@@ -91,10 +97,42 @@ pub fn pin_background() -> Result<(), String> {
         return Ok(());
     };
     #[cfg(any(target_os = "linux", target_os = "android"))]
-    super::set_affinity(&plan.efficiency)?;
+    pin_masks(&plan.efficiency, &plan.workers)?;
     #[cfg(not(any(target_os = "linux", target_os = "android")))]
     let _ = plan;
     Ok(())
+}
+
+/// Android can change each thread's cpuset after the initial allowance was captured;
+/// cores can also go offline. Let the kernel intersect a wider mask with its LIVE
+/// restrictions, then read it back. Intersecting only with sched_getaffinity here would
+/// keep the parent's foreground restriction and permanently lose valid E/P workers.
+#[cfg(any(target_os = "linux", target_os = "android"))]
+fn pin_masks(preferred: &[usize], workers: &[usize]) -> Result<Vec<usize>, String> {
+    let initial = INITIAL.get().map_or(&[][..], Vec::as_slice);
+    let mut errors = Vec::new();
+    for mask in [preferred, workers, initial] {
+        if mask.is_empty() {
+            continue;
+        }
+        match super::set_affinity(mask) {
+            Ok(()) => {
+                let actual = super::allowed_cores()?;
+                if !errors.is_empty() || actual != preferred {
+                    log::warn!(
+                        "Hybrid affinity requested {preferred:?}; effective {actual:?}; fallback after {errors:?}"
+                    );
+                }
+                return Ok(actual);
+            }
+            Err(e) => errors.push(format!("{mask:?}: {e}")),
+        }
+    }
+    Err(format!(
+        "requested {preferred:?}, initial allowance {initial:?}, current {:?}: {}",
+        super::allowed_cores().ok(),
+        errors.join("; ")
+    ))
 }
 
 #[cfg(test)]
@@ -149,8 +187,45 @@ mod tests {
                     workers: vec![background],
                     efficiency: vec![background],
                 };
-                assert_eq!(pin_to_worker(&plan, 0).unwrap(), background);
+                assert_eq!(pin_to_worker(&plan, 0).unwrap(), [background]);
                 assert_eq!(super::super::allowed_cores().unwrap(), [background]);
+            })
+            .join()
+            .unwrap();
+        })
+        .join()
+        .unwrap();
+    }
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    #[test]
+    fn rejected_single_core_recovers_live_allowed_workers_instead_of_inherited_foreground() {
+        std::thread::spawn(|| {
+            let allowed = super::super::allowed_cores().unwrap();
+            if allowed.len() < 2 {
+                return;
+            }
+            let invalid = libc::CPU_SETSIZE as usize - 1;
+            if allowed.contains(&invalid) || super::super::set_affinity(&[invalid]).is_ok() {
+                return;
+            }
+            let foreground = allowed[0];
+            let background = allowed[1];
+            super::super::set_affinity(&[foreground]).unwrap();
+            std::thread::spawn(move || {
+                assert_eq!(super::super::allowed_cores().unwrap(), [foreground]);
+                let plan = HybridPlan {
+                    foreground: vec![foreground],
+                    workers: vec![invalid, background],
+                    efficiency: vec![invalid],
+                };
+                assert_eq!(pin_to_worker(&plan, 0).unwrap(), [background]);
+                assert_eq!(super::super::allowed_cores().unwrap(), [background]);
+                // An E-only task whose whole requested tier is unavailable uses the
+                // live worker allowance, rather than repeating EINVAL or moving onto P foreground.
+                assert_eq!(
+                    pin_masks(&plan.efficiency, &plan.workers).unwrap(),
+                    [background]
+                );
             })
             .join()
             .unwrap();

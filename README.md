@@ -191,3 +191,7 @@ Upstream update branch: [integration notes and headset checks](docs/quest-upstre
 Latest selective renderer update: [Quest Adreno audit, upstream imports and device checks](docs/quest-adreno-audit-2026-11-12.md).
 
 Дополнительный [аудит RD 24, P/E-ядер и режимов с потерей качества](docs/quest-adreno-audit-2026-11-13.md).
+
+[Quest Application SpaceWarp modes, compatibility and validation](docs/quest-spacewarp.md).
+
+[Provided RD24 measurements and revised Bnf / SpaceWarp profiles](docs/quest-rd24-measurements.md).

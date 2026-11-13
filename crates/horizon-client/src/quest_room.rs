@@ -106,6 +106,10 @@ pub const KEYS: &[&str] = &[
     "graphics.foveated_multiview.on",
     "graphics.foveated_multiview.off",
     "graphics.unknown",
+    "graphics.spacewarp",
+    "graphics.spacewarp.active",
+    "graphics.spacewarp.native",
+    "graphics.spacewarp.unavailable",
     "graphics.multiview.on",
     "graphics.water.on",
     "graphics.water.off",
@@ -1244,7 +1248,8 @@ impl Canvas<'_, '_> {
                 32.0,
             );
         }
-        let hz = settings.float("horizonRefreshRate");
+        let cadence = horizon_vivecraft::refresh::requested(settings.float("horizonRefreshRate"));
+        let hz = cadence.render;
         self.text(
             Face::Regular,
             BODY,
@@ -1252,12 +1257,19 @@ impl Canvas<'_, '_> {
             MARGIN,
             330.0,
             color::text(),
-            &tf("graphics.refresh", &[&hz.round()]),
+            &if cadence.spacewarp {
+                tf(
+                    "graphics.spacewarp",
+                    &[&cadence.render.round(), &cadence.display.round()],
+                )
+            } else {
+                tf("graphics.refresh", &[&cadence.display.round()])
+            },
         );
         for (delta, x, label) in [(-1, right, "−"), (1, right + 90.0, "+")] {
-            let can = info
-                .as_ref()
-                .is_some_and(|i| headset_display::step_rate(hz, delta, &i.rates) != hz);
+            let can = info.as_ref().is_some_and(|i| {
+                headset_display::step_rate(hz, delta, &headset_display::render_rates(i)) != hz
+            });
             self.button(
                 Event::RefreshRate(delta),
                 label,
@@ -1266,10 +1278,22 @@ impl Canvas<'_, '_> {
                 32.0,
             );
         }
-        let display = info.as_ref().and_then(|i| i.current_hz).map_or_else(
+        let mut display = info.as_ref().and_then(|i| i.current_hz).map_or_else(
             || t("graphics.unknown"),
             |hz| tf("graphics.display", &[&hz.round()]),
         );
+        if cadence.spacewarp {
+            display.push_str(" · ");
+            display.push_str(&t(
+                if info.as_ref().is_some_and(|i| !i.spacewarp_supported) {
+                    "graphics.spacewarp.unavailable"
+                } else if info.as_ref().is_some_and(|i| i.spacewarp_active) {
+                    "graphics.spacewarp.active"
+                } else {
+                    "graphics.spacewarp.native"
+                },
+            ));
+        }
         self.text(
             Face::Regular,
             SMALL,

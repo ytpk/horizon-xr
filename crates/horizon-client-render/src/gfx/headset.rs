@@ -74,6 +74,13 @@ pub struct HiddenArea {
     pub indices: Vec<u32>,
 }
 
+/// Runtime-owned two-layer auxiliary images for Application SpaceWarp.
+#[derive(Clone)]
+pub struct SpaceWarpTargets {
+    pub motion: wgpu::Texture,
+    pub depth: wgpu::Texture,
+}
+
 /// The headset side of the renderer.
 pub trait Headset: Send {
     /// The instance and adapter the runtime asks for.
@@ -94,6 +101,13 @@ pub trait Headset: Send {
     fn menu_size(&self) -> [u32; 2];
     /// Ask for a native two-layer image only after stereo compatibility was checked.
     fn request_stereo_array(&mut self, _enabled: bool) {}
+    /// Request auxiliary images only for a frame whose rendering is compatible.
+    fn request_spacewarp(&mut self, _enabled: bool) {}
+    fn spacewarp_targets(&self) -> Option<SpaceWarpTargets> {
+        None
+    }
+    /// Both auxiliary eye layers were encoded and submitted successfully.
+    fn spacewarp_rendered(&mut self, _camera: glam::DVec3, _yaw: f32, _far: f32, _history: bool) {}
     /// Release acquired images normally, but submit no projection for a failed frame.
     fn discard_frame(&mut self) {}
     /// Waits for the runtime's next frame and acquires the images `layers` need.

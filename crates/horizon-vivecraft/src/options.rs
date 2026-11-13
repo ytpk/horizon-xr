@@ -67,6 +67,10 @@ const ROTATION_INCREMENTS: [f32; 6] = [0.0, 10.0, 36.0, 45.0, 90.0, 180.0];
 /// index sliders.
 fn to_slider_value(name: &str, value: f32) -> f32 {
     match name {
+        "HORIZON_REFRESH_RATE" => crate::refresh::RATES
+            .iter()
+            .position(|r| *r == crate::refresh::mode(value).render)
+            .unwrap_or(9) as f32,
         "WORLD_SCALE" => WORLD_SCALES
             .iter()
             .position(|v| (v - value).abs() < 1e-4)
@@ -82,6 +86,9 @@ fn to_slider_value(name: &str, value: f32) -> f32 {
 /// `VrOptions.setOptionFloatValue`: the value for a slider position.
 fn from_slider_value(name: &str, v: f32) -> f32 {
     match name {
+        "HORIZON_REFRESH_RATE" => {
+            crate::refresh::RATES[(v.round() as usize).min(crate::refresh::RATES.len() - 1)]
+        }
         "WORLD_SCALE" => WORLD_SCALES[(v.round() as usize).min(WORLD_SCALES.len() - 1)],
         "WORLD_ROTATION_INCREMENT" => {
             ROTATION_INCREMENTS[((v.round() as i32 + 1).clamp(0, 5)) as usize]
@@ -239,7 +246,16 @@ pub fn shown(s: &VrSettings, o: &OptInfo) -> Shown {
             };
         }
         "HORIZON_REFRESH_RATE" => {
-            return Shown::LangArg("horizon.vr.hertz".into(), format!("{:.0}", s.float(o.key)));
+            let m = crate::refresh::requested(s.float(o.key));
+            return Shown::LangArg(
+                if m.spacewarp {
+                    "horizon.vr.spacewarp_rate"
+                } else {
+                    "horizon.vr.hertz"
+                }
+                .into(),
+                format!("{:.0}", m.render),
+            );
         }
         _ => {}
     }

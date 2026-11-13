@@ -255,7 +255,7 @@ impl Targets {
             depth: make(
                 "Quest stereo depth",
                 wgpu::TextureFormat::Depth32Float,
-                wgpu::TextureUsages::RENDER_ATTACHMENT,
+                wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
             )
             .create_view(&Default::default()),
         }

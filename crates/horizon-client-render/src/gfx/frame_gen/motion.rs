@@ -21,12 +21,12 @@ struct Params {
 /// A vertex this frame and where it was last frame, both relative to this frame's camera.
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
-struct MotionVertex {
-    position: [f32; 3],
-    previous: [f32; 3],
-    uv: [f32; 2],
+pub(crate) struct MotionVertex {
+    pub(crate) position: [f32; 3],
+    pub(crate) previous: [f32; 3],
+    pub(crate) uv: [f32; 2],
     /// 1 for a translucent item, whose texture says where it shows.
-    translucent: u32,
+    pub(crate) translucent: u32,
 }
 
 pub struct ObjectMotion {
@@ -35,12 +35,73 @@ pub struct ObjectMotion {
     sampler: wgpu::Sampler,
     params: wgpu::Buffer,
     vertices: wgpu::Buffer,
+    tracker: MotionTracker,
+    target: Option<([u32; 2], wgpu::TextureView)>,
+}
+
+/// CPU geometry history, shared by frame interpolation and OpenXR SpaceWarp.
+#[derive(Default)]
+pub(crate) struct MotionTracker {
     /// Triangles of the entities matched this frame.
     staged: Vec<MotionVertex>,
     /// Last frame's vertices by entity, and its camera.
     tracked: HashMap<u64, Vec<Vertex>>,
     camera: DVec3,
-    target: Option<([u32; 2], wgpu::TextureView)>,
+}
+impl MotionTracker {
+    pub(crate) fn staged(&self) -> &[MotionVertex] {
+        &self.staged
+    }
+
+    /// Forget last frame's entities: the next frame has no motion of its own.
+    pub fn reset(&mut self) {
+        self.tracked.clear();
+    }
+
+    /// Match this frame's `entities` (relative to `camera`) to last frame's by the ids
+    /// `spans` gives their vertices (start, id; 0 for none, each up to the next start), and
+    /// keep them for the next frame.
+    pub fn track(&mut self, entities: &[Vertex], spans: &[(u32, u64)], camera: DVec3) {
+        self.staged.clear();
+        let shift = (self.camera - camera).as_vec3();
+        let mut tracked = HashMap::with_capacity(self.tracked.len());
+        for (i, &(start, id)) in spans.iter().enumerate() {
+            let end = spans.get(i + 1).map_or(entities.len(), |s| s.0 as usize);
+            let Some(now) = entities
+                .get(start as usize..end)
+                .filter(|v| id != 0 && !v.is_empty())
+            else {
+                continue;
+            };
+            let mut then = self.tracked.remove(&id).unwrap_or_default();
+            if then.len() == now.len()
+                && then
+                    .iter()
+                    .zip(now)
+                    .all(|(a, b)| a.uv == b.uv && a.layer == b.layer)
+            {
+                let pair = |i: usize| MotionVertex {
+                    position: now[i].pos,
+                    previous: (Vec3::from(then[i].pos) + shift).into(),
+                    uv: now[i].uv,
+                    translucent: u32::from(matches!(
+                        now[i].layer,
+                        super::super::entity_batch::TRANSLUCENT_ITEM_OVERLAY
+                            | super::super::entity_batch::TRANSLUCENT_GLINT_ITEM_OVERLAY
+                    )),
+                };
+                for q in (0..now.len() / 4).map(|q| q * 4) {
+                    self.staged
+                        .extend([q, q + 1, q + 2, q, q + 2, q + 3].map(pair));
+                }
+            }
+            then.clear();
+            then.extend_from_slice(now);
+            tracked.insert(id, then);
+        }
+        self.tracked = tracked;
+        self.camera = camera;
+    }
 }
 
 pub const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
@@ -90,59 +151,16 @@ impl ObjectMotion {
                 mapped_at_creation: false,
             }),
             vertices: vertex_buffer(device, 1 << 12),
-            staged: Vec::new(),
-            tracked: HashMap::new(),
-            camera: DVec3::ZERO,
+            tracker: MotionTracker::default(),
             target: None,
         }
     }
 
-    /// Forget last frame's entities: the next frame has no motion of its own.
     pub fn reset(&mut self) {
-        self.tracked.clear();
+        self.tracker.reset();
     }
-
-    /// Match this frame's `entities` (relative to `camera`) to last frame's by the ids
-    /// `spans` gives their vertices (start, id; 0 for none, each up to the next start), and
-    /// keep them for the next frame.
     pub fn track(&mut self, entities: &[Vertex], spans: &[(u32, u64)], camera: DVec3) {
-        self.staged.clear();
-        let shift = (self.camera - camera).as_vec3();
-        let mut tracked = HashMap::with_capacity(self.tracked.len());
-        for (i, &(start, id)) in spans.iter().enumerate() {
-            let end = spans.get(i + 1).map_or(entities.len(), |s| s.0 as usize);
-            let Some(now) = entities
-                .get(start as usize..end)
-                .filter(|v| id != 0 && !v.is_empty())
-            else {
-                continue;
-            };
-            if let Some(then) = self.tracked.remove(&id)
-                && then.len() == now.len()
-                && then
-                    .iter()
-                    .zip(now)
-                    .all(|(a, b)| a.uv == b.uv && a.layer == b.layer)
-            {
-                let pair = |i: usize| MotionVertex {
-                    position: now[i].pos,
-                    previous: (Vec3::from(then[i].pos) + shift).into(),
-                    uv: now[i].uv,
-                    translucent: u32::from(matches!(
-                        now[i].layer,
-                        super::super::entity_batch::TRANSLUCENT_ITEM_OVERLAY
-                            | super::super::entity_batch::TRANSLUCENT_GLINT_ITEM_OVERLAY
-                    )),
-                };
-                for q in (0..now.len() / 4).map(|q| q * 4) {
-                    self.staged
-                        .extend([q, q + 1, q + 2, q, q + 2, q + 3].map(pair));
-                }
-            }
-            tracked.insert(id, now.to_vec());
-        }
-        self.tracked = tracked;
-        self.camera = camera;
+        self.tracker.track(entities, spans, camera);
     }
 
     /// Draw the matched entities' motion vectors at `size` (the world's render size),
@@ -179,7 +197,7 @@ impl ObjectMotion {
             self.target = Some((size, texture.create_view(&Default::default())));
         }
         let target = self.target.as_ref().expect("made above").1.clone();
-        let bytes: &[u8] = bytemuck::cast_slice(&self.staged);
+        let bytes: &[u8] = bytemuck::cast_slice(&self.tracker.staged);
         if bytes.len() as u64 > self.vertices.size() {
             self.vertices = vertex_buffer(device, (bytes.len() as u64).next_power_of_two());
         }
@@ -228,11 +246,11 @@ impl ObjectMotion {
             color_attachments: &attachments,
             ..Default::default()
         });
-        if !self.staged.is_empty() {
+        if !self.tracker.staged.is_empty() {
             pass.set_pipeline(&self.pipeline);
             pass.set_bind_group(0, &group, &[]);
             pass.set_vertex_buffer(0, self.vertices.slice(..bytes.len() as u64));
-            pass.draw(0..self.staged.len() as u32, 0..1);
+            pass.draw(0..self.tracker.staged.len() as u32, 0..1);
         }
         drop(pass);
         target
@@ -277,11 +295,7 @@ mod tests {
     /// space; a new one, one whose shape changed and untagged geometry get none.
     #[test]
     fn tracks_each_entity_by_id() {
-        let Some((device, queue)) = super::super::optical_flow::tests::device() else {
-            return;
-        };
-        let atlas = super::super::optical_flow::tests::upload(&device, &queue, [1, 1], &[0; 4]);
-        let mut motion = ObjectMotion::new(&device, atlas);
+        let mut motion = MotionTracker::default();
         let mut entities = quad(0.0, 0.0);
         entities.extend(quad(10.0, 0.5));
         motion.track(&entities, &[(0, 7), (4, 8)], DVec3::ZERO);

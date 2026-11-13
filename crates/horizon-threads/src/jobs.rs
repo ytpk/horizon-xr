@@ -224,7 +224,7 @@ impl Pool {
                 .name(format!("{name}-{i}"))
                 .spawn(move || {
                     match crate::cores::pin_worker(i) {
-                        Ok(Some(cpu)) => log::info!("Horizon worker {i} pinned to CPU {cpu}"),
+                        Ok(Some(cpus)) => log::info!("Horizon worker {i} effective CPUs {cpus:?}"),
                         Ok(None) => {}
                         Err(e) => log::warn!("Horizon worker {i} affinity left as is ({e})"),
                     }

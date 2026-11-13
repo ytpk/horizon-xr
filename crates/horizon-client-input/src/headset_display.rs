@@ -8,6 +8,8 @@ pub struct DisplayInfo {
     pub active: [u32; 2],
     pub rates: Vec<f32>,
     pub current_hz: Option<f32>,
+    pub spacewarp_supported: bool,
+    pub spacewarp_active: bool,
     pub scale_override: Option<f32>,
     pub foveated: bool,
     /// Device can attempt the native array path; runtime creation may still refuse it.
@@ -83,6 +85,11 @@ pub fn step_scale(current: f32, direction: i8) -> f32 {
             .find(|v| *v < current - 0.001)
             .unwrap_or(current)
     }
+}
+
+/// Actual render cadences, including half-rate SpaceWarp when available.
+pub fn render_rates(info: &DisplayInfo) -> Vec<f32> {
+    horizon_vivecraft::refresh::supported(&info.rates, info.spacewarp_supported)
 }
 
 /// Pick the next actual runtime rate, never an intermediate unsupported slider value.
@@ -166,5 +173,18 @@ mod tests {
         assert_eq!(step_rate(120.0, 1, &rates), 120.0);
         assert_eq!(step_rate(90.0, 1, &[72.0, 90.0]), 90.0);
         assert_eq!(step_rate(90.0, 1, &[]), 90.0);
+    }
+    #[test]
+    fn render_cadences_follow_both_runtime_and_spacewarp_support() {
+        let mut info = DisplayInfo {
+            rates: vec![72., 90., 120.],
+            ..Default::default()
+        };
+        assert_eq!(render_rates(&info), [72., 90., 120.]);
+        info.spacewarp_supported = true;
+        assert_eq!(render_rates(&info), [36., 45., 60., 72., 90., 120.]);
+        assert_eq!(step_rate(45., -1, &render_rates(&info)), 36.);
+        assert_eq!(step_rate(45., 1, &render_rates(&info)), 60.);
+        assert_eq!(step_rate(72., -1, &render_rates(&info)), 60.);
     }
 }

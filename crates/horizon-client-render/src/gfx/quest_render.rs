@@ -3,6 +3,38 @@
 use super::*;
 
 impl Renderer {
+    /// The share of real frames frame generation shows a made frame before (1 while it
+    /// keeps up), `None` while it isn't running.
+    /// The posed models' store size (`SkinFrame::base`), with entity skinning.
+    pub fn skinned_models(&self) -> Option<u32> {
+        self.entity_skin
+            .as_ref()
+            .map(entity_skin::EntitySkin::stored)
+    }
+
+    /// Whether the game may pose ordinary entity models on the GPU (`Frame::skin`).
+    /// Standard packs need every bridge stage; native packs, frame generation and
+    /// native observers of the CPU entity stream retain their existing fallback.
+    pub fn skins_entities(&self) -> bool {
+        self.entity_skin.is_some()
+            && !self.frame_gen.on
+            && !self.spacewarp_requested
+            && self.pack_post.as_ref().is_none_or(|(_, post)| {
+                post.as_ref().is_some_and(|post| post.skins_entities())
+                    && !native_render::render_needs().entity_spans
+            })
+            && self.native.is_none()
+    }
+
+    /// Whether the layers tagged `OIT_ENTITY` (the eyes render type's, horse
+    /// markings, a slime's outer cube) may be posed on the GPU too
+    /// (`mobs::skin::SkinModels::tagged`): only with improved transparency off,
+    /// where they are ordinary entity quads. On, `EntityBatch` sorts them into
+    /// its stages by the CPU vertices' `OIT_ENTITY` tag.
+    pub fn skins_tagged(&self) -> bool {
+        self.skins_entities() && !self.improved_transparency && self.pack_post.is_none()
+    }
+
     /// The launcher's room's pointer: triangles (corner, 0xRRGGBB) in the room's space, drawn over
     /// everything: the ray of the hand that points and the controllers.
     pub fn set_room_pointer(&mut self, triangles: &[([f32; 3], u32)]) {
@@ -216,6 +248,9 @@ impl Renderer {
             return Err("the graphics device was lost".into());
         }
         self.water_eye_offsets = None;
+        // Gameplay asks skins_entities for every model: cache policy once per frame,
+        // avoiding headset/settings locks and environment reads in that hot path.
+        self.spacewarp_requested = spacewarp::requested();
         let timed = self.gpu_times.len();
         self.land_frame();
         vr_profile::refresh_often();
@@ -238,8 +273,14 @@ impl Renderer {
         if request_array {
             assert!(self.swap_stereo_pipelines());
         }
+        let request_spacewarp =
+            layers == headset::Layers::World && self.spacewarp_compatible(frame);
+        if !request_spacewarp && let Some(sw) = &mut self.spacewarp {
+            sw.stop();
+        }
         let targets = headset::with(|h| {
             h.request_stereo_array(request_array);
+            h.request_spacewarp(request_spacewarp);
             h.begin(&self.device, layers)
         })
         .unwrap_or(headset::Targets::Skip);
@@ -365,6 +406,16 @@ impl Renderer {
                 let eye_views = poses.map(|pose| View::eye(body_yaw, &pose, frame.depth_far));
                 self.water_eye_offsets =
                     Some(eye_views.map(|eye| eye.view.inverse().w_axis.truncate()));
+                let warp_targets = headset::with(|h| h.spacewarp_targets()).flatten();
+                if let Some(targets) = warp_targets.clone() {
+                    self.spacewarp
+                        .get_or_insert_with(|| {
+                            spacewarp::SpaceWarp::new(&self.device, &self.entity_atlas)
+                        })
+                        .prepare(&self.device, &self.queue, targets, eye_views, frame, size);
+                } else if let Some(sw) = &mut self.spacewarp {
+                    sw.stop();
+                }
                 let cull = headset::cull_view(body_yaw, &poses, frame.depth_far);
                 self.headset_cull = Some(cull);
                 let mut drawn = Ok(false);
@@ -465,6 +516,9 @@ impl Renderer {
                     self.eye_mask = masks
                         .as_ref()
                         .and_then(|m| vis_mask::EyeMask::new(&m[eye], pose.tangents));
+                    if let Some(sw) = &mut self.spacewarp {
+                        sw.eye = eye;
+                    }
                     let view = eye_views[eye];
                     self.headset_eye = Some((view, cull));
                     self.offscreen = Some(image.clone());
@@ -546,6 +600,43 @@ impl Renderer {
                 images.extend(hud.as_ref());
                 images.extend(overlays.iter());
                 images.extend(upload.as_ref().map(|u| &u.0));
+                if let Some(sw) = &self.spacewarp
+                    && sw.active()
+                    && sw.drawn == 3
+                    && matches!(drawn, Ok(true))
+                {
+                    headset::with(|h| {
+                        h.spacewarp_rendered(
+                            frame.camera,
+                            body_yaw,
+                            frame.depth_far,
+                            sw.history_valid,
+                        )
+                    });
+                }
+                if drawn.is_err() {
+                    headset::with(|h| h.discard_frame());
+                }
+                if let Some(targets) = &warp_targets {
+                    // These images were last written as attachments. Explicit barriers avoid
+                    // reloading both layers on a tiled Adreno just to restore runtime layouts.
+                    panels.transition_resources(
+                        std::iter::empty(),
+                        [
+                            wgpu::TextureTransition {
+                                texture: &targets.motion,
+                                selector: None,
+                                state: wgpu::TextureUses::COLOR_TARGET,
+                            },
+                            wgpu::TextureTransition {
+                                texture: &targets.depth,
+                                selector: None,
+                                state: wgpu::TextureUses::DEPTH_STENCIL_WRITE,
+                            },
+                        ]
+                        .into_iter(),
+                    );
+                }
                 let finish_started = Instant::now();
                 self.finish_headset_images_encoded(panels, &images, images.len());
                 vr_profile::record(vr_profile::Stage::Finish, finish_started.elapsed());
