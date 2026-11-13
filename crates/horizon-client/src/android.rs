@@ -1388,7 +1388,7 @@ pub fn open_recovery() {
 /// hands the game before `entry::main_with`: the command line and the activity of its
 /// `android_main`. The same two values `main` above sets for the phone.
 pub mod embed {
-    use super::{ARGS, APP, AndroidApp};
+    use super::{APP, ARGS, AndroidApp};
     /// The game's command line from now on, in place of `horizon-args.txt`'s (once).
     pub fn set_args(args: Vec<String>) {
         let _ = ARGS.set(args);
