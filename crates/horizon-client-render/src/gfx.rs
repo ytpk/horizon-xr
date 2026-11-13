@@ -361,6 +361,7 @@ mod hdr_icc;
 mod hdr_start;
 mod hdr_stats;
 pub(crate) mod hud_coverage;
+mod spacewarp;
 mod vertex_streams;
 pub use hdr::{Calibration as HdrCalibration, Output as HdrOutput};
 mod hold;
@@ -1667,6 +1668,8 @@ pub struct Renderer {
     world_post: world_post::Post,
     /// Frame generation (Horizon setting).
     frame_gen: frame_gen::FrameGen,
+    spacewarp: Option<spacewarp::SpaceWarp>,
+    spacewarp_requested: bool,
     /// The entities' texture atlas (`entity_group`'s), for frame generation's motion.
     entity_atlas: wgpu::TextureView,
     /// HDR output (Horizon setting): `Some` while the swapchain is HDR.
@@ -5736,6 +5739,8 @@ impl Renderer {
             layout: crate::chunk::ColumnLayout::VANILLA,
             world_post,
             frame_gen: frame_gen::FrameGen::new(),
+            spacewarp: None,
+            spacewarp_requested: false,
             entity_atlas: atlas_view.clone(),
             hdr: None,
             hdr_lighting_setting: true,
@@ -7571,37 +7576,6 @@ impl Renderer {
                 .measure(&self.device, &self.queue, &views, hdr.masks);
         }
     }
-    /// The share of real frames frame generation shows a made frame before (1 while it
-    /// keeps up), `None` while it isn't running.
-    /// The posed models' store size (`SkinFrame::base`), with entity skinning.
-    pub fn skinned_models(&self) -> Option<u32> {
-        self.entity_skin
-            .as_ref()
-            .map(entity_skin::EntitySkin::stored)
-    }
-
-    /// Whether the game may pose ordinary entity models on the GPU (`Frame::skin`).
-    /// Standard packs need every bridge stage; native packs, frame generation and
-    /// native observers of the CPU entity stream retain their existing fallback.
-    pub fn skins_entities(&self) -> bool {
-        self.entity_skin.is_some()
-            && !self.frame_gen.on
-            && self.pack_post.as_ref().is_none_or(|(_, post)| {
-                post.as_ref().is_some_and(|post| post.skins_entities())
-                    && !native_render::render_needs().entity_spans
-            })
-            && self.native.is_none()
-    }
-
-    /// Whether the layers tagged `OIT_ENTITY` (the eyes render type's, horse
-    /// markings, a slime's outer cube) may be posed on the GPU too
-    /// (`mobs::skin::SkinModels::tagged`): only with improved transparency off,
-    /// where they are ordinary entity quads. On, `EntityBatch` sorts them into
-    /// its stages by the CPU vertices' `OIT_ENTITY` tag.
-    pub fn skins_tagged(&self) -> bool {
-        self.skins_entities() && !self.improved_transparency && self.pack_post.is_none()
-    }
-
     pub fn frame_generation_share(&self) -> Option<f32> {
         self.frame_gen.made_share
     }
@@ -10726,7 +10700,8 @@ impl Renderer {
             || (taa && self.world_post.taa)
             || oit_on
             || native_render::render_needs().world_depth
-            || fg;
+            || fg
+            || self.spacewarp.as_ref().is_some_and(|s| s.active());
         // The pack's program reads the vertices this frame's draws bind.
         let pack_draws_terrain = pack_terrain && flat_frame == self.pack_terrain_flat;
         // The shadow camera's lists, drawn by the pack's shadow programs.
@@ -12401,7 +12376,13 @@ impl Renderer {
                     // drawn over everything, after the depth is reset.
                     let on_top = frame.hand_gui_quads.min(hand_quads);
                     self.draw_hand(&mut pass, hand_quads - on_top, first);
-                    if on_top > 0 {
+                    if on_top > 0 && self.spacewarp.as_ref().is_some_and(|sw| sw.active()) {
+                        self.draw_spacewarp_gui_hand(
+                            &mut pass,
+                            on_top,
+                            first + hand_quads - on_top,
+                        );
+                    } else if on_top > 0 {
                         pass.set_pipeline(&self.depth_reset);
                         pass.set_bind_group(0, &self.group, &[]);
                         pass.draw(0..3, 0..1);
@@ -12429,6 +12410,16 @@ impl Renderer {
             if let Some(t) = self.own_timing.as_mut() {
                 t.section(&mut pass, None);
             }
+        }
+        if let Some(sw) = &mut self.spacewarp {
+            sw.draw(
+                &self.device,
+                &self.queue,
+                &mut encoder,
+                world_depth,
+                self.stereo_views.is_some(),
+                self.own_timing.as_mut(),
+            );
         }
         if let Some((color, depth)) = &scaled
             && pack_post
@@ -13751,7 +13742,7 @@ fn camera_section(camera: DVec3, min_y: i32) -> SectionKey {
 }
 
 /// The near plane of the world's projection, in blocks.
-const NEAR_PLANE: f32 = 0.05;
+pub const NEAR_PLANE: f32 = 0.05;
 
 /// Counts and offsets `Renderer::draw_overlay` draws from this frame's buffers.
 struct Overlay {
@@ -14829,7 +14820,7 @@ mod tests {
             assert!(!shown(false));
         }
     }
-    /// Every WGSL shader file translates to HLSL as wgpu's DirectX 12 backend
+    /// Cross-backend WGSL translates to HLSL as wgpu's DirectX 12 backend
     /// writes it for FXC (shader model 5.1), entry point by entry point, and
     /// every shader the OpenGL backend runs also translates to GLSL.
     #[test]
@@ -14855,6 +14846,12 @@ mod tests {
         for path in files {
             let text = std::fs::read_to_string(&path).unwrap();
             let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            if name == "spacewarp.wgsl" {
+                // OpenXR uses Vulkan only. Its real multiview needs ViewIndex, which
+                // FXC/SM5.1 and desktop GL3.3 cannot express. Both actual variants
+                // translate to SPIR-V in spacewarp::tests::vulkan_variants_translate.
+                continue;
+            }
             if name == "oit.wgsl" || name == "gpu_occlusion.wgsl" || name == "hdr_light.wgsl" {
                 // The shared maths: it needs the file it is appended to. GPU culling's
                 // occlusion test is appended to gpu_culling.wgsl, on Vulkan alone.

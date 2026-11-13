@@ -25,6 +25,7 @@ pub mod pages;
 pub mod player;
 pub mod player_model;
 pub mod radial;
+pub mod refresh;
 pub mod server;
 pub mod settings;
 pub mod trackers;

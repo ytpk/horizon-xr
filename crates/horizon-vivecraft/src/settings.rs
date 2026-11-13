@@ -235,9 +235,9 @@ impl VrSettings {
                 "renderScale" => value
                     .parse::<f32>()
                     .is_ok_and(|v| self.set_float("renderScaleFactor", render_scale(v))),
-                "refreshRate" => value
-                    .parse::<f32>()
-                    .is_ok_and(|v| self.set_float("horizonRefreshRate", v.clamp(72.0, 120.0))),
+                "refreshRate" => value.parse::<f32>().is_ok_and(|v| {
+                    self.set_float("horizonRefreshRate", crate::refresh::mode(v).render)
+                }),
                 "swingAttack" => self.set("weaponCollisionNew", if flag { "ON" } else { "OFF" }),
                 "swingBreak" => self.set_bool("blockCollision", flag),
                 "touchInteract" => {

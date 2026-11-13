@@ -256,16 +256,23 @@ impl Room {
             } else {
                 "horizonRefreshRate"
             };
-            let current = self.settings.vr.float(key);
+            let current = if key == "horizonRefreshRate" {
+                horizon_vivecraft::refresh::requested(self.settings.vr.float(key)).render
+            } else {
+                self.settings.vr.float(key)
+            };
             let next = if key == "renderScaleFactor" {
                 headset_display::step_scale(current, delta)
             } else {
                 headset_display::snapshot().map_or(current, |i| {
-                    headset_display::step_rate(current, delta, &i.rates)
+                    headset_display::step_rate(current, delta, &headset_display::render_rates(&i))
                 })
             };
             if next != current {
                 Arc::make_mut(&mut self.settings.vr).set_float(key, next);
+                if key == "horizonRefreshRate" {
+                    horizon_vivecraft::refresh::edited_in_ui();
+                }
                 self.settings.save(&Game::options_path());
                 horizon_client::headset::set_settings(&self.settings.vr);
                 horizon_client::headset::pulse(!horizon_client::headset::pointer_off(), 0.4, 0.04);
