@@ -826,6 +826,121 @@ mod tests {
     use super::*;
 
     #[test]
+    fn the_stereo_shader_validates_and_takes_the_view() {
+        let source = stereo_source();
+        let module = naga::front::wgsl::parse_str(&source)
+            .unwrap_or_else(|e| panic!("{}", e.emit_to_string(&source)));
+        naga::valid::Validator::new(
+            naga::valid::ValidationFlags::all(),
+            naga::valid::Capabilities::all(),
+        )
+        .validate(&module)
+        .unwrap();
+        let vertex = &module.entry_points[0];
+        assert_eq!(vertex.name, "vs_box");
+        assert!(
+            vertex
+                .function
+                .arguments
+                .iter()
+                .any(|a| { a.binding == Some(naga::Binding::BuiltIn(naga::BuiltIn::ViewIndex)) })
+        );
+    }
+
+    /// A real stereo pass: a box in front of both eyes is seen, one behind them is not, and
+    /// one only the right eye's lens reaches is seen too.
+    #[test]
+    #[ignore = "requires a Vulkan adapter with MULTIVIEW; also runs on Mesa lavapipe"]
+    fn a_stereo_pass_sees_the_boxes_either_eye_shows() {
+        use wgpu::util::DeviceExt;
+        let instance = super::super::test_gpu::instance();
+        let adapter = pollster::block_on(instance.request_adapter(&Default::default())).unwrap();
+        let features = wgpu::Features::MULTIVIEW | wgpu::Features::SHADER_EARLY_DEPTH_TEST;
+        let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+            required_features: features,
+            required_limits: wgpu::Limits {
+                max_multiview_view_count: 2,
+                ..Default::default()
+            },
+            ..Default::default()
+        }))
+        .unwrap();
+        assert!(Cull::recall_supported(&adapter, &device));
+        let format = wgpu::TextureFormat::Rgba8Unorm;
+        let mut cull = Cull::new(&device, format, DepthTest::Early, true);
+        cull.always = true;
+        assert!(cull.begin(&device));
+        // Ahead of both eyes, behind them, and far to the right: past the left eye's lens.
+        let origins: [[f32; 4]; 3] = [
+            [-8.0, -8.0, -60.0, 0.0],
+            [-8.0, -8.0, 40.0, 0.0],
+            [52.0, -8.0, -60.0, 0.0],
+        ];
+        for (i, _) in origins.iter().enumerate() {
+            cull.recall_drawn(i, i as u32, 36);
+        }
+        let lens = |tangents| super::super::headset::eye_projection(tangents, 0.05, 1000.0);
+        cull.set_eyes(Some([
+            lens([-1.0, 0.5, 1.0, -1.0]),
+            lens([-0.5, 1.0, 1.0, -1.0]),
+        ]));
+        let buffer = |contents: &[u8], usage| {
+            device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: None,
+                contents,
+                usage,
+            })
+        };
+        let origins = buffer(bytemuck::cast_slice(&origins), wgpu::BufferUsages::STORAGE);
+        let globals = buffer(&[0; 64], wgpu::BufferUsages::UNIFORM);
+        let mut uploads = super::super::upload::Uploads::new(&device);
+        let mut encoder = device.create_command_encoder(&Default::default());
+        cull.upload(&device, &mut uploads, &mut encoder, &[], &origins, &globals);
+        let target = super::super::multiview::Targets::new(&device, [64, 64], format);
+        let view = target.color.create_view(&Default::default());
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: None,
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &view,
+                    resolve_target: None,
+                    depth_slice: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &target.depth,
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(0.0),
+                        store: wgpu::StoreOp::Discard,
+                    }),
+                    stencil_ops: None,
+                }),
+                multiview_mask: super::super::multiview::MASK,
+                ..Default::default()
+            });
+            cull.test(&mut pass);
+        }
+        cull.end(&device, &mut encoder);
+        uploads.finish(&encoder);
+        queue.submit([encoder.finish()]);
+        cull.submitted().unwrap()();
+        device
+            .poll(wgpu::PollType::Wait {
+                submission_index: None,
+                timeout: Some(std::time::Duration::from_secs(30)),
+            })
+            .unwrap();
+        cull.begin(&device);
+        assert_eq!(
+            [cull.left_out(0), cull.left_out(1), cull.left_out(2)],
+            [false, true, false]
+        );
+    }
+
+    #[test]
     fn shaders_validate() {
         for (depth_test, capabilities) in [
             (DepthTest::Early, naga::valid::Capabilities::all()),

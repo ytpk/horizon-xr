@@ -65,6 +65,11 @@ override SPRITE_SPLIT: u32 = 2048u;
 // Solid terrain in a frame whose instances are all whole sections, without RGSS
 // (gfx/solid_paths.rs): the same pixels from less work. Off, it takes nothing away.
 override SETTLED_TERRAIN: bool = false;
+// Whether the solid shaders carry HDR output's lighting (a pipeline constant): the lean
+// pipelines of a headset (`OpaqueWire`, gfx/solid_paths.rs) are built without it, since
+// nothing reads the frame's alpha there and the lighting needs `local`, `scene` and
+// `emission` from the vertex stage. On (the default) nothing is taken away.
+override HDR_LIGHTING: bool = true;
 // A sprite sampled with the given gradients, from whichever array holds its layer.
 fn sprite_grad(uv: vec2<f32>, layer: u32, dx: vec2<f32>, dy: vec2<f32>) -> vec4<f32> {
     let l = i32(layer % SPRITE_SPLIT);
@@ -375,6 +380,78 @@ fn left_out() -> TerrainOut {
     return terrain_vertex(position, terrain_uv(uv, origin.w), layer, color, light, origin.xyz,
         origin.w);
 }
+// The lean solid passes' interpolants (gfx/solid_paths.rs's lean passes, a headset's Adreno):
+// the fragment shaders built with `HDR_LIGHTING` off read only these, so `local`, `scene`,
+// `height`, `emission` and `fade` stay in the vertex stage: 3 locations (8 floats, 2
+// integers) instead of 11. Each vertex is shaded once per view and once more for the tile
+// binning on a tiled GPU, and pays for every location it writes.
+struct OpaqueWire {
+    @builtin(position) clip: vec4<f32>,
+    // The colour and `visibility`.
+    @location(0) a: vec4<f32>,
+    // `uv`, `spherical` and `cylindrical`.
+    @location(1) b: vec4<f32>,
+    // `layer` and `emissive_layer`.
+    @location(2) @interpolate(flat) c: vec2<u32>,
+}
+fn to_opaque_wire(in: TerrainOut) -> OpaqueWire {
+    var w: OpaqueWire;
+    w.clip = in.clip;
+    // Settled terrain has no fade-in: the fragment shader skips the mix, and with it the
+    // varying.
+    w.a = vec4(in.color.rgb, select(in.visibility, 1.0, SETTLED_TERRAIN));
+    w.b = vec4(in.uv, in.spherical, in.cylindrical);
+    w.c = vec2(in.layer, in.emissive_layer);
+    return w;
+}
+fn from_opaque_wire(wire: OpaqueWire) -> TerrainOut {
+    var in: TerrainOut;
+    in.clip = wire.clip;
+    in.color = vec4(wire.a.rgb, 1.0);
+    in.visibility = wire.a.w;
+    in.uv = wire.b.xy;
+    in.spherical = wire.b.z;
+    in.cylindrical = wire.b.w;
+    in.layer = wire.c.x;
+    in.emissive_layer = wire.c.y;
+    return in;
+}
+@vertex fn vs_terrain_opaque_lean(
+    @location(0) position: vec3<f32>, @location(1) uv: vec2<u32>,
+    @location(2) layer: u32, @location(3) color: vec4<f32>, @location(4) light: vec2<u32>,
+    @location(5) origin: vec4<f32>) -> OpaqueWire {
+    if !opaque_quad(layer, origin.w) { return to_opaque_wire(left_out()); }
+    return to_opaque_wire(terrain_vertex(position, terrain_uv(uv, origin.w), layer, color, light,
+        origin.xyz, origin.w));
+}
+@vertex fn vs_terrain_cutout_lean(
+    @location(0) position: vec3<f32>, @location(1) uv: vec2<u32>,
+    @location(2) layer: u32, @location(3) color: vec4<f32>, @location(4) light: vec2<u32>,
+    @location(5) origin: vec4<f32>) -> OpaqueWire {
+    if opaque_quad(layer, origin.w) { return to_opaque_wire(left_out()); }
+    return to_opaque_wire(terrain_vertex(position, terrain_uv(uv, origin.w), layer, color, light,
+        origin.xyz, origin.w));
+}
+@vertex fn vs_terrain_flat_opaque_lean(
+    @builtin(vertex_index) vertex: u32,
+    @location(0) position: vec3<f32>, @location(1) uv: vec2<u32>,
+    @location(2) layer: u32, @location(3) color: vec4<f32>, @location(4) light: vec2<u32>
+) -> OpaqueWire {
+    let origin = slot_origins[block_slots[vertex >> 8u]];
+    if !opaque_quad(layer, origin.w) { return to_opaque_wire(left_out()); }
+    return to_opaque_wire(terrain_vertex(position, terrain_uv(uv, origin.w), layer, color, light,
+        origin.xyz, origin.w));
+}
+@vertex fn vs_terrain_flat_cutout_lean(
+    @builtin(vertex_index) vertex: u32,
+    @location(0) position: vec3<f32>, @location(1) uv: vec2<u32>,
+    @location(2) layer: u32, @location(3) color: vec4<f32>, @location(4) light: vec2<u32>
+) -> OpaqueWire {
+    let origin = slot_origins[block_slots[vertex >> 8u]];
+    if opaque_quad(layer, origin.w) { return to_opaque_wire(left_out()); }
+    return to_opaque_wire(terrain_vertex(position, terrain_uv(uv, origin.w), layer, color, light,
+        origin.xyz, origin.w));
+}
 // HDR lighting: how far a surface's light carries it above paper white, 0 to 1. Only the
 // strongest light does, so dark stays as dark as in SDR; sky light by how the face meets the sun.
 fn hdr_scene(block: f32, sky: f32, facing: f32) -> f32 {
@@ -460,7 +537,9 @@ fn hdr_mark(tier: u32, y: f32) -> f32 {
 }
 // `fs_solid` for the opaque pass (`opaque_quad`): no fade, no cutout, no discard.
 @fragment fn fs_opaque(in: TerrainOut) -> @location(0) vec4<f32> {
-    hdr_normal = normalize(cross(dpdy(in.local), dpdx(in.local)));
+    if HDR_LIGHTING {
+        hdr_normal = normalize(cross(dpdy(in.local), dpdx(in.local)));
+    }
     let texel = sprite(in.uv, in.layer & 0x7fffu);
     var color = texel * in.color;
     if !SETTLED_TERRAIN {
@@ -476,7 +555,9 @@ fn hdr_mark(tier: u32, y: f32) -> f32 {
 }
 // `fs_solid` for a frame with nothing fading (gfx/solid_paths.rs): `faded` would leave nothing out.
 @fragment fn fs_cutout_static(in: TerrainOut) -> @location(0) vec4<f32> {
-    hdr_normal = normalize(cross(dpdy(in.local), dpdx(in.local)));
+    if HDR_LIGHTING {
+        hdr_normal = normalize(cross(dpdy(in.local), dpdx(in.local)));
+    }
     let texel = sprite(in.uv, in.layer & 0x7fffu);
     var color = texel * in.color;
     if !SETTLED_TERRAIN {
@@ -488,7 +569,9 @@ fn hdr_mark(tier: u32, y: f32) -> f32 {
 fn solid_color(in: TerrainOut) -> vec4<f32> {
     let dx = dpdx(in.local);
     let dy = dpdy(in.local);
-    hdr_normal = normalize(cross(dy, dx));
+    if HDR_LIGHTING {
+        hdr_normal = normalize(cross(dy, dx));
+    }
     if faded(in.fade, in.local, dx, dy) { discard; }
     // Bit 15 of the layer marks opaque leaves (forceOpaque): no alpha cutout.
     let texel = sprite(in.uv, in.layer & 0x7fffu);
@@ -505,24 +588,28 @@ fn solid_finish(in: TerrainOut, texel: vec4<f32>, color: vec4<f32>) -> vec4<f32>
     // texel's own brightness, so its light level and face shading don't change
     // it. Only pixels as bright as their sprite's threshold may: its bright
     // parts, or all of it. Nothing else reads the frame's alpha.
-    // Fog turns a far surface into the fog's colour: it takes the fog's light with it, or a
-    // fully fogged mountain would stand out from the fog behind it.
-    let fogged = max(linear_fog(in.spherical, globals.fog.x, globals.fog.y),
-        linear_fog(in.cylindrical, globals.fog.z, globals.fog.w)) * globals.fog_color.a;
-    var emissive = hdr_scene_alpha(mix(hdr_scene(in.scene.x, in.scene.y, hdr_facing()),
-        globals.hdr_light.y, fogged));
-    if in.emission > 0u {
-        // A light source's own face shines as one or stays as drawn, without the lighting.
-        emissive = 1.0;
-        let whole = in.emission > 4u;
-        let tier = select(in.emission, in.emission - 4u, whole);
-        let l = in.layer & 0x7fffu;
-        let t = textureLoad(emission_thresholds, vec2(i32(l % SPRITE_SPLIT), i32(l / SPRITE_SPLIT)), 0);
-        let y = brightness(texel.rgb);
-        // All over means all over: the sprite's range is one frame's, and an animated sprite's
-        // other frames dip below it. Fog hides a light source as it hides everything else.
-        if whole || y >= t.r {
-            emissive = hdr_mark(tier, y * (1.0 - fogged));
+    // Without `HDR_LIGHTING` nothing does: the lighting is not worked out and alpha is 1.
+    var emissive = 1.0;
+    if HDR_LIGHTING {
+        // Fog turns a far surface into the fog's colour: it takes the fog's light with it, or a
+        // fully fogged mountain would stand out from the fog behind it.
+        let fogged = max(linear_fog(in.spherical, globals.fog.x, globals.fog.y),
+            linear_fog(in.cylindrical, globals.fog.z, globals.fog.w)) * globals.fog_color.a;
+        emissive = hdr_scene_alpha(mix(hdr_scene(in.scene.x, in.scene.y, hdr_facing()),
+            globals.hdr_light.y, fogged));
+        if in.emission > 0u {
+            // A light source's own face shines as one or stays as drawn, without the lighting.
+            emissive = 1.0;
+            let whole = in.emission > 4u;
+            let tier = select(in.emission, in.emission - 4u, whole);
+            let l = in.layer & 0x7fffu;
+            let t = textureLoad(emission_thresholds, vec2(i32(l % SPRITE_SPLIT), i32(l / SPRITE_SPLIT)), 0);
+            let y = brightness(texel.rgb);
+            // All over means all over: the sprite's range is one frame's, and an animated sprite's
+            // other frames dip below it. Fog hides a light source as it hides everything else.
+            if whole || y >= t.r {
+                emissive = hdr_mark(tier, y * (1.0 - fogged));
+            }
         }
     }
     if in.emissive_layer != 0xffffffffu {
@@ -531,9 +618,41 @@ fn solid_finish(in: TerrainOut, texel: vec4<f32>, color: vec4<f32>) -> vec4<f32>
         if (in.emissive_layer & 0x80000000u) != 0u {
             mask.a = select(0.0, 1.0, mask.a >= 0.1);
         }
-        return apply_fog(vec4(mix(color.rgb, mask.rgb, mask.a), mix(emissive, hdr_mark(3u, 1.0), mask.a)), in.spherical, in.cylindrical);
+        var overlay = emissive;
+        if HDR_LIGHTING {
+            overlay = mix(emissive, hdr_mark(3u, 1.0), mask.a);
+        }
+        return apply_fog(vec4(mix(color.rgb, mask.rgb, mask.a), overlay), in.spherical, in.cylindrical);
     }
     return apply_fog(vec4(color.rgb, emissive), in.spherical, in.cylindrical);
+}
+// The lean passes' fragment shaders (`OpaqueWire`), built with `HDR_LIGHTING` off only: the
+// values the wire leaves out are the ones HDR output's lighting reads.
+@fragment fn fs_opaque_lean(wire: OpaqueWire) -> @location(0) vec4<f32> {
+    let in = from_opaque_wire(wire);
+    let texel = sprite(in.uv, in.layer & 0x7fffu);
+    var color = texel * in.color;
+    if !SETTLED_TERRAIN {
+        color = mix(globals.fog_color * vec4(1.0, 1.0, 1.0, color.a), color, in.visibility);
+    }
+    return solid_finish(in, texel, color);
+}
+// `fs_cutout_static` over `OpaqueWire`. The vertex colour's alpha is 1, so the pixel's is
+// the texel's, but for the fade-in toward the fog colour, which takes `fog_color.a` of it:
+// the cutout comes first, before any other work, with that applied.
+@fragment fn fs_cutout_lean(wire: OpaqueWire) -> @location(0) vec4<f32> {
+    let texel = sprite(wire.b.xy, wire.c.x & 0x7fffu);
+    var alpha = texel.a;
+    if !SETTLED_TERRAIN {
+        alpha = mix(globals.fog_color.a * alpha, alpha, wire.a.w);
+    }
+    if alpha < 0.5 && (wire.c.x & 0x8000u) == 0u { discard; }
+    let in = from_opaque_wire(wire);
+    var color = texel * in.color;
+    if !SETTLED_TERRAIN {
+        color = mix(globals.fog_color * vec4(1.0, 1.0, 1.0, color.a), color, in.visibility);
+    }
+    return solid_finish(in, texel, color);
 }
 // HDR lighting on what's mostly opaque among translucent faces (water), drawn again after
 // them with only alpha written: `fs_translucent` blends its alpha as coverage, so a lake's

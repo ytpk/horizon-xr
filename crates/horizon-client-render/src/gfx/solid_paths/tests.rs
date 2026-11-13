@@ -446,6 +446,8 @@ impl Gpu {
 struct Pipelines<'a> {
     gpu: &'a Gpu,
     paths: SolidPaths,
+    /// The same with the lean varyings (`Lean`).
+    lean: SolidPaths,
     solid: wgpu::RenderPipeline,
     opaque: [Option<wgpu::RenderPipeline>; 2],
 }
@@ -481,6 +483,19 @@ impl<'a> Pipelines<'a> {
             &gpu.layout,
             gpu.flat_bindings.as_ref(),
             &buffers,
+            Lean::default(),
+        )
+        .expect("the test GPU takes these pipelines");
+        let lean = SolidPaths::new(
+            &terrain,
+            &gpu.bindings,
+            &gpu.layout,
+            gpu.flat_bindings.as_ref(),
+            &buffers,
+            Lean {
+                opaque: true,
+                cutout: true,
+            },
         )
         .expect("the test GPU takes these pipelines");
         let back = Some(wgpu::Face::Back);
@@ -523,6 +538,7 @@ impl<'a> Pipelines<'a> {
         Self {
             gpu,
             paths,
+            lean,
             solid: usual("vs_terrain", "fs_solid"),
             opaque: [Some(usual("vs_terrain_opaque", "fs_opaque")), flat_opaque],
         }
@@ -541,6 +557,14 @@ impl Pipelines<'_> {
         let passes = [opaque.get(flat).unwrap(), cutout.get(flat).unwrap()];
         self.gpu.render(&passes, scene, flat)
     }
+}
+
+/// A frame's colour without its alpha: what the lean passes keep. Alpha only carries HDR
+/// lighting, which they leave out (`HDR_LIGHTING` off), so it is 1 there.
+fn colour(pixels: &[u8]) -> Vec<u8> {
+    let mut pixels = pixels.to_vec();
+    pixels.iter_mut().skip(3).step_by(4).for_each(|a| *a = 0);
+    pixels
 }
 
 /// Each image holds what the scene should: the comparisons would pass over empty ones too.
@@ -620,4 +644,68 @@ fn a_frame_takes_what_its_instances_prove() {
     // A fade keeps the usual passes, even in one instance of many.
     assert_eq!(taken(&[whole, fading], 0), (false, false));
     assert_eq!(taken(&[whole, fading_tile], 0), (false, false));
+}
+
+#[test]
+fn lean_passes_draw_the_usual_colours() {
+    let Some(gpu) = Gpu::new() else {
+        eprintln!("no GPU adapter: skipped");
+        return;
+    };
+    let pipelines = Pipelines::new(&gpu);
+    let lean = &pipelines.lean;
+    let opaque = lean.lean_opaque.as_ref().expect("a lean opaque pass");
+    // A frame with fades or tiles: the lean opaque pass, then the cutout pass without fades
+    // (the frames the instances prove unfaded).
+    for w in [WHOLE, FADING_IN] {
+        for scene in scenes(w) {
+            let usual = colour(&gpu.render(&[&pipelines.solid], &scene, false));
+            assert_drawn(&usual, &scene);
+            let cutout = lean.static_cutout.get(false).unwrap();
+            let image = colour(&gpu.render(&[opaque.get(false).unwrap(), cutout], &scene, false));
+            assert!(usual == image, "{scene:?}");
+            if gpu.flat_bindings.is_some() {
+                let flat = colour(&gpu.render(
+                    &[
+                        opaque.get(true).unwrap(),
+                        lean.static_cutout.get(true).unwrap(),
+                    ],
+                    &scene,
+                    true,
+                ));
+                assert!(usual == flat, "{scene:?} (flat)");
+            }
+        }
+    }
+    // Settled terrain through the lean passes.
+    for scene in scenes(WHOLE) {
+        let usual = colour(&gpu.render(&[&pipelines.solid], &scene, false));
+        let [opaque, cutout] = lean.settled.as_ref().unwrap();
+        let image = colour(&gpu.render(
+            &[opaque.get(false).unwrap(), cutout.get(false).unwrap()],
+            &scene,
+            false,
+        ));
+        assert!(usual == image, "{scene:?} (settled)");
+    }
+}
+
+#[test]
+fn lean_opaque_serves_frames_with_fades() {
+    let Some(gpu) = Gpu::new() else {
+        eprintln!("no GPU adapter: skipped");
+        return;
+    };
+    let pipelines = Pipelines::new(&gpu);
+    let fading = section_instance([1.0, 2.0, 3.0], 56, 1.0);
+    let frame = |paths: &SolidPaths| {
+        let passes = paths.for_frame(&[fading], 0);
+        (
+            passes.opaque(false).is_some(),
+            passes.cutout(false).is_some(),
+        )
+    };
+    // The opaque pass has no fade to know; the cutout keeps the usual pipeline.
+    assert_eq!(frame(&pipelines.lean), (true, false));
+    assert_eq!(frame(&pipelines.paths), (false, false));
 }

@@ -14,14 +14,74 @@ pub(super) struct Pass {
     flat: Option<wgpu::RenderPipeline>,
 }
 
+/// A pass's entry points of terrain.wgsl: the section and the flat draws' vertex shaders, the
+/// fragment shader.
+#[derive(Clone, Copy)]
+struct Entries {
+    vertex: (&'static str, &'static str),
+    fragment: &'static str,
+}
+
+const OPAQUE: Entries = Entries {
+    vertex: ("vs_terrain_opaque", "vs_terrain_flat_opaque"),
+    fragment: "fs_opaque",
+};
+const CUTOUT_STATIC: Entries = Entries {
+    vertex: ("vs_terrain_cutout", "vs_terrain_flat_cutout"),
+    fragment: "fs_cutout_static",
+};
+/// The lean varyings (`OpaqueWire`): built with `HDR_LIGHTING` off only.
+const OPAQUE_LEAN: Entries = Entries {
+    vertex: ("vs_terrain_opaque_lean", "vs_terrain_flat_opaque_lean"),
+    fragment: "fs_opaque_lean",
+};
+const CUTOUT_LEAN: Entries = Entries {
+    vertex: ("vs_terrain_cutout_lean", "vs_terrain_flat_cutout_lean"),
+    fragment: "fs_cutout_lean",
+};
+
+/// A headset's Adreno draws its solid passes through terrain.wgsl's `OpaqueWire`: 3 interpolant
+/// locations instead of `TerrainOut`'s 11, and no HDR lighting (`HDR_LIGHTING` off: nothing
+/// there reads the frame's alpha). Each vertex is shaded about 2.5 times a frame (once per view,
+/// once for the tile binning) and pays for every location; measured on a Quest 3S at 24 chunks,
+/// the opaque pass took 0.9 ms off 21 and the cutout pass 0.8 ms. The picture is the same.
+#[derive(Clone, Copy, Default, Debug, PartialEq, Eq)]
+pub(super) struct Lean {
+    pub opaque: bool,
+    pub cutout: bool,
+}
+
 impl Pass {
+    /// `lean`'s module and entry points where the pass is wanted lean and the device takes
+    /// them, else `plain`'s.
     fn new(
+        plain: (&TerrainModule<'_>, Entries),
+        lean: Option<(&TerrainModule<'_>, Entries)>,
+        layouts: (&wgpu::PipelineLayout, Option<&wgpu::PipelineLayout>),
+        buffers: &[Option<wgpu::VertexBufferLayout<'_>>],
+        (label, flat_label): (&str, &str),
+    ) -> Option<Self> {
+        lean.and_then(|(terrain, entries)| {
+            Self::build(
+                terrain,
+                entries,
+                layouts,
+                buffers,
+                (&format!("{label} (lean)"), &format!("{flat_label} (lean)")),
+            )
+        })
+        .or_else(|| Self::build(plain.0, plain.1, layouts, buffers, (label, flat_label)))
+    }
+
+    fn build(
         terrain: &TerrainModule<'_>,
+        Entries {
+            vertex: (vertex, flat_vertex),
+            fragment,
+        }: Entries,
         (layout, flat_layout): (&wgpu::PipelineLayout, Option<&wgpu::PipelineLayout>),
         buffers: &[Option<wgpu::VertexBufferLayout<'_>>],
         (label, flat_label): (&str, &str),
-        (vertex, flat_vertex): (&str, &str),
-        fragment: &str,
     ) -> Option<Self> {
         let back = Some(wgpu::Face::Back);
         let sections =
@@ -79,6 +139,9 @@ pub(super) struct SolidPaths {
     /// 21.576/21.567 ms of GPU time against 20.154/20.168 ms over that in the fork's measurement.
     settled: Option<[Pass; 2]>,
     pub settled_on: bool,
+    /// The opaque pass for the frames that take no settled terrain, through the lean varyings
+    /// (`Lean::opaque`). Its quads are those no fade touches, so any frame may draw it.
+    lean_opaque: Option<Pass>,
 }
 
 impl SolidPaths {
@@ -90,17 +153,22 @@ impl SolidPaths {
                 out.extend(pass.pipelines_mut());
             }
         }
+        if let Some(pass) = &mut self.lean_opaque {
+            out.extend(pass.pipelines_mut());
+        }
         out
     }
 }
 impl SolidPaths {
-    /// `flat_bindings`: the flat draws' bind group 1, where they exist.
+    /// `flat_bindings`: the flat draws' bind group 1, where they exist. `lean`: the passes that
+    /// draw through the lean varyings where the device takes them.
     pub fn new(
         terrain: &TerrainModule<'_>,
         bindings: &wgpu::BindGroupLayout,
         layout: &wgpu::PipelineLayout,
         flat_bindings: Option<&wgpu::BindGroupLayout>,
         buffers: &[Option<wgpu::VertexBufferLayout<'_>>],
+        lean: Lean,
     ) -> Option<Self> {
         let flat_layout = flat_bindings.map(|flat| {
             terrain
@@ -122,45 +190,69 @@ impl SolidPaths {
             constants: &constants,
             ..*terrain
         };
+        // The lean passes carry no HDR lighting (`HDR_LIGHTING`), and no fade-in when settled.
+        let lean_plain = lean_constants(terrain.constants, false);
+        let lean_settled_constants = lean_constants(terrain.constants, true);
+        let lean_module = TerrainModule {
+            constants: &lean_plain,
+            ..*terrain
+        };
+        let lean_settled_module = TerrainModule {
+            constants: &lean_settled_constants,
+            ..*terrain
+        };
         let settled_opaque = Pass::new(
-            &settled_module,
+            (&settled_module, OPAQUE),
+            lean.opaque.then_some((&lean_settled_module, OPAQUE_LEAN)),
             layouts,
             buffers,
             ("Settled terrain opaque", "Settled terrain opaque (flat)"),
-            ("vs_terrain_opaque", "vs_terrain_flat_opaque"),
-            "fs_opaque",
         );
         let settled_cutout = Pass::new(
-            &settled_module,
+            (&settled_module, CUTOUT_STATIC),
+            lean.cutout.then_some((&lean_settled_module, CUTOUT_LEAN)),
             layouts,
             buffers,
             ("Settled terrain cutout", "Settled terrain cutout (flat)"),
-            ("vs_terrain_cutout", "vs_terrain_flat_cutout"),
-            "fs_cutout_static",
         );
         Some(Self {
             settled: settled_opaque.zip(settled_cutout).map(<[Pass; 2]>::from),
             settled_on: true,
             static_cutout: Pass::new(
-                terrain,
+                (terrain, CUTOUT_STATIC),
+                lean.cutout.then_some((&lean_module, CUTOUT_LEAN)),
                 layouts,
                 buffers,
                 (
                     "Terrain cutout without fades",
                     "Terrain cutout without fades (flat)",
                 ),
-                ("vs_terrain_cutout", "vs_terrain_flat_cutout"),
-                "fs_cutout_static",
             )?,
             static_cutout_on: true,
+            lean_opaque: if lean.opaque {
+                Pass::build(
+                    &lean_module,
+                    OPAQUE_LEAN,
+                    layouts,
+                    buffers,
+                    ("Terrain opaque (lean)", "Terrain opaque (lean, flat)"),
+                )
+            } else {
+                None
+            },
         })
     }
 
     /// The passes `origins`, the frame's instances, and `filtering`,
     /// `Options.textureFiltering`, allow.
     pub fn for_frame(&self, origins: &[[f32; 4]], filtering: u32) -> FramePasses<'_> {
+        // The opaque pass has no fade to know: the lean one serves every frame.
+        let lean_opaque = self.lean_opaque.as_ref();
         if !self.static_cutout_on || !origins.iter().all(|origin| unfaded(origin[3])) {
-            return FramePasses::default();
+            return FramePasses {
+                opaque: lean_opaque,
+                cutout: None,
+            };
         }
         let settled = self
             .settled
@@ -173,11 +265,21 @@ impl SolidPaths {
                 cutout: Some(cutout),
             },
             None => FramePasses {
-                opaque: None,
+                opaque: lean_opaque,
                 cutout: Some(&self.static_cutout),
             },
         }
     }
+}
+
+/// The constants of a lean pass: `constants` and no HDR lighting.
+fn lean_constants<'a>(constants: &[(&'a str, f64)], settled: bool) -> Vec<(&'a str, f64)> {
+    let mut out = constants.to_vec();
+    out.push(("HDR_LIGHTING", 0.0));
+    if settled {
+        out.push(("SETTLED_TERRAIN", 1.0));
+    }
+    out
 }
 
 /// `Options.textureFiltering`'s RGSS, which settled terrain doesn't take.

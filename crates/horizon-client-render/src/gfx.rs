@@ -156,8 +156,8 @@ fn terrain_experiments(mut source: String) -> String {
         ),
         (
             "fsnohdr",
-            "if HDR_LIGHTING && globals.hdr_light.z != 0.0 {",
-            "if false {",
+            "    if HDR_LIGHTING {\n        // Fog turns",
+            "    if false {\n        // Fog turns",
         ),
         (
             "fsnooverlay",
@@ -186,13 +186,13 @@ fn terrain_experiments(mut source: String) -> String {
         ),
         (
             "cutoutcheap",
-            "    if texel.a < 0.5 && (wire.c.x & 0x8000u) == 0u { discard; }\n",
-            "    if texel.a < 0.5 && (wire.c.x & 0x8000u) == 0u { discard; }\n    if true { return vec4(wire.a.rgb, 1.0); }\n",
+            "    if alpha < 0.5 && (wire.c.x & 0x8000u) == 0u { discard; }\n",
+            "    if alpha < 0.5 && (wire.c.x & 0x8000u) == 0u { discard; }\n    if true { return vec4(wire.a.rgb, 1.0); }\n",
         ),
         (
             "opaquecheap",
-            "    in.emissive_layer = wire.c.y;\n    let texel = sprite(in.uv, in.layer & 0x7fffu);",
-            "    in.emissive_layer = wire.c.y;\n    if true { return vec4(in.color.rgb, 1.0); }\n    let texel = sprite(in.uv, in.layer & 0x7fffu);",
+            "    let in = from_opaque_wire(wire);\n    let texel = sprite(in.uv, in.layer & 0x7fffu);",
+            "    let in = from_opaque_wire(wire);\n    if true { return vec4(in.color.rgb, 1.0); }\n    let texel = sprite(in.uv, in.layer & 0x7fffu);",
         ),
         ("clip", "w.a = o.color;", "w.a = vec4(1.0);"),
         (
@@ -4449,6 +4449,7 @@ impl Renderer {
                     &layout,
                     flat.as_ref().map(|flat| &flat.draw_layout),
                     &terrain_buffers,
+                    quest_quality::lean_terrain(&adapter.get_info()),
                 )
             })
             .flatten()

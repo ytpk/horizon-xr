@@ -48,6 +48,20 @@ pub(super) fn env_switch(env: &str, default: bool) -> bool {
     }
 }
 
+/// The solid passes that draw through terrain.wgsl's lean varyings (`solid_paths::Lean`): on a
+/// headset's Qualcomm Vulkan GPU, the picture the same, on unless switched off.
+/// `HORIZON_QUEST_LEAN_OPAQUE=0` and `HORIZON_QUEST_LEAN_CUTOUT=0` (`launch.txt` lines) keep the
+/// full varyings of the opaque and the cutout pass. The cutout pass takes them in the frames
+/// that draw it without fades (`solid_paths`).
+pub(super) fn lean_terrain(info: &wgpu::AdapterInfo) -> super::solid_paths::Lean {
+    let gpu =
+        headset::installed() && info.backend == wgpu::Backend::Vulkan && info.vendor == 0x5143;
+    super::solid_paths::Lean {
+        opaque: gpu && env_switch("HORIZON_QUEST_LEAN_OPAQUE", true),
+        cutout: gpu && env_switch("HORIZON_QUEST_LEAN_CUTOUT", true),
+    }
+}
+
 /// A Quest rendering switch (the VR settings' Experiments page): the environment variable
 /// `env` set to `1` or `0` decides, else the VR setting `setting`. Read when the renderer
 /// is made, so a change takes a restart.
