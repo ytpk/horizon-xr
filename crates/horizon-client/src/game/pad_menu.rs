@@ -1587,6 +1587,8 @@ impl Game<'_> {
                 }
                 return;
             }
+            // No laser on the panel: no arrow stuck where the cursor was left.
+            return;
         }
         let (x, y) = if self.headset_pointing() {
             self.cursor

@@ -113,30 +113,20 @@ impl SpaceWarp {
             .hand
             .len()
             .saturating_sub(frame.hand_gui_quads as usize * 4);
+        // Hands and pointers have no stable ids or order (an item swapped, a face culled, a
+        // pointer shown): their quads are followed one by one.
         self.hands
-            .track(&frame.hand[..gui_start], &[(0, 1)], frame.camera);
-        self.gui
-            .track(&frame.hand[gui_start..], &[(0, 1)], frame.camera);
+            .track_quads(&frame.hand[..gui_start], frame.camera);
+        self.gui.track_quads(&frame.hand[gui_start..], frame.camera);
         self.staged.clear();
         self.staged.extend_from_slice(self.entities.staged());
         self.staged.extend_from_slice(self.hands.staged());
-        if self.gui.staged().is_empty() {
-            // New/topology-changing overlay geometry still needs its own depth now.
-            for quad in frame.hand[gui_start..].as_chunks::<4>().0 {
-                self.staged.extend([0, 1, 2, 0, 2, 3].map(|i| MotionVertex {
-                    position: quad[i].pos,
-                    previous: quad[i].pos,
-                    uv: quad[i].uv,
-                    translucent: 2,
-                }));
-            }
-        } else {
-            self.staged
-                .extend(self.gui.staged().iter().map(|v| MotionVertex {
-                    translucent: v.translucent | 2,
-                    ..*v
-                }));
-        }
+        // Every overlay quad is staged (a new one still, for its own depth).
+        self.staged
+            .extend(self.gui.staged().iter().map(|v| MotionVertex {
+                translucent: v.translucent | 2,
+                ..*v
+            }));
         let bytes = bytemuck::cast_slice(&self.staged);
         if bytes.len() as u64 > self.vertices.size() {
             self.vertices = vertex_buffer(device, (bytes.len() as u64).next_power_of_two());

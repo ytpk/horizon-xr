@@ -346,6 +346,33 @@ Report: clicks work now; no sound at all; the cursor looks fixed at the panel's 
   37, client-render `headset|quest` 14: pass; `cargo check --target aarch64-linux-android -p horizon-quest -p horizon-android`
   passes. APK on the same JRE and bundle (research-lock equal), `launch.txt` untouched.
 
+### Ninth pass: SpaceWarp hands, no centre crosshair (user's headset test of the eighth APK)
+Report: with Application SpaceWarp on the hands smear; a screen-space crosshair stays at the centre of the view.
+- Hands. The port of `spacewarp.rs`, `gfx/frame_gen/motion.rs` and the shader is byte-equal to `public` (checked by diff), and
+  the hands do reach `Frame::hand` and the world depth. What the port inherited is that the hands' motion came from
+  `MotionTracker::track` keyed on ONE id for all of them and needing the same count, UVs and layers as last frame: any change of
+  the set (a held item swapped, a face culled, a pointer or the other hand shown, the activation geometry) gave the hands no
+  motion vectors for that frame, and they were extrapolated with the world's camera-only motion. Starling's headset builds
+  the hands every frame from the controllers (`headset_hand_frames`, `headset_arm`, `submit_item_world`), so the set is not
+  steady. Fix: `MotionTracker::track_quads` (`frame_gen/motion.rs`) follows each hand quad by itself: the nearest quad of last
+  frame with the same texture and layer within 1 block (`QUAD_REACH`), its previous place moved with the camera; a quad
+  with no match is still staged standing (camera-only). `spacewarp.rs` `prepare` uses it for the world hands and for the
+  GUI hands/pointers (which are all staged now, with the overlay flag, so the old fallback loop is gone). Depth is
+  unchanged (hands are depth-tested into the world depth, the GUI hands write their own).
+  This is a fix of a weakness found by reading, not seen on the device: if the hands still smear, the next thing to
+  look at is `Quest world rendering`/`Application SpaceWarp compatibility` in the log.
+- Tests (`motion.rs`): `hand_quads_are_followed_when_the_set_changes` (a moved quad has its own non-zero motion, a new one
+  none, order and set changed), `a_hand_still_in_the_world_has_no_motion_of_its_own` (camera-only motion for what stands
+  still, own motion for what moves with the camera). The existing GPU tests (`moving_objects_override_camera_vectors_and_respect_occlusion`,
+  camera motion per eye) cover the shader and pass.
+- Crosshair. Cause: `Game::hud` drew `hud_layout::crosshair` whenever the camera was first person; `public` also requires
+  `!headset::active()` and the port dropped it. Fix: `game.rs` (the crosshair condition) has `&& !horizon_client::headset::active()`;
+  the per-controller crosshair (`hand_crosshair`, Visor's `HandEffectCrosshair`) is kept. In menus `draw_pad_cursor` drew
+  the arrow at `cursor` when no laser touched the panel: on a headset it now draws nothing then (the lasers' arrows stay).
+- Checks: fmt; clippy `-D warnings --all-targets` horizon-client-render and horizon-client clean; tests client-render --lib
+  1413 pass, 2 fail (the known `moves_the_view_halfway_with_the_camera`, `moves_what_has_its_own_motion_vectors_halfway`),
+  horizon-client --lib 800, horizon-xr 25; `cargo check --target aarch64-linux-android -p horizon-quest -p horizon-android` passes.
+
 ## Remaining work
 1. Test on the headset: stereo/multiview, SpaceWarp, room, controls, then A/B the switches (including
    `HORIZON_QUEST_LEAN_OPAQUE`, `HORIZON_QUEST_LEAN_CUTOUT`); check the on-device prepare and the download (Range resume).

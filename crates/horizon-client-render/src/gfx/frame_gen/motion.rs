@@ -39,6 +39,10 @@ pub struct ObjectMotion {
     target: Option<([u32; 2], wgpu::TextureView)>,
 }
 
+/// How far (blocks) a quad of [`MotionTracker::track_quads`] may move in a frame and still be
+/// the same quad: a hand swung hard moves centimetres a frame, a teleport much more.
+const QUAD_REACH: f32 = 1.0;
+
 /// CPU geometry history, shared by frame interpolation and OpenXR SpaceWarp.
 #[derive(Default)]
 pub(crate) struct MotionTracker {
@@ -46,6 +50,8 @@ pub(crate) struct MotionTracker {
     staged: Vec<MotionVertex>,
     /// Last frame's vertices by entity, and its camera.
     tracked: HashMap<u64, Vec<Vertex>>,
+    /// Last frame's quads of [`Self::track_quads`].
+    quads: Vec<Vertex>,
     camera: DVec3,
 }
 impl MotionTracker {
@@ -56,6 +62,59 @@ impl MotionTracker {
     /// Forget last frame's entities: the next frame has no motion of its own.
     pub fn reset(&mut self) {
         self.tracked.clear();
+        self.quads.clear();
+    }
+
+    /// Like [`Self::track`] for geometry with no stable identity or order, a headset's hands:
+    /// each quad of `verts` (relative to `camera`) is matched to the nearest of last frame's
+    /// quads with the same texture and layer, within [`QUAD_REACH`], whatever else changed
+    /// (an item swapped, a pointer shown, a face culled). Every quad is staged: a matched one
+    /// with its own motion, a new one standing still (`previous` is its own position moved
+    /// with the camera, so it gets the camera's motion alone).
+    pub fn track_quads(&mut self, verts: &[Vertex], camera: DVec3) {
+        self.staged.clear();
+        let shift = (self.camera - camera).as_vec3();
+        let key = |q: &[Vertex]| {
+            (
+                q[0].layer,
+                [0, 1, 2, 3].map(|i| [q[i].uv[0].to_bits(), q[i].uv[1].to_bits()]),
+            )
+        };
+        let centre = |q: &[Vertex]| q.iter().map(|v| Vec3::from(v.pos)).sum::<Vec3>() * 0.25;
+        let mut before: HashMap<_, Vec<(usize, Vec3)>> = HashMap::new();
+        for (i, q) in self.quads.as_chunks::<4>().0.iter().enumerate() {
+            before
+                .entry(key(q))
+                .or_default()
+                .push((i, centre(q) + shift));
+        }
+        for q in verts.as_chunks::<4>().0 {
+            let at = centre(q);
+            let old = before.get_mut(&key(q)).and_then(|list| {
+                let (n, (_, then)) = list
+                    .iter()
+                    .enumerate()
+                    .min_by(|a, b| a.1.1.distance(at).total_cmp(&b.1.1.distance(at)))?;
+                (then.distance(at) <= QUAD_REACH).then(|| list.swap_remove(n).0)
+            });
+            let translucent = u32::from(matches!(
+                q[0].layer,
+                super::super::entity_batch::TRANSLUCENT_ITEM_OVERLAY
+                    | super::super::entity_batch::TRANSLUCENT_GLINT_ITEM_OVERLAY
+            ));
+            let pair = |i: usize| MotionVertex {
+                position: q[i].pos,
+                previous: old.map_or(q[i].pos, |o| {
+                    (Vec3::from(self.quads[o * 4 + i].pos) + shift).into()
+                }),
+                uv: q[i].uv,
+                translucent,
+            };
+            self.staged.extend([0, 1, 2, 0, 2, 3].map(pair));
+        }
+        self.quads.clear();
+        self.quads.extend_from_slice(verts);
+        self.camera = camera;
     }
 
     /// Match this frame's `entities` (relative to `camera`) to last frame's by the ids
@@ -316,5 +375,52 @@ mod tests {
         assert_eq!(v.position, [-1.0, 0.0, -5.0]);
         assert_eq!(v.previous, [-2.0, 0.0, -5.0]);
         assert_eq!(motion.tracked.len(), 3);
+    }
+
+    fn quads(x: f32, uvs: &[f32]) -> Vec<Vertex> {
+        uvs.iter().flat_map(|&u| quad(x, u)).collect()
+    }
+
+    /// A hand quad is followed through the frames even when the set around it changes: a
+    /// moved one gets its own motion, a new one none.
+    #[test]
+    fn hand_quads_are_followed_when_the_set_changes() {
+        let mut motion = MotionTracker::default();
+        motion.track_quads(&quads(0.0, &[0.0, 0.5]), DVec3::ZERO);
+        // The first quad moved 0.25 right, the second is gone, a third is new, order differs.
+        let mut hands = quads(0.0, &[0.75]);
+        hands.extend(quads(0.25, &[0.0]));
+        motion.track_quads(&hands, DVec3::ZERO);
+        let own = |v: &MotionVertex| Vec3::from(v.position) - Vec3::from(v.previous);
+        assert_eq!(motion.staged.len(), 12);
+        assert!(motion.staged[..6].iter().all(|v| own(v) == Vec3::ZERO));
+        assert!(
+            motion.staged[6..]
+                .iter()
+                .all(|v| own(v) == Vec3::new(0.25, 0.0, 0.0))
+        );
+    }
+
+    /// What stands still in the world has no motion of its own, however the camera moves: its
+    /// `previous` is where it is now; a hand that moved with the camera has its own.
+    #[test]
+    fn a_hand_still_in_the_world_has_no_motion_of_its_own() {
+        let mut motion = MotionTracker::default();
+        motion.track_quads(&quads(0.0, &[0.0]), DVec3::ZERO);
+        // The camera went 0.1 right; the quad stayed, so it is 0.1 left of the camera now.
+        motion.track_quads(&quads(-0.1, &[0.0]), DVec3::new(0.1, 0.0, 0.0));
+        assert_eq!(motion.staged.len(), 6);
+        for v in &motion.staged {
+            assert!((Vec3::from(v.previous) - Vec3::from(v.position)).length() < 1e-6);
+        }
+        // Now the quad is carried along with the camera: its own motion is the camera's.
+        motion.track_quads(&quads(-0.1, &[0.0]), DVec3::new(0.2, 0.0, 0.0));
+        for v in &motion.staged {
+            assert!(
+                (Vec3::from(v.position) - Vec3::from(v.previous) - Vec3::new(0.1, 0.0, 0.0))
+                    .length()
+                    < 1e-6
+            );
+        }
     }
 }
