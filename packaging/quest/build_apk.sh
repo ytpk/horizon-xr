@@ -114,6 +114,25 @@ if [ "${NO_JRE:-0}" != 1 ]; then
         mkdir -p "$stage/assets"; cp "$OUT/assets/$asset" "$stage/assets/"
         assets=(assets)
     done
+    # A bundle built before an exporter was added prepares nothing on the headset (it fails with
+    # "<exporter>.java: No such file"): every exporter this checkout's preparer runs must be in it,
+    # as a class and as the source its stamps hash.
+    parity=dev/horizonlab/parity
+    listing=$(unzip -Z1 "$OUT/assets/horizon-bundle.zip")
+    stale=
+    for side in SERVER CLIENT; do
+        for main in $(sed -n "/^const $side: &\[&str\] = &\[/,/^\];/s/^ *\"\([A-Za-z]*\)\",$/\1/p" \
+            "$root/crates/horizon-prepare/src/exporters.rs"); do
+            lower=$(tr '[:upper:]' '[:lower:]' <<<"$side")
+            grep -qxF "exporters/$lower/$parity/$main.class" <<<"$listing" || stale+=" $lower/$main.class"
+            grep -qxF "mods/horizon/src/test/java/$parity/$main.java" <<<"$listing" || stale+=" $main.java"
+        done
+    done
+    if [ -n "$stale" ]; then
+        echo "$OUT/assets/horizon-bundle.zip is older than the preparer, missing:$stale" >&2
+        echo "run packaging/quest/build_bundle.sh (OUT=$OUT)" >&2
+        exit 1
+    fi
 fi
 
 echo "== packaging"
