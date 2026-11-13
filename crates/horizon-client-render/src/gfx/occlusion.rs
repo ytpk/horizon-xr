@@ -558,6 +558,9 @@ impl Worker {
         std::thread::Builder::new()
             .name("occlusion".into())
             .spawn(move || {
+                if let Err(e) = horizon_threads::cores::pin_background() {
+                    log::warn!("Occlusion worker affinity left as is ({e})");
+                }
                 let mut columns = Columns::new(min_y, sections);
                 let (mut vis, mut queue) = (Vec::new(), VecDeque::new());
                 while let Ok(mut job) = job_rx.recv() {
