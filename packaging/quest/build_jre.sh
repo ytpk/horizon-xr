@@ -31,7 +31,7 @@ TEMURIN_URL=https://github.com/adoptium/temurin25-binaries/releases/download/jdk
 TEMURIN_SHA256=68982529869257d0ee6b824ec5aa270ff8b118bb438670da0b97ebdab178d7fb
 # name|path under $TERMUX|sha256
 DEBS=(
-  "openjdk-25.deb|o/openjdk-25/openjdk-25_25.0.5-1_aarch64.deb|bb437c9ca350624f83410fd3b899c2ef96fbc15345d1ec5a6d2b805f95b72a89"
+  "openjdk-25.deb|o/openjdk-25/openjdk-25_25.0.5-2_aarch64.deb|a3253f29515c50a67ad5296c97b8dea91440d74f90c0cf2171d27b9d367992ff"
   "libandroid-spawn.deb|liba/libandroid-spawn/libandroid-spawn_0.3_aarch64.deb|7988fa788ef48ab5da9660443905a2e4099ac36221739d72f5c39acc644b4d1c"
   "zlib.deb|z/zlib/zlib_1.4_aarch64.deb|e3027565ae50bcd8ba5113c988b589754ae192c9cc3e6afbe3e4ed7c06b2598e"
 )

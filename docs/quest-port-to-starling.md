@@ -149,14 +149,34 @@ Ours, opt-in: `HORIZON_QUEST_SPLIT_STREAMS`, `_MERGE_FACES`, `_AGGRESSIVE_MESH`,
 - `tools/quest_room_sim.py` and harness tests of the fork not ported.
 
 ### APK
-`build_jre.sh` fails: the pinned Termux openjdk deb returns 404, so `horizon-jre.zip` was copied from the
-source worktree's build (it holds no code of ours). `build_bundle.sh` fails (`Manifest checksum changed`: Starling's
-prepare state in `.local` differs), so `horizon-bundle.zip` was also copied; its research-lock differs from Starling's:
-rebuild it after `horizon-prepare --prepare` on this tree.
+Third pass (2026-11-13). Both assets are now made from this tree:
+- `horizon-bundle.zip`: `packaging/quest/build_bundle.sh` with Starling's `horizon-prepare` and this worktree's own
+  `.local/minecraft/26.3` (the jars and libraries copied from the source worktree's import, the version JSON
+  `manifest.json` fetched from Mojang's `piston-meta` by its sha1 `11f1aefe...` that Starling's lock accepts; the source
+  tree's `manifest.json` has the republished sha1 `80608ff6...`, which Starling's lock does not, hence the earlier
+  "Manifest checksum changed"). The bundle's `research-lock.json` is byte-equal to this tree's. `build_apk.sh`'s guard
+  (every SERVER/CLIENT exporter of `horizon-prepare` as a class and as a source) passed. The `.local` symlink to the
+  source worktree is gone.
+- `horizon-jre.zip`: `build_jre.sh` rebuilt, with the Termux URL moved to `openjdk-25_25.0.5-2_aarch64.deb`
+  (sha256 `a3253f29...`); jlinked OpenJDK 25, 30 MB zipped.
+- APK: `OUT=target/quest packaging/quest/build_apk.sh` (profile `quest`): `target/quest/horizon-quest.apk`, 126 MB,
+  sha256 `59d48a67da9c5049e0a2d2333402ef4f3e7e25a498a47a58a92cb50bc9102b15`. Not installed on any headset.
+- A stale-mtime trap: files copied from the source worktree keep old mtimes, and `cargo test -p horizon-client-input`
+  failed with "cannot find `refresh` in `horizon_vivecraft`" until `cargo clean -p horizon-vivecraft`.
+
+### Tests and checks (third pass)
+- `cargo fmt --check`, `cargo clippy -D warnings --all-targets` on horizon-xr, -vivecraft, -visor, -client-input, -threads,
+  -quest-launcher, -account, -fetch, -jvm, -client-render, -client: clean.
+- Tests: xr 25, vivecraft 144, visor 123+2, client-input 90, threads 30, quest-launcher 36, account 7, fetch 10, jvm 3,
+  horizon-client lib 792 (28 of them quest/visor/vivecraft/headset/vr): all pass.
+- `horizon-client-render --lib`: 1407 pass, 2 fail: `frame_gen::interpolation::tests::moves_the_view_halfway_with_the_camera` and
+  `moves_what_has_its_own_motion_vectors_halfway` (software GPU numerics, 0.28010 vs bounds). The same two fail on
+  Starling's base c4e44c1e0d: not ours. The SpaceWarp GPU tests pass.
+- `cargo check --target aarch64-linux-android -p horizon-quest -p horizon-android`: passes.
 
 ## Remaining work
 1. Test on the headset: stereo/multiview, SpaceWarp, room, controls, then A/B the switches above.
-2. Rebuild the JRE (new Termux URL) and the exporter bundle from Starling's tree.
+2. (done 2026-11-13: JRE and bundle rebuilt from this tree, see APK.) Check on the headset that the on-device prepare passes.
 3. Lean varyings after porting the `HDR_LIGHTING` override; missing tests above.
 4. Merge provisioning with starling-account if wanted.
 5. Translations of new keys in the other languages.
