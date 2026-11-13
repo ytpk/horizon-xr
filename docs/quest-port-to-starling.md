@@ -76,6 +76,35 @@ Decision: PORT / SKIP (overlap or upstream) / MERGE.
 8. `horizon-quest`, `horizon-quest-launcher`, `horizon-account`, `horizon-fetch`, `horizon-jvm`.
 9. `packaging/quest`, docs, language keys, notices.
 
-## What happened
+## What happened (2026-11-13)
 
-(filled in as the work goes on)
+Branch `quest-starling`, local commits only, nothing pushed. Status per area:
+
+| Area | Result | Notes |
+|---|---|---|
+| Vendored `wgpu-core`, XR creator hooks in `wgpu-hal` | PORTED | hal hooks apply cleanly over Starling's own hal patch (relaxed precision etc. kept) |
+| `horizon-threads` P/E affinity | PORTED | hooked into Starling's `worker_count()` (it has no `default_workers`); `pin_background` call sites in assets.rs / occlusion.rs not added yet |
+| `horizon-vivecraft`, `horizon-visor` | PORTED | whole; 264 tests pass |
+| `horizon-client-input`: headset, headset_display, room, vr_bindings | PORTED | `embed.rs` and the arboard/Android clipboard stub SKIPPED (Starling's `horizon_client::android` has both; a thin `android::embed` shim was added for the Quest app); `held.rs` Room source SKIPPED (Starling has no `held.rs`, the room crouch needs another hook) |
+| Render: `gfx::headset` trait, `vr_options`, `vr_profile`, `visor_art` + Visor textures, `Settings::vr` | PORTED | compiles, clippy clean |
+| Render: headset frame path (`quest_render`, `multiview`, `room_*`, `menu_scene`, `vis_mask`, `headset_sim`, stereo changes in `gfx.rs`, `reuse.rs`, `cull.rs`, `translucency.rs`, `stars`, `panorama`) | NOT WIRED | files copied to `crates/horizon-client-render/quest_pending/`, the gfx.rs diff to `docs/quest-port-pending/gfx.rs.quest.diff`. They are written against upstream's 11-10 renderer (`fluid.rs`, `terrain_model.rs`, `surface_setup.rs`, `SolidPipeline`, `Frame::world_primitives`, `Renderer::output`, `visbuf`...) that Starling's 11-02-based gfx.rs does not have. Needs a real adaptation (about 90 hunks of gfx.rs) or Starling's next upstream sync |
+| Adreno terrain work (lean varyings, emissive table, split vertex streams, face merging, aggressive merge, plant density/shrink, flat forced) | NOT PORTED | same blocker (they sit in the same gfx.rs/mesher hunks); partly overlaps Starling (solid terrain without discard, flat draws, late sky); the files are in `quest_pending/` |
+| Game integration (`game/vr*.rs`, `headset*.rs`, `visor_*`, `vivecraft_*`, `quest_room*`, hooks in game.rs and 40 split-out game files) | NOT PORTED | Starling's game.rs is the monolith from before upstream's split (no `play_keys.rs`, `use_hand.rs`, `frame_geometry.rs`, `held_items.rs`...); the VR logic would have to be re-hooked by hand |
+| `horizon-quest` (NativeActivity app) | PORTED | `cargo check -p horizon-quest --target aarch64-linux-android` passes; reaches the game via `horizon_client::android::embed` |
+| `horizon-quest-launcher`, `horizon-account` (Prismarine sign-in), `horizon-fetch`, `horizon-jvm` | PORTED | 56 tests pass. Overlap with Starling (`starling-account` fetch + Java runtime, `java_launcher.c`, `preparer*.rs`) is NOT merged yet: both stacks exist side by side, the Quest app uses ours. Replacing `QuestProvisioner` by starling-account is the planned merge |
+| Language keys (visor.*, vivecraft.*, room) | PORTED | en_us +1426, ru_ru +1295 keys, by key, Starling's own untouched; no other language got them |
+| `packaging/quest`, `build-apk.*`, notices, docs | PORTED | see APK below |
+| Vulkan pipeline cache, section-walk sort, targeted upstream Adreno picks | SKIPPED | upstream-origin |
+
+Known breakages / caveats
+- The Quest APK builds but has no VR rendering or VR controls: `gfx::headset` is never drawn to and the game logic knows nothing of the headset. It would start Starling's phone game windowless. Do not install it expecting VR.
+- Starling's workspace MSRV is 1.85: `is_multiple_of` was replaced in three places.
+- `horizon-prepare::Inputs` of Starling's base has no `prism_dir`; the launcher no longer passes it.
+- Cargo.lock grew with the Quest crates' dependencies.
+
+## Remaining work
+1. Adapt gfx.rs (stereo views, multiview, `quest_render`, room and menu scenes) to Starling's renderer, or merge Starling with upstream first; then move `quest_pending/*` back into `src/gfx/`.
+2. Game integration: `game/vr.rs`, `headset*.rs`, visor and vivecraft glue, `quest_room`, hooks in Starling's monolithic game.rs, a Room crouch source.
+3. Adreno terrain switches (after 1), keeping Starling's `adreno.rs` / `solid_paths.rs` where they overlap.
+4. Merge the provisioning stacks (starling-account, java_launcher.c) with horizon-quest-launcher.
+5. Translations of the new keys in the other languages; tests/ and tools/ of the Quest fork (`tools/quest_room_sim.py`, harness tests) were not ported.

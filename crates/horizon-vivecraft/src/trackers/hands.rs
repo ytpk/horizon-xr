@@ -330,7 +330,7 @@ impl BowTracker {
                     out.haptics[bow_hand] = Some(strength);
                 }
             }
-            if self.is_charged(input.now_ms) && self.hap_counter.is_multiple_of(4) {
+            if self.is_charged(input.now_ms) && self.hap_counter % 4 == 0 {
                 out.haptics[bow_hand] = Some(200);
             }
             self.last_hap_step = step;

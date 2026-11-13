@@ -6,6 +6,8 @@
 //!
 //! Installed once, before the first renderer opens its device; nothing changes
 //! for a flat screen when none is.
+// Not driven by the renderer yet: the headset frame path is pending (docs/quest-port-to-starling.md).
+#![allow(dead_code)]
 use super::View;
 use glam::{Quat, Vec3};
 use std::sync::Mutex;

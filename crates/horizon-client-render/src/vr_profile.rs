@@ -140,9 +140,10 @@ pub fn refresh() {
 
 /// [`refresh`] about once a second at 90 frames a second: the setting may change in the menu,
 /// and reading it every frame buys nothing.
+#[allow(clippy::manual_is_multiple_of)] // the workspace MSRV (1.85) has no is_multiple_of
 pub fn refresh_often() {
     static CALLS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-    if CALLS.fetch_add(1, Ordering::Relaxed).is_multiple_of(90) {
+    if CALLS.fetch_add(1, Ordering::Relaxed) % 90 == 0 {
         refresh();
     }
 }

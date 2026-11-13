@@ -707,13 +707,14 @@ impl Shared {
         }
     }
 
+    #[allow(clippy::manual_is_multiple_of)] // Starling's workspace MSRV (1.85) has no is_multiple_of
     fn download(self: &Arc<Self>, epoch: u64, stage: Stage) {
         let languages = self.with(epoch, |core| self.languages(core));
         let Some(languages) = languages else { return };
         // The downloader's "N of M files" every second would fill the log: one line in ten.
         let lines = std::sync::atomic::AtomicUsize::new(0);
         let log = |line: String| {
-            if !line.contains(" of ") || lines.fetch_add(1, SeqCst).is_multiple_of(10) {
+            if !line.contains(" of ") || lines.fetch_add(1, SeqCst) % 10 == 0 {
                 log::info!("Horizon room: {line}");
             }
         };
