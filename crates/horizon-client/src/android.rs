@@ -1383,3 +1383,18 @@ pub fn open_recovery() {
             .map(drop)
     });
 }
+
+/// What an embedder that is not Starling's own activity (the Meta Quest app, `horizon-quest`)
+/// hands the game before `entry::main_with`: the command line and the activity of its
+/// `android_main`. The same two values `main` above sets for the phone.
+pub mod embed {
+    use super::{ARGS, APP, AndroidApp};
+    /// The game's command line from now on, in place of `horizon-args.txt`'s (once).
+    pub fn set_args(args: Vec<String>) {
+        let _ = ARGS.set(args);
+    }
+    /// The activity the game's event loop runs in (once, from `android_main`).
+    pub fn set_android_app(app: AndroidApp) {
+        let _ = APP.set(app);
+    }
+}

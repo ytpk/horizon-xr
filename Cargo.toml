@@ -9,6 +9,8 @@ members = [
     "crates/horizon-hdr",
     # OpenXR (Meta Quest): the session, swapchains and controllers behind gfx::headset.
     "crates/horizon-xr",
+    # The Meta Quest app (packaging/quest/): android_main around the game and horizon-xr.
+    "crates/horizon-quest",
     "crates/horizon-world",
     "crates/horizon-client",
     # Starling: the game as a NativeActivity library; empty on other targets.
@@ -33,6 +35,10 @@ members = [
     "crates/horizon-vivecraft",
     "crates/horizon-visor",
     "crates/horizon-theme",
+    "crates/horizon-account",
+    "crates/horizon-fetch",
+    "crates/horizon-jvm",
+    "crates/horizon-quest-launcher",
     "crates/horizon-prepare",
     "crates/horizon-telemetry",
     "crates/horizon-bench",
