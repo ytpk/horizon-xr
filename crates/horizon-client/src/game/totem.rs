@@ -20,7 +20,10 @@ impl Game<'_> {
     /// player once a tick, a server's player for each of its turns.
     pub(super) fn update_totem_ready(&mut self) {
         let ready = self.held().is_some_and(|s| &*s.item == TOTEM)
-            || self.offhand.as_ref().is_some_and(|s| &*s.item == TOTEM);
+            || self
+                .offhand_cell()
+                .as_ref()
+                .is_some_and(|s| &*s.item == TOTEM);
         if let Some(p) = self.player.as_mut() {
             p.health.totem_ready = ready;
         }
@@ -51,7 +54,7 @@ impl Game<'_> {
         };
         let cell = match slot {
             Some(i) => &mut self.inventory[i],
-            None => &mut self.offhand,
+            None => self.offhand_cell_mut(),
         };
         if let Some(s) = cell.as_mut() {
             s.count -= 1;

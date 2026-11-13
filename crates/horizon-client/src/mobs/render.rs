@@ -1152,6 +1152,9 @@ fn enderman_render_offset(m: &Mob, alpha: f32) -> glam::DVec3 {
 /// under a pose stack, as `SpawnerRenderer` draws the mob inside a spawner).
 pub fn base_transform_at(m: &Mob, alpha: f32, origin: glam::Mat4) -> glam::Mat4 {
     let mut body = m.previous_body_yaw + wrap(m.body_yaw - m.previous_body_yaw) * alpha;
+    if let Some(vr) = &m.extra.vr_body {
+        body = vr.body_yaw_degrees(alpha);
+    }
     if shaking(m) {
         // LivingEntityRenderer.setupRotations: a rapid wobble.
         let ticks = (m.age as f32 + alpha).floor();

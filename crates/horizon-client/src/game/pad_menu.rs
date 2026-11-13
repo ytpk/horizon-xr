@@ -1566,15 +1566,21 @@ impl Game<'_> {
             ui.finish();
             return;
         }
-        let Some((x, y)) = self.pad.menu.pos else {
-            return;
+        // A headset's pointer is the mouse, which no system pointer shows there.
+        let (x, y) = if self.headset_pointing() {
+            self.cursor
+        } else {
+            let Some(at) = self.pad.menu.pos else {
+                return;
+            };
+            if self.pad_focus_mode()
+                && let Some(focus) = self.pad.menu.focus
+            {
+                self.draw_pad_focus(batch, focus);
+                return;
+            }
+            at
         };
-        if self.pad_focus_mode()
-            && let Some(focus) = self.pad.menu.focus
-        {
-            self.draw_pad_focus(batch, focus);
-            return;
-        }
         // An arrow, outlined, pointing up-left at (x, y).
         let atlas = &self.gui.atlas;
         let (x, y) = (x.floor(), y.floor());

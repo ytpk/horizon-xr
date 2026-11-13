@@ -442,6 +442,10 @@ impl Game<'_> {
         }
         let strafe = f32::from(u8::from(keys.left)) - f32::from(u8::from(keys.right));
         let forward = f32::from(u8::from(keys.forward)) - f32::from(u8::from(keys.backward));
+        // A VR rider steers with its look (Vivecraft's mount control), as `tickRidden` reads it.
+        let (yaw, pitch) = self
+            .vr_mount_look(keys.forward)
+            .unwrap_or((self.yaw, self.pitch));
         let m = &mut self.mobs[i];
         if jump > 0.0 && equine::is_equine(m.species()) {
             // LocalPlayer.aiStep also runs `onPlayerJump` here: the mount slides
@@ -453,8 +457,8 @@ impl Game<'_> {
         m.rider = Some(equine::Rider {
             strafe,
             forward,
-            yaw: self.yaw,
-            pitch: self.pitch,
+            yaw,
+            pitch,
             jump: if jump > 0.0 { jump } else { pending },
             steer: false,
             sprint: keys.sprint,

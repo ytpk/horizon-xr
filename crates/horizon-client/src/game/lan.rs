@@ -2046,6 +2046,7 @@ impl Game<'_> {
                 }
             }
         }
+        self.vr_flush_headshots(&host);
         Some(host)
     }
 

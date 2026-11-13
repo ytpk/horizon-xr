@@ -3597,6 +3597,7 @@ impl Game<'_> {
                 self.remote_chat_login();
             }
             C::Respawn(p) => {
+                self.vr_respawn();
                 // A new player, without effects (the server sends them
                 // again) and with no item in use.
                 self.potions.effects.clear();
@@ -6494,7 +6495,7 @@ impl Game<'_> {
             }
             return Ok(());
         }
-        let stick = self.pad_move();
+        let stick = self.vr_free_move_stick(self.pad_move());
         if self.player.is_none() {
             return Ok(());
         }
@@ -8127,7 +8128,8 @@ impl Game<'_> {
                 // RespawnAnchorBlock.useItemOn charges an anchor with its
                 // glowstone, SUCCESS.
                 let sneaking = self.keys.contains(&KeyCode::ShiftLeft);
-                let hands_full = self.stack_in(self.selected).is_some() || self.offhand.is_some();
+                let hands_full =
+                    self.stack_in(self.selected).is_some() || self.offhand_item().is_some();
                 let charges =
                     !(sneaking && hands_full) && self.anchor_takes(hit.pos, held.as_ref());
                 let result = if charges {
@@ -8163,7 +8165,8 @@ impl Game<'_> {
             // candle cake (CandleCakeBlock.useItemOn).
             if hand == Hand::Main && !spectator {
                 let sneaking = self.keys.contains(&KeyCode::ShiftLeft);
-                let hands_full = self.stack_in(self.selected).is_some() || self.offhand.is_some();
+                let hands_full =
+                    self.stack_in(self.selected).is_some() || self.offhand_item().is_some();
                 if !(sneaking && hands_full) {
                     self.redstone_ore_particles(hit.pos);
                     let state = self.world.block(hit.pos[0], hit.pos[1], hit.pos[2]);
@@ -8471,7 +8474,7 @@ impl Game<'_> {
         held: Option<&ItemStack>,
     ) -> (InteractionResult, DryUse) {
         // Player.isSecondaryUseActive with something in either hand.
-        let hands_full = self.stack_in(self.selected).is_some() || self.offhand.is_some();
+        let hands_full = self.stack_in(self.selected).is_some() || self.offhand_item().is_some();
         if self.keys.contains(&KeyCode::ShiftLeft) && hands_full {
             return (InteractionResult::Pass, DryUse::default());
         }

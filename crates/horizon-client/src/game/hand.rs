@@ -194,6 +194,10 @@ impl Game<'_> {
         let duration = swing_duration(animation, dig_speed, fatigue);
         if self.swing.start_if_able(hand, animation, duration) {
             self.swings_started += 1;
+            // A headset's controller feels the hand's hit, break or placement.
+            if self.serving.is_none() {
+                horizon_client::headset::pulse(hand == Hand::Main, 0.35, 0.04);
+            }
         }
     }
     /// `swing(hand)` for the hand that acts, with the default animation.

@@ -1594,6 +1594,8 @@ mod tests {
             audio: None,
             sound_registry: None,
             suspended: false,
+            room: false,
+            room_textures: Vec::new(),
         }
     }
 

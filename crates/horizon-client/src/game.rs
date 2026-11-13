@@ -3489,15 +3489,25 @@ impl Game<'_> {
                 view_vector(m.head_yaw, m.head_pitch),
             ));
         }
+        // A VR guest's hand, on the server.
+        if let Some(aim) = self.vr_aim {
+            return Some(aim);
+        }
+        let eye = self.eye_position()?;
+        // Standing in a headset, the acting hand's controller aims.
+        if let Some((hand, along)) = self.headset_ray() {
+            return Some((headset::headset_ray_origin(eye, hand), along));
+        }
         let dir = self
             .touch_aim_dir()
             .unwrap_or_else(|| view_vector(self.yaw, self.pitch));
-        Some((self.eye_position()?, dir))
+        Some((eye, dir))
     }
     /// The look a use acts with (BlockPlaceContext's rotation) and the server
     /// is told: the view's, or the finger's with tap to interact.
     fn interaction_rotation(&self) -> (f32, f32) {
-        self.touch_aim_rotation().unwrap_or((self.yaw, self.pitch))
+        self.touch_aim_rotation()
+            .unwrap_or_else(|| self.headset_sent_rotation())
     }
     /// `Player.blockInteractionRange`: the block pick's and mining's reach.
     fn reach(&self) -> f64 {
@@ -6210,6 +6220,7 @@ impl Game<'_> {
     }
     /// `Minecraft.startUseItem`: the main hand, then the off hand.
     fn use_item_as_player(&mut self) -> Result<Option<Hand>> {
+        self.pad.headset.swing_type = headset_hands::SwingType::Use;
         // Spectators only look (MultiPlayerGameMode.useItemOn/useItem pass),
         // but on a server a spectator's use on a block opens the block's
         // menu (ServerPlayerGameMode.useItemOn).
@@ -7742,7 +7753,8 @@ impl Game<'_> {
         let touch = slot == 0 && self.touch_sneaking();
         if self.toggles.is_down(slot) || touch {
             self.keys.insert(key);
-        } else {
+        } else if !(slot == 0 && self.room_sneaking) {
+            // A headset's room that holds sneak because the head is low is not the toggle's to drop.
             self.keys.remove(&key);
         }
     }
@@ -8544,12 +8556,16 @@ impl Game<'_> {
                         offhand_pop: (f32::from(g.hotbar_pop[9]) - partial).max(0.0),
                         attack: (indicator == 2).then_some(strength),
                     };
-                    let draws = hud_layout::hotbar_with_attack_side(
+                    let mut draws = hud_layout::hotbar_with_attack_side(
                         wi,
                         hi,
                         &inputs,
                         MOBILE_PLATFORM.then_some(g.settings.touch.attack_indicator_left),
                     );
+                    // The slot a headset's hand points at on the HUD.
+                    if let Some(slot) = g.headset_hud_slot() {
+                        draws.extend(hud_layout::slot_mark(wi, hi, slot, inputs.right_handed));
+                    }
                     hud_layout::paint(batch, &g.gui.atlas, &draws);
                     for d in &draws {
                         if let hud_layout::GuiDraw::Item { slot, x, y, .. } = *d {
@@ -12739,6 +12755,8 @@ impl Game<'_> {
     }
     /// Equipment attribute modifiers (LivingEntity.collectEquipmentChanges).
     fn apply_equipment(&mut self) {
+        let swapped = self.vr_dual_wield_swapped();
+        let off_item = self.offhand_item().cloned();
         let Some(player) = self.player.as_mut() else {
             return;
         };
@@ -12752,8 +12770,15 @@ impl Game<'_> {
             .zip(slots)
             .map(|(s, n)| (s.as_ref(), n))
             .collect();
-        equipped.push((self.inventory[self.selected].as_ref(), "mainhand"));
-        equipped.push((self.offhand.as_ref(), "offhand"));
+        // Dual wielding: the off hand's item counts as the main hand's while it is the one
+        // the VR player acts with (`ServerNetworking`'s `ActiveHand`).
+        let (main, off) = if swapped {
+            (off_item.as_ref(), self.inventory[self.selected].as_ref())
+        } else {
+            (self.inventory[self.selected].as_ref(), off_item.as_ref())
+        };
+        equipped.push((main, "mainhand"));
+        equipped.push((off, "offhand"));
         for (stack, slot) in equipped {
             let Some(info) = stack.and_then(|s| world_items!(self).get(&s.item)) else {
                 continue;
@@ -13954,12 +13979,13 @@ impl Game<'_> {
         let (velocity, on_ground) = self.player.as_ref().map_or((Vec3::ZERO, true), |pl| {
             (self.known_player_movement(), pl.ground.on_ground)
         });
+        let speed = power * 3.0 * self.vr_draw_factor();
         arrow.shoot_from_rotation(
             &mut self.world.random,
             self.pitch,
             self.yaw,
             0.0,
-            power * 3.0,
+            speed,
             1.0,
             velocity,
             on_ground,
@@ -14496,6 +14522,10 @@ impl Game<'_> {
         // LocalPlayer.refreshChatAbilities: the chat shows what the Chat option allows.
         let abilities = self.chat_abilities();
         self.ui.chat.set_abilities(&self.gui.atlas.font, abilities);
+        if self.streaming.opaque_water() != self.opaque_water_enabled() {
+            let context = self.worker_context();
+            self.streaming.reload_resources(&mut self.world, context);
+        }
         self.streaming.radius = self.render_distance_in_use();
         // Options.biomeBlendRadius, ambientOcclusion, cutoutLeaves and the
         // leaf-culling mode: LevelExtractor.allChanged when they change.
@@ -16780,6 +16810,8 @@ impl Game<'_> {
             },
             // key.swapOffhand: on a server, ServerboundPlayerActionPacket SWAP_ITEM_WITH_OFFHAND
             // (the server swaps the hands and sends both slots back; spectators can't).
+            // Two-handed play: the off hand is a hotbar slot, there is nothing to swap with.
+            KeyCode::KeyF if self.screen == Screen::Playing && self.two_handed_play() => {}
             KeyCode::KeyF if self.screen == Screen::Playing && self.remote.is_some() => {
                 self.remote_swap_pressed();
             }
@@ -17258,11 +17290,7 @@ impl Game<'_> {
                 // AUTO_UPLOAD_TIME of this frame (at least one goes): a burst of
                 // finished meshes spreads over frames, nearest first.
                 let auto = !budgeted;
-                let auto_time = if arriving {
-                    AUTO_UPLOAD_TIME_ARRIVING
-                } else {
-                    AUTO_UPLOAD_TIME
-                };
+                let auto_time = auto_upload_time(arriving);
                 let started = Instant::now();
                 while let Some((_, mesh)) = pending.last() {
                     if auto && count > 0 && started.elapsed() >= auto_time {
@@ -20060,10 +20088,17 @@ impl Game<'_> {
     /// What the chunk and far-terrain workers mesh with: the pack's context,
     /// over the world's biomes when it has its own.
     fn worker_context(&self) -> Arc<WorkerContext> {
-        match &self.world_biomes {
+        let context = match &self.world_biomes {
             Some(table) => self.pack.context_with(table.clone()),
             None => self.pack.context.clone(),
-        }
+        };
+        context.with_opaque_water(self.opaque_water_enabled())
+    }
+    /// A headset's depth-writing water (`horizonOpaqueWater`), unless a shader pack is picked.
+    fn opaque_water_enabled(&self) -> bool {
+        horizon_client::gfx::headset::installed()
+            && self.settings.vr.bool("horizonOpaqueWater")
+            && shader_packs::picked_pack(&self.settings).is_empty()
     }
     fn pack_files(&self) -> horizon_world::loot::PackOverlay<'_> {
         pack_files(&self.world_tables)

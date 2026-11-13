@@ -169,6 +169,8 @@ pub(super) struct GuestSwap {
     /// The host's command permission, swapped for the guest's for its turn.
     permission: u8,
     xp: Experience,
+    host_redirect: Option<i32>,
+    host_active_off: bool,
     host_keys: std::collections::HashSet<KeyCode>,
     screen: Screen,
     host_sign: Option<super::sign_edit::SignEditor>,
@@ -478,6 +480,10 @@ impl Game<'_> {
         std::mem::swap(&mut self.inventory, &mut g.inventory);
         std::mem::swap(&mut self.armor, &mut g.armor);
         std::mem::swap(&mut self.offhand, &mut g.offhand);
+        // The guest's own off hand: a hotbar slot in two-handed play, and with ACTIVE_HAND on the
+        // off hand its item is the one that mines and attacks (`Inventory.getDestroySpeed`).
+        let host_redirect = std::mem::replace(&mut self.offhand_redirect, g.offhand_redirect);
+        let host_active_off = std::mem::replace(&mut self.active_off, g.active_hand_off);
         std::mem::swap(&mut self.carried, &mut g.carried);
         let selected = std::mem::replace(&mut self.selected, g.selected);
         let (mode, creative) = (self.mode, self.creative);
@@ -589,6 +595,10 @@ impl Game<'_> {
         // Its worn armour on its attributes, when it changed.
         let mut equipped: Vec<Option<ItemStack>> = self.armor.to_vec();
         equipped.push(self.inventory.get(self.selected).cloned().flatten());
+        // Dual wielding swapped (ACTIVE_HAND on the off hand): its item counts too.
+        if self.vr_dual_wield_swapped() {
+            equipped.push(self.offhand_item().cloned());
+        }
         if play.equipped.as_ref() != Some(&equipped) {
             self.apply_equipment();
             play.equipped = Some(equipped);
@@ -619,6 +629,8 @@ impl Game<'_> {
             block_reach,
             permission,
             xp,
+            host_redirect,
+            host_active_off,
             host_keys,
             screen,
             host_sign,
@@ -720,6 +732,8 @@ impl Game<'_> {
             block_reach,
             permission,
             xp,
+            host_redirect,
+            host_active_off,
             host_keys,
             screen,
             host_sign,
@@ -976,7 +990,14 @@ impl Game<'_> {
         std::mem::swap(&mut self.inventory, &mut g.inventory);
         std::mem::swap(&mut self.armor, &mut g.armor);
         std::mem::swap(&mut self.offhand, &mut g.offhand);
+        self.offhand_redirect = host_redirect;
+        self.active_off = host_active_off;
         std::mem::swap(&mut self.carried, &mut g.carried);
+        // The hand's aim is not a turn of the guest.
+        if vr_angles == Some([self.yaw, self.pitch]) {
+            [self.yaw, self.pitch] = [g.yaw, g.pitch];
+        }
+        self.vr_aim = host_vr_aim;
         // A teleport with a rotation (commands) turns the guest.
         let turned = [self.yaw, self.pitch] != [g.yaw, g.pitch];
         [g.yaw, g.pitch] = [self.yaw, self.pitch];
@@ -1810,19 +1831,21 @@ impl Game<'_> {
                     // still plays a note. The dig is marked begun for tick_mining.
                     let pos = a.pos;
                     let destroyed = self.as_guest(host, conn, |g| {
-                        if g.creative {
-                            let _ = g.break_block(pos);
-                            return true;
-                        }
-                        if !g.block_action_restricted(pos) {
-                            let _ = g.attack_block(pos);
-                            g.mining = Some(Mining {
-                                pos,
-                                progress: 0.0,
-                                ticks: 0,
-                            });
-                        }
-                        false
+                        g.with_active_hand(|g| {
+                            if g.creative {
+                                let _ = g.break_block(pos);
+                                return true;
+                            }
+                            if !g.block_action_restricted(pos) {
+                                let _ = g.attack_block(pos);
+                                g.mining = Some(Mining {
+                                    pos,
+                                    progress: 0.0,
+                                    ticks: 0,
+                                });
+                            }
+                            false
+                        })
                     });
                     if destroyed == Some(true)
                         && let Some(play) = host.play.get_mut(&conn)
@@ -1834,7 +1857,9 @@ impl Game<'_> {
                     // and an instant one leave no block behind for a later STOP.
                     if destroyed != Some(true) {
                         let one_hit = self
-                            .as_guest(host, conn, |g| g.destroy_progress(pos))
+                            .as_guest(host, conn, |g| {
+                                g.with_active_hand(|g| g.destroy_progress(pos))
+                            })
                             .is_some_and(|p| p >= 1.0);
                         if !one_hit && let Some(play) = host.play.get_mut(&conn) {
                             play.destroy_pos = Some(pos);
@@ -4556,7 +4581,9 @@ impl Game<'_> {
             .facts()
             .is_air(self.world.block(pos[0], pos[1], pos[2]));
         let per_tick = self
-            .as_guest(host, conn, |g| g.destroy_progress(pos))
+            .as_guest(host, conn, |g| {
+                g.with_active_hand(|g| g.destroy_progress(pos))
+            })
             .unwrap_or(0.0);
         let decision = {
             let play = host.play.entry(conn).or_default();
@@ -4588,8 +4615,10 @@ impl Game<'_> {
         let progress = if self.res.facts().is_air(state) {
             None
         } else {
-            self.as_guest(host, conn, |g| g.destroy_progress(pos))
-                .map(|p| p * (ticks - start + 1) as f32)
+            self.as_guest(host, conn, |g| {
+                g.with_active_hand(|g| g.destroy_progress(pos))
+            })
+            .map(|p| p * (ticks - start + 1) as f32)
         };
         match progress {
             Some(p) if p < 1.0 => {}
