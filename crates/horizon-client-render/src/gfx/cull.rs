@@ -511,6 +511,7 @@ impl Cull {
 
     /// Recall: a section the frame draws: tested in turn, and at once while no recent
     /// result tells whether it is in sight.
+    #[allow(clippy::manual_is_multiple_of)] // MSRV 1.85
     pub fn recall_drawn(&mut self, index: usize, slot: u32, indices: u32) {
         self.total += u64::from(indices);
         let known = self
@@ -529,6 +530,7 @@ impl Cull {
 
     /// A section phase 1 draws, `index` in the visible list, with `indices`
     /// solid indices: tested in turn.
+    #[allow(clippy::manual_is_multiple_of)] // MSRV 1.85
     pub fn drawn(&mut self, index: usize, slot: u32, indices: u32) {
         self.total += u64::from(indices);
         if indices > 0 && (self.probe || slot.wrapping_add(self.stamp) % RETEST == 0) {

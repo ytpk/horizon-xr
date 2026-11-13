@@ -297,12 +297,8 @@ impl Canvas<'_, '_> {
         let held = over && self.pressed == Some(event);
         let (plate, ink) = match (look, over, held) {
             (Look::Off, ..) => (color::RAISED, color::MUTED),
-            (Look::Primary, _, true) => {
-                (color::with_alpha(color::ACCENT, 0.7), color::ON_ACCENT)
-            }
-            (Look::Primary, true, _) => {
-                (color::with_alpha(color::ACCENT, 0.88), color::ON_ACCENT)
-            }
+            (Look::Primary, _, true) => (color::with_alpha(color::ACCENT, 0.7), color::ON_ACCENT),
+            (Look::Primary, true, _) => (color::with_alpha(color::ACCENT, 0.88), color::ON_ACCENT),
             (Look::Primary, ..) => (color::ACCENT, color::ON_ACCENT),
             (Look::Secondary, _, true) => (color::BORDER, color::TEXT),
             (Look::Secondary, true, _) => (color::HOVER, color::TEXT),
