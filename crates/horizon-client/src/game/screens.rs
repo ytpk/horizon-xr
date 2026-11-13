@@ -36,6 +36,7 @@ impl Screen {
             | Self::Dead
             | Self::CommandBlock
             | Self::BlockEditor
+            | Self::GameMenu
             | Self::Mod => false,
             // WinScreen.extractBackground: the poem fills the screen with the End portal, the
             // credits alone blur. Game::menu_blur knows which one rolls.

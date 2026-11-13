@@ -157,6 +157,9 @@ pub(super) struct GuestSwap {
     eye: (f32, f32),
     yaw: f32,
     pitch: f32,
+    /// A VR guest's look for this turn (its hand's aim) and the aim the host had.
+    vr_angles: Option<[f32; 2]>,
+    host_vr_aim: Option<([f64; 3], [f64; 3])>,
     selected: usize,
     mode: horizon_client::command::args::GameMode,
     creative: bool,
@@ -469,6 +472,9 @@ impl Game<'_> {
         let (yaw, pitch) = (self.yaw, self.pitch);
         self.yaw = g.yaw;
         self.pitch = g.pitch;
+        // Vivecraft's aim fix: a VR player's shots and picks go out along its hand.
+        let host_vr_aim = self.vr_aim.take();
+        let vr_angles = self.guest_vr_aim(g.uuid, g.position, g.yaw, g.pitch);
         std::mem::swap(&mut self.inventory, &mut g.inventory);
         std::mem::swap(&mut self.armor, &mut g.armor);
         std::mem::swap(&mut self.offhand, &mut g.offhand);
@@ -604,6 +610,8 @@ impl Game<'_> {
             eye,
             yaw,
             pitch,
+            vr_angles,
+            host_vr_aim,
             selected,
             mode,
             creative,
@@ -703,6 +711,8 @@ impl Game<'_> {
             eye,
             yaw,
             pitch,
+            vr_angles,
+            host_vr_aim,
             selected,
             mode,
             creative,
@@ -1618,7 +1628,7 @@ impl Game<'_> {
     /// DedicatedServer.isUnderSpawnProtection: no operators, an operator or a
     /// radius of 0 or less is never under it; else a block within the radius
     /// of the world spawn (square, in the Overworld) is.
-    fn under_spawn_protection(&self, host: &LanHost, gi: usize, pos: [i32; 3]) -> bool {
+    pub(super) fn under_spawn_protection(&self, host: &LanHost, gi: usize, pos: [i32; 3]) -> bool {
         let g = &host.hub.guests[gi];
         let radius = host.hub.spawn_protection;
         if self.options.dedicated.is_none() || radius <= 0 || g.dimension != "minecraft:overworld" {
@@ -1636,7 +1646,7 @@ impl Game<'_> {
     }
 
     /// ServerPlayer.sendSpawnProtectionMessage.
-    fn spawn_protection_message(&self, host: &LanHost, conn: u32, pos: [i32; 3]) {
+    pub(super) fn spawn_protection_message(&self, host: &LanHost, conn: u32, pos: [i32; 3]) {
         let message = horizon_client::text::Text::translate(
             "build.spawn_protection",
             &[horizon_client::text::Text::literal(format!(
@@ -1934,6 +1944,11 @@ impl Game<'_> {
                         return;
                     }
                     let g = &mut host.hub.guests[gi];
+                    // Two-handed play: the off hand is a hotbar slot, nothing to swap with.
+                    if g.offhand_redirect.is_some() {
+                        host.hub.send_inventory(gi);
+                        return;
+                    }
                     let slot = g.selected;
                     std::mem::swap(&mut g.inventory[slot], &mut g.offhand);
                     let (offhand, main) = (g.offhand.clone(), g.inventory[slot].clone());
@@ -2133,7 +2148,7 @@ impl Game<'_> {
                 // SpawnEggItem.use calls ServerLevel.mayInteract at its own
                 // fluid ray's position, unlike useOn's packet-supplied block.
                 let held = if hand == Hand::Off {
-                    g.offhand.as_ref()
+                    g.offhand_item()
                 } else {
                     g.inventory.get(g.selected).and_then(Option::as_ref)
                 };
@@ -2412,6 +2427,12 @@ impl Game<'_> {
             S::ChatCommand(c) => self.guest_chat_command(host, conn, &c.command),
             S::CustomPayload(p) if p.channel == horizon_protocol::quiet::CHANNEL => {
                 self.guest_quiet_commands(host, conn, &p.data)
+            }
+            S::CustomPayload(p) if p.channel == horizon_vivecraft::network::CHANNEL => {
+                self.guest_vivecraft(host, conn, &p.data)
+            }
+            S::CustomPayload(p) if p.channel == horizon_visor::CHANNEL => {
+                self.guest_visor(host, conn, &p.data)
             }
             S::CustomPayload(p) if p.channel == horizon_protocol::mod_net::CHANNEL => {
                 self.guest_native_net(host, conn, &p.data)
@@ -2949,7 +2970,7 @@ impl Game<'_> {
     /// have (the handlers then find nothing either).
     /// `WorldBorder.isWithinBounds(target.blockPosition())` for an entity of this box:
     /// the block its feet are in (the box's bottom centre).
-    fn inside_border(&self, target: &Aabb) -> bool {
+    pub(super) fn inside_border(&self, target: &Aabb) -> bool {
         let feet = target.bottom_center();
         self.border.contains(feet.x.floor(), feet.z.floor())
     }
@@ -3000,7 +3021,7 @@ impl Game<'_> {
             .map(|(&fence, _)| fence)
     }
 
-    fn guest_attack(&mut self, host: &mut LanHost, conn: u32, id: i32) {
+    pub(super) fn guest_attack(&mut self, host: &mut LanHost, conn: u32, id: i32) {
         let Some(gi) = host.hub.guests.iter().position(|g| g.conn == conn) else {
             return;
         };
@@ -3043,6 +3064,10 @@ impl Game<'_> {
             return;
         }
         if let Some(victim) = Self::pvp_victim(host, conn, id) {
+            let super::lan_pvp::Victim::Guest(victim_conn) = victim;
+            if self.visor_pvp_blocked(host, conn, victim_conn) {
+                return;
+            }
             if let Some(Some(strike)) = self.as_guest(host, conn, |g| g.pvp_strike())
                 && self.pvp_land(host, victim, &strike)
             {
@@ -3097,8 +3122,10 @@ impl Game<'_> {
                         .player
                         .as_mut()
                         .is_some_and(|p| std::mem::take(&mut p.health.sync_velocity));
-                    g.attack_mob(index);
-                    g.swing_arm();
+                    g.with_active_hand(|g| {
+                        g.attack_mob(index);
+                        g.swing_arm();
+                    });
                     let p = g.player.as_mut()?;
                     let sent = std::mem::replace(&mut p.health.sync_velocity, marked);
                     sent.then_some(p.velocity)
@@ -3694,7 +3721,7 @@ impl Game<'_> {
                             ],
                         });
                     }
-                    let _ = g.tick_mining();
+                    let _ = g.with_active_hand(|g| g.tick_mining());
                     g.forced_hit = None;
                     g.right = g.using.is_some();
                     g.tick_using();
@@ -4579,9 +4606,9 @@ impl Game<'_> {
 
     /// ServerPlayerGameMode.destroyBlock for a guest, its crack cleared for the others
     /// (`destroyBlockProgress(id, pos, -1)`).
-    fn guest_destroy(&mut self, host: &mut LanHost, conn: u32, pos: [i32; 3]) {
+    pub(super) fn guest_destroy(&mut self, host: &mut LanHost, conn: u32, pos: [i32; 3]) {
         self.as_guest(host, conn, |g| {
-            let _ = g.break_block(pos);
+            let _ = g.with_active_hand(|g| g.break_block(pos));
         });
         self.guest_crack_gone(host, conn, pos);
     }
@@ -4653,7 +4680,7 @@ impl Game<'_> {
             self.guest_crack_gone(host, conn, pos);
         }
     }
-    fn guest_crack_gone(&mut self, host: &mut LanHost, conn: u32, pos: [i32; 3]) {
+    pub(super) fn guest_crack_gone(&mut self, host: &mut LanHost, conn: u32, pos: [i32; 3]) {
         let Some(id) = host.hub.guest(conn).map(|g| g.entity_id) else {
             return;
         };

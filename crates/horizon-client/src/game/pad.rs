@@ -36,6 +36,8 @@ pub(super) struct Pads {
     injected: PadState,
     /// The virtual pad was in use at the last poll.
     virtual_input: bool,
+    /// A VR headset's head and pointer, as last taken (`headset.rs`).
+    pub(super) headset: super::headset::Headset,
     /// Buttons a `pad ... tap` releases at the next poll.
     taps: Vec<Button>,
     /// The touch controls' pad (game/touch.rs), and its taps: it plays like a pad but does not
@@ -208,13 +210,18 @@ impl Pads {
 impl Game<'_> {
     /// Once per loop iteration: read the pads and act on button changes.
     pub(super) fn poll_pads(&mut self, event_loop: &dyn EventLoopCtl) {
+        self.headset_frame(event_loop);
+        // A headset's controllers count as the pad, focused or not (its
+        // activity's window need not have focus).
+        let headset = horizon_client::headset::pad();
         // Off leaves the controllers out; the touch controls play through the pad all the same.
-        let enabled = self.settings.controller.enabled;
+        let enabled = self.settings.controller.enabled || headset.is_some();
         let hardware = if enabled {
             let hardware = match self.pad.feed {
                 Some(state) => state,
                 None => self.pad.read(),
             };
+            let hardware = headset.map_or(hardware, |h| hardware.merge(&h));
             // A person's pad, for `input-log` and the repro recording; the virtual
             // pad is an agent's `pad` line and is recorded as that.
             let hardware_edges = self.pad.hardware_edges(hardware);
@@ -245,7 +252,7 @@ impl Game<'_> {
             hardware.merge(&keypad)
         };
         let state = hardware.merge(&self.pad.injected);
-        self.pad.virtual_input = self.pad.injected != PadState::default();
+        self.pad.virtual_input = self.pad.injected != PadState::default() || headset.is_some();
         for button in std::mem::take(&mut self.pad.taps) {
             self.pad.injected.set(button, false);
         }
@@ -453,6 +460,7 @@ impl Game<'_> {
 
     /// The right stick turns the view, once per frame (`Entity.turn`).
     pub(super) fn pad_look(&mut self, seconds: f32) {
+        self.head_look();
         let settings = &self.settings.controller;
         if !settings.enabled || self.pad_in_menu() || self.player.is_none() || !self.pad_focused() {
             return;
@@ -475,6 +483,17 @@ impl Game<'_> {
     /// Vibrate the active pad, when vibration is on and the pad is the one
     /// playing (a pad lying idle while the mouse plays stays still).
     pub(super) fn pad_rumble(&mut self, rumble: Rumble) {
+        // A headset's controllers: the main hand for a break, both for the rest.
+        if horizon_client::headset::active()
+            && let Some(pulse) = rumble.pulse()
+        {
+            let strength = pulse.strong.max(pulse.weak);
+            let seconds = pulse.millis as f32 / 1000.0;
+            horizon_client::headset::pulse(true, strength, seconds);
+            if rumble != Rumble::BlockBroken {
+                horizon_client::headset::pulse(false, strength, seconds);
+            }
+        }
         let settings = &self.settings.controller;
         if !settings.enabled || !settings.vibration || !self.pad.in_use {
             return;

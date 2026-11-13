@@ -18,7 +18,7 @@ impl Game<'_> {
         };
         let stack = match hand {
             Hand::Main => self.stack_in(self.selected),
-            Hand::Off => self.offhand.as_ref(),
+            Hand::Off => self.offhand_item(),
         };
         let item = stack.map_or("", |s| &*s.item);
         let baby = m.is_baby();
@@ -111,7 +111,7 @@ impl Game<'_> {
         };
         let stack = match hand {
             Hand::Main => self.stack_in(self.selected),
-            Hand::Off => self.offhand.as_ref(),
+            Hand::Off => self.offhand_item(),
         };
         let item = stack.map_or("", |s| &*s.item);
         let ages = match m.species() {

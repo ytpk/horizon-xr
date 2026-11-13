@@ -161,7 +161,7 @@ impl Game<'_> {
             }
             return Ok(AnchorUse::Charged);
         }
-        if self.hand == Hand::Main && fuel(self.offhand.as_ref()) && chargeable {
+        if self.hand == Hand::Main && fuel(self.offhand_item()) && chargeable {
             return Ok(AnchorUse::Pass);
         }
         Ok(AnchorUse::Other)

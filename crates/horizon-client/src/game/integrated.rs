@@ -442,6 +442,7 @@ impl Game<'_> {
             .spawn(move || {
                 // MinecraftServer.spin's Thread.setPriority(8).
                 horizon_threads::favour_current();
+                super::pin_to_big_cores("Server thread");
                 let result = serve(
                     &res,
                     pack,

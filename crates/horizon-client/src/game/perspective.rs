@@ -443,7 +443,7 @@ impl Game<'_> {
         let in_lava = p.is_in_lava();
         let (yaw, pitch) = (self.yaw, self.pitch);
         let main = self.inventory[self.selected].clone();
-        let off = self.offhand.as_ref().map(|s| s.item.clone());
+        let off = self.offhand_item().map(|s| s.item.clone());
         let armor = self.armor.clone();
         let riding = self.riding.is_some();
         let hurt = p.health.hurt_animation_time;

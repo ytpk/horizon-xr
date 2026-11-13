@@ -229,6 +229,7 @@ impl Game<'_> {
     pub(super) fn release_tick_targets(&mut self) {
         self.tick_hit = None;
         self.tick_mob = None;
+        self.headset_tick_done();
     }
     /// `Minecraft.startAttack` on an entity: a main-hand item with an
     /// `attack_range` attacks only a hit inside it.
@@ -425,6 +426,25 @@ impl Game<'_> {
             || before(self.mob_hit().map(|h| h.1))
             || before(self.redirectable_hit().map(|h| h.1))
     }
+    /// How far along the aim the entity `entity_targeted` sees is.
+    pub(super) fn targeted_entity_distance(&self) -> Option<f64> {
+        [
+            self.painting_hit().map(|h| h.1),
+            self.frame_hit().map(|h| h.1),
+            self.armor_stand_hit().map(|h| h.1),
+            self.cushion_hit().map(|h| h.1),
+            self.boat_hit().map(|h| h.1),
+            self.cart_hit().map(|h| h.1),
+            self.interaction_hit().map(|h| h.1),
+            self.dragon_hit().map(|h| h.1),
+            self.mob_hit().map(|h| h.1),
+            self.redirectable_hit().map(|h| h.1),
+        ]
+        .into_iter()
+        .flatten()
+        .filter(|d| self.before_block(*d))
+        .min_by(f64::total_cmp)
+    }
     /// `LocalPlayer.isHandsBusy`: paddling a boat.
     pub(super) fn hands_busy(&self) -> bool {
         self.riding
@@ -447,7 +467,10 @@ impl Game<'_> {
         if self.clicks.destroying.active || self.hands_busy() {
             return Ok(());
         }
-        let before = [self.stack_in(self.selected).cloned(), self.offhand.clone()];
+        let before = [
+            self.stack_in(self.selected).cloned(),
+            self.offhand_item().cloned(),
+        ];
         let swings = self.swings_started;
         let using = self.using.is_some();
         let Some(hand) = self.use_item()? else {
@@ -455,7 +478,7 @@ impl Game<'_> {
         };
         let (before, after) = match hand {
             Hand::Main => (&before[0], self.stack_in(self.selected).cloned()),
-            Hand::Off => (&before[1], self.offhand.clone()),
+            Hand::Off => (&before[1], self.offhand_item().cloned()),
         };
         let swung = self.swings_started != swings;
         let spent = match (before, &after) {
@@ -487,7 +510,10 @@ impl Game<'_> {
             self.apply_equipment();
         }
         self.attack_item = main.as_ref().map(|s| s.item.clone());
-        let next = [(self.selected, main), (OFFHAND, self.offhand.clone())];
+        let next = [
+            (self.selected, main),
+            (OFFHAND, self.offhand_item().cloned()),
+        ];
         let mut changed = [false; 2];
         for h in 0..2 {
             let replaced = self.hands_replaced[h];
@@ -762,13 +788,13 @@ impl HandWorld for GameHands<'_, '_> {
     fn held_empty(&mut self, hand: Hand) -> bool {
         match hand {
             Hand::Main => self.game.held().is_none(),
-            Hand::Off => self.game.offhand.is_none(),
+            Hand::Off => self.game.offhand_item().is_none(),
         }
     }
     fn held_count(&mut self, hand: Hand) -> i32 {
         let stack = match hand {
             Hand::Main => self.game.held(),
-            Hand::Off => self.game.offhand.as_ref(),
+            Hand::Off => self.game.offhand_item(),
         };
         stack.map_or(0, |s| s.count as i32)
     }
@@ -798,7 +824,7 @@ impl HandWorld for GameHands<'_, '_> {
         self.game.hand_strength.reset_attack();
     }
     fn attack_entity(&mut self) -> bool {
-        self.game.attack()
+        self.game.with_active_hand(|g| g.attack())
     }
     fn block_action_restricted(&mut self, pos: [i32; 3]) -> bool {
         self.game.block_action_restricted(pos)

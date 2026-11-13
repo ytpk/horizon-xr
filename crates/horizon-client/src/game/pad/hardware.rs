@@ -435,7 +435,7 @@ impl Game<'_> {
         };
         // Use tries the main hand first.
         match feel(self.stack_in(self.selected)) {
-            TriggerFeel::Free => feel(self.offhand.as_ref()),
+            TriggerFeel::Free => feel(self.offhand_item()),
             main => main,
         }
     }

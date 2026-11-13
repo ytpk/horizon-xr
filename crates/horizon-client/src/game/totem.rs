@@ -137,7 +137,7 @@ impl Game<'_> {
     /// the time the event arrives).
     fn find_totem(&self) -> ItemStack {
         let models = &self.pack.item_renderer.models;
-        [self.held(), self.offhand.as_ref()]
+        [self.held(), self.offhand_item()]
             .into_iter()
             .flatten()
             .find(|s| {

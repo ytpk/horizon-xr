@@ -573,6 +573,14 @@ impl Game<'_> {
         self.settings.save(&Self::options_path());
         on
     }
+    /// Visor's game menu: F3+B (entity hitboxes).
+    pub(super) fn menu_toggle_hitboxes(&mut self) {
+        self.run_debug_action(DebugAction::ShowHitboxes, false);
+    }
+    /// Visor's game menu: F3+G (chunk borders).
+    pub(super) fn menu_toggle_chunk_borders(&mut self) {
+        self.run_debug_action(DebugAction::ShowChunkBorders, false);
+    }
     /// One matching mapping of `handleDebugKeys`; whether it counts.
     fn run_debug_action(&mut self, action: DebugAction, shift: bool) -> bool {
         let player = self.player.is_some() && !self.reduced_debug_info();

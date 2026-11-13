@@ -292,7 +292,7 @@ impl Game<'_> {
         let is_rocket =
             |s: Option<&ItemStack>| s.is_some_and(|s| &*s.item == "minecraft:firework_rocket");
         let main = self.stack_in(self.selected);
-        let offhand_only = is_rocket(self.offhand.as_ref()) && !is_rocket(main);
+        let offhand_only = is_rocket(self.offhand_item()) && !is_rocket(main);
         let right = offhand_only == self.settings.main_hand_left;
         let arm = if right { 80 } else { -80 };
         let v = view_vector(self.yaw + arm as f32, 0.0);

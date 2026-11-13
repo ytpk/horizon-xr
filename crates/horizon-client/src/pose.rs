@@ -154,6 +154,8 @@ impl MotionWorld<'_, '_, '_> {
             Pose::FallFlying
         } else if self.player.auto_spin_attack_ticks > 0 {
             Pose::SpinAttack
+        } else if self.player.room_crawling && !self.player.flying {
+            Pose::Swimming
         } else if self.player.shift_key_down && !self.player.flying {
             Pose::Crouching
         } else {

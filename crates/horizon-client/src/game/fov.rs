@@ -103,11 +103,13 @@ impl Game<'_> {
             self.view.tick(Some(eye), self.zoomed_fov_target(1.0));
             return;
         }
+        // A headset's camera is the real head: the pose's lower eye is not added to it.
+        let headset_eye = self.headset_eye_target();
         let eye = self.player.as_ref().map(|p| {
             if self.sleeping.is_some() {
                 0.2
             } else {
-                p.dimensions.eye_height
+                headset_eye.unwrap_or(p.dimensions.eye_height)
             }
         });
         self.view.tick(eye, target);

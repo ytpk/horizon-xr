@@ -272,6 +272,8 @@ pub enum MotionEvent {
 #[derive(Clone)]
 pub struct PlayerMotion {
     pub swimming: bool,
+    /// `Entity.setNoGravity`: a VR player holding on to a ladder or a claw hangs there.
+    pub no_gravity: bool,
     /// `Entity.isPassenger()`: this body rides a vehicle. `Entity.updateSwimming`
     /// needs it false, so the server's copy of a guest who boards a boat while
     /// swimming is not left in the swimming box in the seat (#4427).
@@ -348,6 +350,9 @@ pub struct PlayerMotion {
     pub sprint_input: crate::sprint::SprintState,
     pub shift_key_down: bool,
     pub local_crouching: bool,
+    /// Visor's room crawl (`TaskRoomCrawl`): the player's head is low, so the pose is the crawl's
+    /// (swimming) wherever the box fits, as the server forces it (`visor$tickBodyPose`).
+    pub room_crawling: bool,
     pub pose: crate::pose::Pose,
     pub dimensions: crate::pose::Dimensions,
     /// The `minecraft:scale` the dimensions were last built with
@@ -579,10 +584,12 @@ impl PlayerMotion {
             sprint_input: crate::sprint::SprintState::default(),
             shift_key_down: false,
             local_crouching: false,
+            room_crawling: false,
             pose: crate::pose::Pose::Standing,
             dimensions: crate::pose::Pose::Standing.dimensions(1.0),
             scale: 1.0,
             swimming: false,
+            no_gravity: false,
             is_passenger: false,
             fire_ticks: -20,
             air: 300,
@@ -2109,6 +2116,35 @@ impl MotionWorld<'_, '_, '_> {
     pub fn shulker_box_push(&mut self, movement: Vec3) -> Result<()> {
         entity_move::move_entity(self, MoverType::ShulkerBox, movement)
     }
+    /// `Entity.move(MoverType.PLAYER, movement)`: a VR headset's player
+    /// stepping as the head walks in the room (Vivecraft's room-scale
+    /// movement), stopped and slid along by what it collides with.
+    pub fn room_step(&mut self, movement: Vec3) -> Result<()> {
+        let grounded = self.player.ground.on_ground;
+        entity_move::move_entity(self, MoverType::Player, movement)?;
+        // A room-scale move runs between simulation ticks and has no gravity component.
+        // Entity.move therefore clears onGround even on a flat floor. Revalidate support
+        // at the destination, so head motion cannot suppress button or physical jumps.
+        // Never retain a stale ground flag over an edge or while already rising.
+        let bounds = self.player.bounds();
+        let min = bounds.min_position();
+        let max = bounds.max_position();
+        let feet = Aabb::new(
+            Vec3::new(min.x, min.y - 1.0e-5, min.z),
+            Vec3::new(max.x, min.y, max.z),
+        );
+        if grounded
+            && movement.y == 0.0
+            && self.player.velocity.y <= 0.0
+            && !self.player.spectator
+            && !self.no_player_collision(feet)?
+        {
+            let horizontal = self.player.collision.horizontal;
+            self.set_on_ground_with_movement(true, horizontal, movement)?;
+            self.player.collision.below = true;
+        }
+        Ok(())
+    }
     /// `LocalPlayer.move`: the move, then `updateAutoJump` with the float
     /// horizontal displacement.
     pub fn move_self(&mut self, movement: Vec3) -> Result<()> {
@@ -2890,7 +2926,7 @@ impl LivingMotionWorld for MotionWorld<'_, '_, '_> {
         self.player.needs_sync = true;
     }
     fn no_gravity(&mut self) -> Result<bool> {
-        Ok(false)
+        Ok(self.player.no_gravity)
     }
     fn gravity_attribute(&mut self) -> Result<f64> {
         self.player.attribute("minecraft:gravity")

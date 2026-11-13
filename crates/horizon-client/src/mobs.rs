@@ -982,6 +982,8 @@ pub struct Extra {
     /// The arm the current swing moves (`currentSwing.hand().asArm`): `Some(true)`
     /// for the right arm.
     pub swing_right_arm: Option<bool>,
+    /// A VR player's tracked pose (Vivecraft's `RotInfo`): the model's head and arms follow it.
+    pub vr_body: Option<horizon_vivecraft::player_model::VrBody>,
     /// The current swing is a STAB (`SwingAnimationType` 2): a spear's jab.
     pub swing_stab: bool,
     pub flag: bool,

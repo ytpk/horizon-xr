@@ -101,6 +101,10 @@ pub(super) struct CombatTracker {
     /// host's own blast leaves it None.
     pub(super) blast_guest: Option<u32>,
     pub(super) projectile_attacker: Option<(u32, Text)>,
+    /// Where `ServerPlayerMixin.visor$poseBlocks` takes a projectile's hit to come from: the
+    /// projectile's position one block back along its flight, for the roomscale shield. None for
+    /// a hit that is not a projectile's, or an arrow that pierces (it is never blocked this way).
+    pub(super) projectile_threat: Option<[f64; 3]>,
     /// The projectile hitting the player now is another player's that
     /// `ServerPlayer.canHarmPlayer` refuses (the `pvp` rule, an ally).
     pub(super) refuse_player_hit: bool,
@@ -329,6 +333,7 @@ impl Game<'_> {
         self.combat.noted_since = None;
         self.combat.projectile_direct = None;
         self.combat.projectile_attacker = None;
+        self.combat.projectile_threat = None;
         self.combat.fall_before = self.player.as_ref().map_or(0.0, |p| p.fall_distance);
     }
     /// `FallLocation.getCurrentFallLocation` and the fall distance so far.
@@ -661,7 +666,7 @@ impl Game<'_> {
 
 /// `!stack.isEmpty() && stack.has(DataComponents.CUSTOM_NAME)`: the held
 /// item that turns a death message into its `.item` form.
-fn has_custom_name(stack: &horizon_client::items::ItemStack) -> bool {
+pub(super) fn has_custom_name(stack: &horizon_client::items::ItemStack) -> bool {
     &*stack.item != "minecraft:air"
         && stack.count > 0
         && stack.data().is_some_and(|d| d.custom_name.is_some())

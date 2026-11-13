@@ -223,8 +223,22 @@ impl Game<'_> {
         let target = match victim {
             Victim::Guest(conn) => host.hub.guest(conn).and_then(|g| team_of(self, &g.name)),
         };
-        let refused = !(self.ui.rules.bool("pvp")
-            && horizon_client::scoreboard::teams_allow_damage(target.as_ref(), attacker.as_ref()));
+        // Visor's `visor$blockPvpDamage` also counts an arrow's shooter as the damager.
+        let visor_blocked = match (p.guest, victim) {
+            (Some(shooter), Victim::Guest(victim)) => {
+                matches!(
+                    p.kind,
+                    ProjectileKind::Arrow { .. } | ProjectileKind::Trident
+                ) && self.visor_pvp_blocked(&host, shooter, victim)
+            }
+            _ => false,
+        };
+        let refused = visor_blocked
+            || !(self.ui.rules.bool("pvp")
+                && horizon_client::scoreboard::teams_allow_damage(
+                    target.as_ref(),
+                    attacker.as_ref(),
+                ));
         let on_player = Hit::Entity {
             who: Who::Player,
             at,

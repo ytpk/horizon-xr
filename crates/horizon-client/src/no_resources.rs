@@ -190,7 +190,7 @@ impl Button {
 
 /// `text` broken at spaces into lines no wider than `width` dp (a longer word,
 /// such as a path, gets a line of its own).
-fn wrap(ui: &Ui, face: Face, size: f32, text: &str, width: f32) -> Vec<String> {
+pub(crate) fn wrap(ui: &Ui, face: Face, size: f32, text: &str, width: f32) -> Vec<String> {
     let mut lines = Vec::new();
     let mut line = String::new();
     for word in text.split(' ') {

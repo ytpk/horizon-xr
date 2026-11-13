@@ -1648,7 +1648,7 @@ impl Game<'_> {
         // Moving forward at yaw - a is moving at angle a (to the left) of yaw: Entity.moveRelative.
         Some(self.yaw - left.atan2(forward).to_degrees())
     }
-    fn next_sequence(&mut self) -> i32 {
+    pub(super) fn next_sequence(&mut self) -> i32 {
         self.remote.as_mut().expect("remote").predictions.start()
     }
     fn item_name(&self, id: i32) -> Arc<str> {
@@ -2527,6 +2527,8 @@ impl Game<'_> {
         // The replacement player starts with its inventory menu, even if the
         // server switched levels without closing the previous container.
         self.remote_close_local();
+        // A dimension/login transition releases play input until its load tracker finishes.
+        self.capture(false);
         self.screen = Screen::Playing;
         let Some(r) = self.remote.as_mut() else {
             return;
@@ -2601,6 +2603,7 @@ impl Game<'_> {
             self.world.day_time = day;
             self.world.weather = weather;
             self.mobs.clear();
+            self.visor.net.players.clear();
             self.clear_remote_objects();
             self.clear_remote_projectiles();
             self.dropped.clear();
@@ -3527,12 +3530,21 @@ impl Game<'_> {
             C::CustomPayload(p) if p.channel == horizon_client::lan::recipes::CONTENT_CHANNEL => {
                 self.remote_recipe_content(&p.data);
             }
+            // Vivecraft's channel.
+            C::CustomPayload(p) if p.channel == horizon_vivecraft::network::CHANNEL => {
+                self.vivecraft_payload(&p.data);
+            }
+            // Visor's channel.
+            C::CustomPayload(p) if p.channel == horizon_visor::CHANNEL => {
+                self.visor_payload(&p.data);
+            }
             // PingDebugMonitor.onPongReceived.
             C::PongResponse(p) => {
                 let delay = self.debug_millis() - p.time;
                 self.debug_charts.ping.log(delay);
             }
             C::Login(p) => {
+                self.vr_login();
                 self.test_highlights.clear();
                 self.forget_synced_recipes();
                 self.level.hardcore = p.hardcore;
@@ -3835,6 +3847,7 @@ impl Game<'_> {
                 for id in p.ids {
                     if let Some(r) = self.remote.as_mut() {
                         if let Some(uuid) = r.level_players.remove(&id) {
+                            self.visor.net.remove_player(uuid);
                             r.attachments.remove(&Holder::Player(uuid));
                         }
                         r.level_player_names.remove(&id);
@@ -6315,6 +6328,11 @@ impl Game<'_> {
             r.session.send_far_terrain();
         }
         self.tick_chat_session();
+        self.visor_tick();
+        self.vivecraft_bodies();
+        self.vivecraft_tick();
+        self.vr_climb();
+        self.vr_tick();
         // Minecraft.tick sends this even when the player cannot tick yet,
         // including while waiting for chunks. Keep it outside early returns.
         if self.remote.as_ref().is_some_and(|r| r.joined) {
@@ -7885,6 +7903,27 @@ impl Game<'_> {
             });
         }
     }
+    /// `Block.playerWillDestroy`'s destroy event (2001): the break sound and the particles,
+    /// which `BaseFireBlock` skips.
+    pub(super) fn break_sound_and_particles(&mut self, pos: [i32; 3], state: BlockStateId) {
+        let facts = self.res.facts().get(state);
+        if facts.has_class("BaseFireBlock") {
+            return;
+        }
+        let s = facts.sounds.clone();
+        let at = [
+            f64::from(pos[0]) + 0.5,
+            f64::from(pos[1]) + 0.5,
+            f64::from(pos[2]) + 0.5,
+        ];
+        self.audio.play(
+            &s.break_sound,
+            Some(at),
+            (s.volume + 1.0) / 2.0,
+            s.pitch * 0.8,
+        );
+        self.destroy_particles(pos, state);
+    }
     /// MultiPlayerGameMode.destroyBlock: the predicted break.
     fn predict_break(&mut self, pos: [i32; 3], state: BlockStateId, sequence: i32) {
         self.touch_vibrate(super::touch::BREAK_BUZZ);
@@ -7897,22 +7936,7 @@ impl Game<'_> {
         // Block.playerWillDestroy's destroy event (particles and the break
         // sound), which BaseFireBlock skips: the server's extinguish sound
         // is all a player hears.
-        let facts = self.res.facts().get(state);
-        if !facts.has_class("BaseFireBlock") {
-            let s = facts.sounds.clone();
-            let at = [
-                f64::from(pos[0]) + 0.5,
-                f64::from(pos[1]) + 0.5,
-                f64::from(pos[2]) + 0.5,
-            ];
-            self.audio.play(
-                &s.break_sound,
-                Some(at),
-                (s.volume + 1.0) / 2.0,
-                s.pitch * 0.8,
-            );
-            self.destroy_particles(pos, state);
-        }
+        self.break_sound_and_particles(pos, state);
         // The server's block update follows (waterlogged blocks leave water).
         let air = self.world.air;
         if self.world.set(pos[0], pos[1], pos[2], air).is_ok() {
@@ -7960,7 +7984,13 @@ impl Game<'_> {
         // Resolve the crosshair once. A passing entity interaction keeps
         // that target and may only fall back to using the item itself.
         let entity = self.remote_use_targets_entity();
-        horizon_client::interaction_input::use_on_target(&mut RemoteUseWorld(self), entity);
+        // A headset's off controller uses its own item first, and alone.
+        let first = if self.headset_off_uses_first() {
+            Hand::Off
+        } else {
+            Hand::Main
+        };
+        horizon_client::interaction_input::use_on_target(&mut RemoteUseWorld(self, first), entity);
     }
 
     /// `Minecraft.startUseItem`'s entity turn for `hand`: Interact goes to
@@ -8087,7 +8117,7 @@ impl Game<'_> {
             let shelf_reacts = hand == Hand::Main
                 && held.is_some()
                 && !(self.keys.contains(&KeyCode::ShiftLeft)
-                    && (self.stack_in(self.selected).is_some() || self.offhand.is_some()))
+                    && (self.stack_in(self.selected).is_some() || self.offhand_item().is_some()))
                 && self.shelf_hit(&hit).is_some();
             let spectator = self.spectator();
             let (result, changes) = if hand == Hand::Main && !spectator {
@@ -8458,7 +8488,7 @@ impl Game<'_> {
         // RespawnAnchorBlock.useItemOn: PASS when the off hand's glowstone is to
         // charge the anchor, so useWithoutItem doesn't run and the off hand's turn
         // comes (glowstone in this hand charges it in `use_item_on`).
-        if !self.anchor_takes(hit.pos, held) && self.anchor_takes(hit.pos, self.offhand.as_ref()) {
+        if !self.anchor_takes(hit.pos, held) && self.anchor_takes(hit.pos, self.offhand_item()) {
             return (InteractionResult::Pass, DryUse::default());
         }
         // A content mod's machine takes the click where its server would (processing.rs): a
@@ -9410,7 +9440,7 @@ impl Game<'_> {
     /// hit on another player with extra knockback runs the attacker's side of
     /// `causeExtraKnockback`: the 0.6 horizontal speed cut and the sprint
     /// stop. Without it the next move outruns the server's player.
-    fn remote_player_attack(&mut self, mob: usize) {
+    pub(super) fn remote_player_attack(&mut self, mob: usize) {
         // Java dispatches this through the target's RemotePlayer type. The
         // level_players map is profile bookkeeping and can lag the entity;
         // mobs must stay out because their hurtClient returns false.
@@ -9679,7 +9709,7 @@ impl Game<'_> {
             sequence: 0,
         }));
         // Equal stacks swap with no slot update to wait for.
-        let (main, off) = (self.stack_in(self.selected), self.offhand.as_ref());
+        let (main, off) = (self.stack_in(self.selected), self.offhand_item());
         let moves = !super::hand::matches_for_swap(main, off);
         if let Some(r) = self.remote.as_mut() {
             r.swap_answer = [moves; 2];
@@ -10311,6 +10341,14 @@ impl Game<'_> {
         horizon_client::level_loading::draw_connecting(batch, atlas, &status, self.cursor, cancel);
         true
     }
+    /// The connection owns a loading/configuration screen, even if a LocalPlayer already exists.
+    /// VR must keep its pointer/keyboard until PlayerLoaded and any server prompts are complete.
+    pub(super) fn remote_input_pending(&self) -> bool {
+        self.remote.as_ref().is_some_and(|r| {
+            !r.loaded_sent || r.level_load.is_active() || r.reconfiguring.is_some()
+        })
+    }
+
     /// Connected or connecting with no player yet: `ConnectScreen`, then
     /// `LevelLoadingScreen`, over the panorama with its blur.
     pub(super) fn remote_loading(&self) -> bool {
@@ -10416,6 +10454,14 @@ impl Game<'_> {
         let r = self.remote.as_ref()?;
         let uuid = *r.level_players.get(&(id as i32))?;
         (uuid != r.profile).then_some(uuid)
+    }
+    /// The entity id of the other player `uuid` in the level.
+    pub(super) fn remote_player_entity(&self, uuid: u128) -> Option<i32> {
+        let r = self.remote.as_ref()?;
+        r.level_players
+            .iter()
+            .find(|(_, u)| **u == uuid)
+            .map(|(id, _)| *id)
     }
     pub(super) fn remote_player_name(&self, id: u32) -> Option<&str> {
         let r = self.remote.as_ref()?;
@@ -10960,7 +11006,9 @@ fn synced_local_use(
 /// The game as the tick's input sees it, and whether the tick acts.
 struct RemoteInputWorld<'g, 'a>(&'g mut Game<'a>, bool);
 
-struct RemoteUseWorld<'g, 'a>(&'g mut Game<'a>);
+/// The use, with the hand that takes the first turn: the main hand as
+/// vanilla, or the off hand a headset's off controller uses with.
+struct RemoteUseWorld<'g, 'a>(&'g mut Game<'a>, Hand);
 
 impl horizon_client::interaction_input::TargetUseWorld for RemoteUseWorld<'_, '_> {
     fn use_entity(&mut self) -> bool {
@@ -10968,7 +11016,7 @@ impl horizon_client::interaction_input::TargetUseWorld for RemoteUseWorld<'_, '_
         if self.0.mobile.touch_shield {
             return false;
         }
-        self.0.remote_use_entity(Hand::Main)
+        self.0.remote_use_entity(self.1)
     }
     fn use_block(&mut self) -> bool {
         #[cfg(target_os = "android")]
@@ -10986,10 +11034,14 @@ impl horizon_client::interaction_input::TargetUseWorld for RemoteUseWorld<'_, '_
                 return false;
             }
         }
-        self.0.remote_use_block(Hand::Main)
+        self.0.remote_use_block(self.1)
     }
     fn use_item(&mut self) {
-        self.0.remote_use_hands();
+        if self.1 == Hand::Main {
+            self.0.remote_use_hands();
+        } else if self.0.remote_use_item(Hand::Off) {
+            self.0.heights.item_used(Hand::Off);
+        }
     }
 }
 
@@ -11018,7 +11070,7 @@ impl horizon_client::interaction_input::InteractionWorld for RemoteInputWorld<'_
         self.0.release_remote_use();
     }
     fn start_attack(&mut self) -> bool {
-        self.0.remote_start_attack()
+        self.0.with_active_hand(|g| g.remote_start_attack())
     }
     fn start_use(&mut self) {
         self.0.remote_use();
@@ -11050,7 +11102,7 @@ impl horizon_client::interaction_input::InteractionWorld for RemoteInputWorld<'_
         self.0.use_delay
     }
     fn continue_attack(&mut self, down: bool) {
-        self.0.remote_continue_attack(down);
+        self.0.with_active_hand(|g| g.remote_continue_attack(down));
     }
 }
 

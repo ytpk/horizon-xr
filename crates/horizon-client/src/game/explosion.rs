@@ -442,7 +442,7 @@ impl Game<'_> {
         let hurtable = exploding.is_none_or(|id| {
             horizon_client::scoreboard::teams_allow_damage(self.mob_team(id), self.player_team())
         });
-        let blocking = self.player_blocking(Some(center), damage_type, false);
+        let blocking = self.player_blocking(Some(center), damage_type, false, false);
         let raised = blocking.is_some();
         let (creative, spectator) = (self.creative, self.spectator());
         let flying = self.player.as_ref().is_some_and(|p| p.flying);

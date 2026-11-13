@@ -156,6 +156,10 @@ mod golems;
 mod growth;
 mod hand;
 mod headless;
+mod headset;
+mod headset_bow;
+mod headset_hands;
+mod headset_trackers;
 mod ime;
 mod imports;
 mod initial_spawn;
@@ -288,6 +292,7 @@ mod powder_snow;
 mod prediction;
 mod processing;
 mod pumpkin;
+mod quest_room;
 mod quick_actions;
 mod raids;
 mod ram_limit;
@@ -367,6 +372,18 @@ mod ui_control;
 mod update_offer;
 mod vault;
 mod villagers;
+mod visor_hotbar;
+mod visor_keyboard;
+mod visor_menu;
+mod visor_net;
+mod visor_overlay;
+mod visor_play;
+mod visor_server;
+mod visor_trackers;
+mod vivecraft_net;
+mod vivecraft_server;
+mod vr;
+mod vr_keyboard;
 mod wandering_trader;
 mod win;
 mod wind;
@@ -475,6 +492,25 @@ const AUTO_UPLOAD_TIME: Duration = Duration::from_millis(2);
 /// open, a teleport): the meshes waiting then are the view itself, not edits
 /// to it, so a frame gives them more of its time to fill the view sooner.
 const AUTO_UPLOAD_TIME_ARRIVING: Duration = Duration::from_millis(6);
+/// How long a frame may spend uploading chunk meshes: the constants above, or in a headset's
+/// world view the VR setting `horizonVrUploadMs` (0 keeps them): that many milliseconds, three
+/// times as many while the view's terrain is arriving. A 2 ms upload is a fifth of a frame at
+/// 90 Hz on the headset's slower cores, and 6 ms more than half.
+fn auto_upload_time(arriving: bool) -> Duration {
+    let ms = if horizon_client::headset::active() && !horizon_client::headset::menu() {
+        horizon_client::headset::settings().float("horizonVrUploadMs")
+    } else {
+        0.0
+    };
+    if ms > 0.0 {
+        return Duration::from_secs_f32(ms / 1000.0 * if arriving { 3.0 } else { 1.0 });
+    }
+    if arriving {
+        AUTO_UPLOAD_TIME_ARRIVING
+    } else {
+        AUTO_UPLOAD_TIME
+    }
+}
 /// A frame's finished meshes up to this many upload at once, unqueued.
 const AUTO_UPLOADS_AT_ONCE: usize = 8;
 
@@ -851,6 +887,8 @@ enum Screen {
     /// A screen of a native mod's own (`native_mod_screen_open`): it draws and
     /// takes its input through the screen hooks.
     Mod,
+    /// Visor's game menu in a headset (game/visor_menu.rs).
+    GameMenu,
 }
 impl Screen {
     /// The id native mods see for this screen (`NativeScreenView.id`, the
@@ -860,6 +898,7 @@ impl Screen {
         match self {
             Screen::Playing => "playing",
             Screen::GameModeSwitcher => "game_mode_switcher",
+            Screen::GameMenu => "game_menu",
             Screen::Paused => "paused",
             Screen::Options => "options",
             Screen::Chat => "chat",
@@ -2498,6 +2537,8 @@ struct Game<'a> {
     /// Minecraft.pause: a single-player screen that pauses the game is open.
     pause: bool,
     debug: bool,
+    /// The headset frame profile's overlay mode has opened F3 once (`vr_profile`).
+    vr_profile_overlay_opened: bool,
     /// `horizon-ctl gpu-passes`: time Horizon's own passes on the GPU with F3 shut.
     gpu_passes: bool,
     screen: Screen,
@@ -2663,6 +2704,13 @@ struct Game<'a> {
     be_anims: horizon_client::block_entity_anim::BlockEntityAnims,
     /// Item being used (eaten): hotbar slot and ticks used.
     using: Option<(usize, u32)>,
+    /// The slot of the shield a VR player blocked with by holding it up (roomscale blocking).
+    vr_shield_slot: std::cell::Cell<Option<usize>>,
+    /// The headset's room holds the sneak key while the head is low (`visor_room_sneak`).
+    room_sneaking: bool,
+    /// The yaw and pitch a headset's head (or a mod's camera) drew the last frame from, none when
+    /// it drew from vanilla's.
+    posed_rotation: Option<(f32, f32)>,
     /// `getUseDuration` when that use started, as a mod left it
     /// (`game/item_use.rs`): consumables and mod items count to it.
     use_duration: i32,
@@ -2687,6 +2735,16 @@ struct Game<'a> {
     armor: [Option<ItemStack>; 4],
     /// The off hand (Inventory slot 40, saved as slot 150; menu slot 504 here).
     offhand: Option<ItemStack>,
+    /// Two-handed play (`VROffhandEquipment`): `Some(hotbar slot)` makes the off hand the stack in
+    /// that hotbar slot (-1: none chosen, an empty hand that takes nothing). `None` is the vanilla
+    /// off hand above. The window's player sets it from the server's settings; a guest swapped in
+    /// takes its own (`as_guest`).
+    offhand_redirect: Option<i32>,
+    /// `getActiveHand() == OFFHAND` in two-handed play: the off hand's item mines, attacks and
+    /// counts as the main hand's for attribute modifiers (`with_active_hand`, `apply_equipment`).
+    active_off: bool,
+    /// Where a write to an unchosen two-handed off hand goes, and is dropped.
+    offhand_void: Option<ItemStack>,
     /// `ItemStack.popTime` of the nine hotbar stacks, then the off hand: set to 5
     /// when a slot gains items, counted down each tick.
     hotbar_pop: [u8; 10],
@@ -2695,6 +2753,10 @@ struct Game<'a> {
     hand: Hand,
     /// The shield's item cooldown after an axe disabled it (ticks).
     shield_cooldown: u32,
+    /// How many quads at the end of the last hand geometry are a headset's menu hands.
+    hand_gui_quads: u32,
+    /// A headset's crosshair quad of the frame (`headset_pointer_lines`), for the hand pass.
+    hand_crosshair: Vec<Vertex>,
     /// `Player.getCooldowns()`: the `use_cooldown` component's entries, what
     /// `itemDecorations` shades a slot by. A server's players have their own
     /// (`GuestPlay::cooldowns`), swapped in for their turn.
@@ -2986,6 +3048,20 @@ struct Game<'a> {
     native_lifecycle: native_lifecycle::NativeLifecycle,
     /// Native mods' messages waiting (`game/native_net.rs`).
     native_net: native_net::NativeNet,
+    /// Vivecraft's `vivecraft:data` channel (`game/vivecraft_net.rs`).
+    vivecraft: vivecraft_net::VivecraftNet,
+    /// Visor's `visor:channel` and the choice of protocol (`game/visor_net.rs`).
+    visor: visor_net::VisorNet,
+    /// Visor's server half for the guests (`game/visor_server.rs`).
+    visor_server: visor_server::VisorServerState,
+    /// Vivecraft's server half for the guests (`game/vivecraft_server.rs`).
+    vivecraft_server: vivecraft_server::VivecraftServer,
+    /// A VR guest's aim while its action runs on the server (`ServerVivePlayer.getAimPos` and
+    /// `getAimDir`): where its picks and shots start and point.
+    vr_aim: Option<([f64; 3], [f64; 3])>,
+    /// The guest packet being handled is one `AimFixHandler` captures (UseItem, UseItemOn,
+    /// PlayerAction): only those turns use the VR hand's aim.
+    vr_aim_packet: bool,
     /// The mod whose own screen is open (`Screen::Mod`).
     native_mod_screen: Option<String>,
     /// Meshed sections waiting for an upload budget (Horizon settings).
@@ -3384,9 +3460,19 @@ fn camera_rotation(camera_type: perspective::CameraType, yaw: f32, pitch: f32) -
 impl Game<'_> {
     fn eye_position(&self) -> Option<[f64; 3]> {
         let p = self.player.as_ref()?;
+        // A frame's pointer starts at the camera's own (interpolated) eye.
+        if let Some(eye) = self.pad.headset.frame_eye {
+            return Some(eye);
+        }
         Some([
             p.position.x,
-            p.position.y + f64::from(p.dimensions.eye_height),
+            p.position.y
+                + f64::from(
+                    self.pad
+                        .headset
+                        .eye_target
+                        .unwrap_or(p.dimensions.eye_height),
+                ),
             p.position.z,
         ])
     }
@@ -3484,7 +3570,10 @@ impl Game<'_> {
         if let Some(hit) = self.forced_hit {
             return Some(hit);
         }
-        if let Some(hit) = self.tick_hit {
+        // A frame's pointer in a headset is picked afresh from the hand's place now.
+        if self.pad.headset.frame_eye.is_none()
+            && let Some(hit) = self.tick_hit
+        {
             return hit;
         }
         let (origin, dir) = self.aim()?;
@@ -3686,13 +3775,7 @@ impl Game<'_> {
         let sleeping = self.sleeping.is_some();
         let item_in_use = self
             .using
-            .and_then(|(slot, _)| {
-                if slot == shield::OFFHAND_SLOT {
-                    self.offhand.as_ref()
-                } else {
-                    self.inventory.get(slot)?.as_ref()
-                }
-            })
+            .and_then(|(slot, _)| self.stack_in(slot))
             .and_then(|s| self.items().get(&s.item));
         let item_use_speed = item_in_use.map(|i| i.use_speed);
         let item_use_slows_sprint = item_in_use.is_some_and(|i| !i.can_sprint);
@@ -8417,6 +8500,8 @@ impl Game<'_> {
             let strength = self.hand_strength.scale(0.0, self.main_hand_attack_speed());
             // The 3D crosshair (F3) takes the 2D one's place.
             // Hud.extractCrosshair: a spectator only sees it over something to open.
+            // A headset's HUD floats on a panel of its own: a crosshair there
+            // would point nowhere the eyes look.
             if self.camera_type.first_person()
                 && (!spectator || self.spectator_crosshair())
                 && !self.debug_crosshair()
@@ -8435,6 +8520,14 @@ impl Game<'_> {
                 }
             }
             self.gui_layer("minecraft:hotbar", &mut batch, |g, batch| {
+                // Visor's HUD has no row of item slots (`hud_disabled`): the grip wheel is the hotbar.
+                // (The wheel is drawn on its own panel in front of the hand: `headset_overlay`.)
+                if horizon_client::headset::active()
+                    && !spectator
+                    && !horizon_client::headset::settings().bool("visorHudHotbar")
+                {
+                    return;
+                }
                 if spectator {
                     g.draw_spectator_hotbar(batch);
                 } else {
@@ -8442,7 +8535,7 @@ impl Game<'_> {
                     let inputs = hud_layout::HotbarInputs {
                         selected: g.selected as i32,
                         right_handed: !g.settings.main_hand_left,
-                        offhand: g.offhand.is_some(),
+                        offhand: g.offhand_item().is_some(),
                         slots: std::array::from_fn(|i| {
                             g.inventory[i]
                                 .as_ref()
@@ -8461,7 +8554,7 @@ impl Game<'_> {
                     for d in &draws {
                         if let hud_layout::GuiDraw::Item { slot, x, y, .. } = *d {
                             let stack = if slot == 40 {
-                                g.offhand.as_ref()
+                                g.offhand_item()
                             } else {
                                 g.inventory[slot as usize].as_ref()
                             };
@@ -8681,6 +8774,7 @@ impl Game<'_> {
                 );
             }
             Screen::GameModeSwitcher => self.draw_gamemode_switcher(&mut batch),
+            Screen::GameMenu => self.draw_game_menu(&mut batch),
             Screen::Dead => self.draw_death_screen(&mut batch),
             Screen::Stats => self.draw_stats(&mut batch),
             Screen::Advancements => self.draw_advancements(&mut batch),
@@ -10780,11 +10874,7 @@ impl Game<'_> {
         // One scan for both passes that draw them (block entities below and the
         // overlay near the end of this function).
         let cracks = self.cracks(camera);
-        let fire_yaw = if self.camera_type == perspective::CameraType::ThirdPersonFront {
-            self.yaw + 180.0
-        } else {
-            self.yaw
-        };
+        let fire_yaw = self.display_camera_angles()[0];
         laps.lap("eg_prep");
         for m in &self.mobs {
             // Blaze.isOnFire: a charged blaze burns.
@@ -10914,6 +11004,7 @@ impl Game<'_> {
         let mut see_through = std::mem::take(&mut self.see_through_vertices);
         see_through.clear();
         self.name_tag_geometry(camera, alpha, &mut out, &mut see_through);
+        self.vr_keyboard_geometry(camera, &mut out);
         self.test_instance_marker_geometry(camera, &mut out, &mut see_through);
         self.debug_renderer_geometry(camera, &mut out);
         self.text_display_geometry(camera, alpha, &mut out, &mut see_through);
@@ -11162,7 +11253,7 @@ impl Game<'_> {
             .get("entity/experience/experience_orb")
             .copied()
         {
-            let (yaw, pitch) = (self.yaw.to_radians(), self.pitch.to_radians());
+            let [yaw, pitch] = self.billboard_angles().map(f32::to_radians);
             let forward = glam::Vec3::new(
                 -yaw.sin() * pitch.cos(),
                 -pitch.sin(),
@@ -11292,10 +11383,11 @@ impl Game<'_> {
         // Particles (ParticleEngine.extract): camera-facing quads.
         self.mark_stage(out.len(), "PARTICLES");
         let world = &self.world;
+        let [yaw, pitch] = self.billboard_angles();
         self.particles.render(
             camera,
-            self.yaw,
-            self.pitch,
+            yaw,
+            pitch,
             alpha as f32,
             &|b| world.light(b[0], b[1], b[2]),
             &mut out,
@@ -13901,6 +13993,18 @@ impl Game<'_> {
     /// `left` or right arm with its skin at pose `m`, in its rest pose
     /// turned 0.1 radians outwards.
     fn first_person_arm(&self, left: bool, m: glam::Mat4, light: u32, out: &mut Vec<Vertex>) {
+        self.player_arm(left, m, light, if left { -0.1 } else { 0.1 }, out);
+    }
+    /// The player's own arm (`left` or right) with its skin at pose `m`, its rest pose turned
+    /// `z_rot` radians outwards: the first-person arm, and a headset's.
+    pub(super) fn player_arm(
+        &self,
+        left: bool,
+        m: glam::Mat4,
+        light: u32,
+        z_rot: f32,
+        out: &mut Vec<Vertex>,
+    ) {
         let slim = self.player_model.as_ref().is_some_and(|m| m.slim);
         let Some(arm) = self.res.player_arm(slim, left).as_ref() else {
             return;
@@ -13917,7 +14021,6 @@ impl Game<'_> {
         else {
             return;
         };
-        let z_rot = if left { -0.1 } else { 0.1 };
         let pose = |p: &horizon_client::mobs::Part| {
             let mut pose = p.pose;
             pose[3] = 0.0;
@@ -13931,6 +14034,10 @@ impl Game<'_> {
     /// both hands in view space, converted to camera-relative world space.
     fn hand_geometry(&mut self, alpha: f64) -> Vec<Vertex> {
         let mut out = Vec::new();
+        // The headset hands' item runs (a shader pack's `gbuffers_hand` ids): Starling has none.
+        let mut runs: Vec<(u32, i32)> = Vec::new();
+        // A headset draws menu hands over the scene.
+        let mut gui_hands = Vec::new();
         // GameRenderer.renderItemInHand: F1 hides the hand with the HUD.
         if self.spectator()
             || self.ui.hide_gui
@@ -13959,6 +14066,9 @@ impl Game<'_> {
         let heights = self.heights.interpolated(a);
         // The hand sway: both hands turn by a tenth of the bobs' lag.
         let to_world = self.sway.to_world(a, &self.view);
+        // Standing in a headset each hand is drawn at its own controller.
+        let vr_hands = self.headset_hand_frames();
+        let menu_hands = self.headset_menu_hands();
         let eye = self.eye_position().unwrap_or_default();
         let light = self.world.light(
             eye[0].floor() as i32,
@@ -13972,7 +14082,23 @@ impl Game<'_> {
             .player
             .as_ref()
             .is_some_and(|p| p.auto_spin_attack_ticks > 0);
-        let items = self.visible_hand_items();
+        let mut items = self.visible_hand_items();
+        // Standing, a bow is held in the off hand's controller and the main
+        // one draws the string (Vivecraft's `BowTracker`).
+        let bow_in_off = vr_hands.is_some()
+            && items[0]
+                .as_ref()
+                .is_some_and(|s| &*s.item == "minecraft:bow");
+        // Each controller shows its hand, whatever is in use (vanilla hides
+        // the other hand while a bow is drawn).
+        let shown = if vr_hands.is_some() { [true; 2] } else { shown };
+        if bow_in_off {
+            items[1] = items[0].take();
+            // The main hand holds the arrow at the string.
+            if self.pad.headset.bow.notched() {
+                items[0] = Some(ItemStack::new("minecraft:arrow", 1));
+            }
+        }
         let off_hand_empty = items[1].is_none();
         for (i, (hand, item)) in Hand::BOTH.into_iter().zip(items).enumerate() {
             if !shown[i] {
@@ -14015,6 +14141,21 @@ impl Game<'_> {
                 &mut roll,
                 &mut pose_scale,
             );
+            // The main hand on its arm, the off hand on the other one.
+            let mut left = self.settings.main_hand_left != (hand == Hand::Off);
+            let mut controller = None;
+            if let Some(frames) = &vr_hands {
+                let Some(frame) = frames[i] else {
+                    continue;
+                };
+                left = frame.left;
+                controller = Some(frame);
+                // `menuHandMain` and `menuHandOff`: a pointer box, not a hand.
+                if menu_hands[i] {
+                    self.headset_menu_hand(frame.at, (light >> 4).max(light & 15), &mut gui_hands);
+                    continue;
+                }
+            }
             // No mod moved the hand (always so without one): no matrices to build.
             let pose = [x, y, z, pitch, yaw, roll, pose_scale];
             let to_world = if pose == [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0] {
@@ -14022,23 +14163,47 @@ impl Game<'_> {
             } else {
                 to_world * native_hooks::hand_pose_matrix(pose)
             };
-            // The main hand on its arm, the off hand on the other one.
-            let left = self.settings.main_hand_left != (hand == Hand::Off);
+            // A Legacy sword held up hides the off hand's shield.
             let Some(stack) = item else {
                 // renderArmWithItem: only the main hand's empty arm shows,
                 // on the main arm (the left one with the main hand set to
-                // left), and not while the player is invisible.
-                if hand == Hand::Off || self.own_invisible() {
+                // left), and not while the player is invisible. A headset
+                // shows both: each is a controller.
+                if (hand == Hand::Off && vr_hands.is_none()) || self.own_invisible() {
                     continue;
                 }
-                // renderPlayerArm
-                let m = to_world
-                    * horizon_client::first_person::player_arm_pose(left, inverse_height, attack);
-                self.first_person_arm(left, m, packed, &mut out);
+                // renderPlayerArm; a headset's arm reaches back from its controller.
+                match controller {
+                    Some(frame) => self.headset_arm(frame.at, left, attack, packed, &mut out),
+                    None => {
+                        let m = to_world
+                            * horizon_client::first_person::player_arm_pose(
+                                left,
+                                inverse_height,
+                                attack,
+                            );
+                        self.first_person_arm(left, m, packed, &mut out);
+                    }
+                }
                 continue;
             };
             if let Some(id) = maps::map_id(&stack) {
                 use horizon_client::first_person::{MapHold, map_arm_poses, one_handed_map_pose};
+                // A headset's map is held up in the hand, its arm under it.
+                if let Some(frame) = controller {
+                    let m = self.headset_held(
+                        frame,
+                        &stack,
+                        false,
+                        attack,
+                        headset_hands::HeldUse::default(),
+                        packed,
+                        &mut out,
+                        &mut runs,
+                    );
+                    self.held_map(m, id, packed, &mut out);
+                    continue;
+                }
                 let hold = MapHold::of(hand, off_hand_empty);
                 // renderOneHandedMap and renderTwoHandedMap: the arms under
                 // the map, unless the player is invisible.
@@ -14067,10 +14232,23 @@ impl Game<'_> {
                 continue;
             }
             let mut owner = self.player_owner(Some(&stack));
+            // A headset's bow (the main hand's, in the off controller) shows
+            // how far its string is drawn.
+            let owner_hand = if bow_in_off && i == 1 {
+                Hand::Main
+            } else {
+                hand
+            };
+            if controller.is_some()
+                && owner_hand == Hand::Main
+                && let Some(remaining) = self.headset_bow_remaining(owner.use_duration)
+            {
+                owner.use_item_remaining_ticks = remaining;
+            }
             // The other hand may hold an equal stack: only the used
             // hand's item is in use, only the main hand's selected.
-            owner.using_this_item &= used_hand == Some(hand);
-            if hand == Hand::Off {
+            owner.using_this_item &= used_hand == Some(owner_hand);
+            if owner_hand == Hand::Off {
                 owner.is_selected = false;
                 owner.is_carried = false;
             }
@@ -14140,8 +14318,26 @@ impl Game<'_> {
             };
             let m = to_world
                 * horizon_client::first_person::item_pose(left, inverse_height, attack, pose);
+            // A headset's hand holds the item as the right hand's
+            // first-person view, as Vivecraft's does; Visor draws it with the third person
+            // hand transform of its own side (`THIRD_PERSON_*_HAND`).
+            let visor_hand = controller.is_some() && self.visor_mechanics();
+            let physical_left = left;
+            let left = left && controller.is_none();
             // Seeded by the player id plus the context ordinal.
-            let (context, seed) = if left {
+            let (context, seed) = if visor_hand {
+                if physical_left {
+                    (
+                        horizon_assets::item_model::DisplayContext::ThirdPersonLeftHand,
+                        1,
+                    )
+                } else {
+                    (
+                        horizon_assets::item_model::DisplayContext::ThirdPersonRightHand,
+                        2,
+                    )
+                }
+            } else if left {
                 (
                     horizon_assets::item_model::DisplayContext::FirstPersonLeftHand,
                     3,
@@ -14158,6 +14354,34 @@ impl Game<'_> {
                 horizon_client::cit::Hand::Main
             };
             let state = self.resolve_item_in_hand(&stack, context, Some(&owner), seed, cit_hand);
+            // Its arm shows too.
+            let m = match controller {
+                Some(frame) => self.headset_held(
+                    frame,
+                    &stack,
+                    state.uses_block_light(),
+                    attack,
+                    headset_hands::HeldUse {
+                        using,
+                        cooldown: self.items().get(&stack.item).is_some_and(|info| {
+                            let group = horizon_client::cooldowns::group(
+                                &stack,
+                                info.use_cooldown.as_ref(),
+                            );
+                            self.cooldowns.is_on_cooldown(&group)
+                        }),
+                        ticks_used,
+                        spinning,
+                        stab: matches!(pose, ItemPose::Stab),
+                        remaining: owner.use_item_remaining_ticks,
+                        millis: self.pad.headset.vr.clock_ms(),
+                    },
+                    packed,
+                    &mut out,
+                    &mut runs,
+                ),
+                None => m,
+            };
             let light = self.world.light(
                 eye[0].floor() as i32,
                 eye[1].floor() as i32,
@@ -14176,6 +14400,11 @@ impl Game<'_> {
         for vertex in &mut out {
             vertex.layer &= !horizon_client::gfx::OIT_ENTITY;
         }
+        if vr_hands.is_some() && !self.ui.hide_gui {
+            gui_hands.extend(std::mem::take(&mut self.hand_crosshair));
+        }
+        self.hand_gui_quads = (gui_hands.len() / 4) as u32;
+        out.extend(gui_hands);
         out
     }
     /// The renderer for the window, with the current block sprites, GUI
@@ -15708,6 +15937,17 @@ impl Game<'_> {
         // player's own model stay smooth while the level is frozen.
         let camera_alpha = self.clock.camera_fraction();
         let view = self.camera_view(camera_alpha as f32);
+        // In a headset the camera faces where the head does. The player's own yaw and pitch
+        // follow the aim hand (that is what use, attack and picking read), so every consumer of
+        // the camera's facing (particles, sprites, name tags, the sound listener, the HUD's
+        // compass) takes the head's here instead, as Visor's camera does.
+        let view = match (view, self.headset_facing()) {
+            (Some((camera, _, _)), Some((yaw, pitch))) if !self.shows_panorama() => {
+                Some((camera, yaw, pitch))
+            }
+            (view, _) => view,
+        };
+        self.posed_rotation = self.headset_facing().filter(|_| !self.shows_panorama());
         let eye = view.map(|_| {
             (
                 glam::DVec3::from_array(self.view.eye),
@@ -15805,9 +16045,21 @@ impl Game<'_> {
         // FishingHookRenderer's line, then DebugRenderer: chunk borders and
         // hitboxes (F3+G, F3+B).
         let mut lines = self.fishing_line(alpha, size);
+        // A headset's controllers: their rays and where they meet.
+        let mut pointer_on_top = Vec::new();
+        // The pointer and the outline are picked from the hand as it is drawn now: the
+        // interpolated camera and the controller of this frame (Visor picks every frame, in
+        // `GameRenderer.pick`), not from the tick's position, which jumps when flying fast.
+        self.pad.headset.frame_eye = (horizon_client::headset::active()
+            && self.camera_type.first_person()
+            && self.camera_mob().is_none()
+            && !self.shows_panorama())
+        .then(|| camera.to_array());
+        self.headset_pointer_lines(camera.to_array(), &mut lines, &mut pointer_on_top);
         let g = self.debug_gizmos(alpha as f32, camera.to_array());
         lines.extend(g.lines);
-        let on_top = g.on_top;
+        let mut on_top = g.on_top;
+        on_top.extend(pointer_on_top);
         let colored_lights = if self.title.is_none() {
             self.native_frame_visuals(camera, alpha, &mut lines)
         } else {
@@ -15908,8 +16160,11 @@ impl Game<'_> {
         } else {
             Vec::new()
         };
+        self.pad.headset.frame_eye = None;
         let mut hud = horizon_client::spans::time("hud", || self.hud(size));
         self.flush_ime(&mut hud);
+        // A headset's second panel (the hotbar wheel hung in front of the hand).
+        let overlay_batches = self.headset_overlay(size);
         let title = self.shows_panorama();
         let (yaw, pitch) = if title {
             // PanoramaRenderer: the title cube spins at 0.1 degrees per tick, pitched 10 degrees.
@@ -16025,11 +16280,14 @@ impl Game<'_> {
         } else {
             (Vec::new(), None)
         };
+        self.hand_gui_quads = 0;
         let mut hand = if title || self.scoping() {
             Vec::new()
         } else {
             self.hand_geometry(camera_alpha)
         };
+        // A headset's menu hands stay the last vertices: they draw over everything.
+        let gui_hands = hand.split_off(hand.len().saturating_sub(self.hand_gui_quads as usize * 4));
         // GameRenderer.render3dHud: the screen effects after the hand, in
         // its pass (the hand pass draws with `bob * view`).
         if !title {
@@ -16037,6 +16295,7 @@ impl Game<'_> {
             let aspect = size[0] as f32 / size[1].max(1) as f32;
             self.item_activation_geometry(camera_alpha as f32, view, aspect, &mut hand);
         }
+        hand.extend(gui_hands);
         let screen = if title {
             Vec::new()
         } else {
@@ -16183,6 +16442,8 @@ impl Game<'_> {
             },
             stars: stars.filter(|_| self.settings.horizon.sky || title),
             hand: &hand,
+            hand_gui_quads: self.hand_gui_quads,
+            overlays: std::array::from_fn(|i| overlay_batches[i].as_ref()),
             hand_fov_degrees: self.hud_fov_degrees(camera_alpha as f32, camera.to_array()),
             screen: &screen,
             pack: pack_inputs,
@@ -16402,6 +16663,7 @@ impl Game<'_> {
                     self.capture(true);
                 }
                 Screen::GameModeSwitcher => self.close_gamemode_switcher(false),
+                Screen::GameMenu => self.close_game_menu(),
                 Screen::Dead => {
                     if self.ui.death_confirm.is_some() {
                         self.death_confirm_answer(false)?;
@@ -18517,6 +18779,18 @@ impl Game<'_> {
                     self.advance_flight();
                     self.tick_world_icon();
                     let ticked = Instant::now();
+                    if horizon_client::vr_profile::enabled() {
+                        use horizon_client::vr_profile::{Stage, record};
+                        record(Stage::Update, updated - now);
+                        record(Stage::Tick, ticked - updated);
+                        // The overlay mode opens F3 once, for a headset with no keyboard.
+                        if horizon_client::vr_profile::mode()
+                            == horizon_client::vr_profile::Mode::Overlay
+                            && !std::mem::replace(&mut self.vr_profile_overlay_opened, true)
+                        {
+                            self.debug = true;
+                        }
+                    }
                     let rendered = match self.render() {
                         // The callback can fire during this frame; rebuild on
                         // the next redraw rather than exiting on its error.
@@ -19034,6 +19308,7 @@ impl<'a> Game<'a> {
             was_playing: false,
             pause: false,
             debug: false,
+            vr_profile_overlay_opened: false,
             gpu_passes: false,
             screen: Screen::Playing,
             observed_screen: None,
@@ -19144,9 +19419,14 @@ impl<'a> Game<'a> {
             title: None,
             armor: [None, None, None, None],
             offhand: None,
+            offhand_redirect: None,
+            active_off: false,
+            offhand_void: None,
             hotbar_pop: [0; 10],
             hand: Hand::Main,
             shield_cooldown: 0,
+            hand_gui_quads: 0,
+            hand_crosshair: Vec::new(),
             cooldowns: Default::default(),
             command_source: None,
             titles: Default::default(),
@@ -19334,6 +19614,15 @@ impl<'a> Game<'a> {
             native_input: Default::default(),
             native_lifecycle: Default::default(),
             native_net: Default::default(),
+            vivecraft: Default::default(),
+            visor: visor_net::VisorNet::new(),
+            visor_server: Default::default(),
+            vivecraft_server: Default::default(),
+            vr_aim: None,
+            vr_aim_packet: false,
+            vr_shield_slot: std::cell::Cell::new(None),
+            room_sneaking: false,
+            posed_rotation: None,
             native_mod_screen: None,
             sky_darken_memo: Default::default(),
             water_plane_memo: Default::default(),
@@ -20928,6 +21217,8 @@ fn loading_frame(hud: &HudBatch) -> Frame<'_> {
         celestial: &[],
         stars: None,
         hand: &[],
+        hand_gui_quads: 0,
+        overlays: [None; horizon_client::headset::OVERLAYS],
         hand_fov_degrees: 70.0,
         screen: &[],
         pack: Default::default(),
@@ -21220,6 +21511,9 @@ struct Loading {
     /// its renderer needs the window's surface (one asked for meanwhile, as a screen recorder's
     /// prompt over the app, ended the start).
     suspended: bool,
+    /// The headset launcher's room handed its window and renderer over (`quest_room`).
+    room: bool,
+    room_textures: Vec<(usize, Vec<u8>)>,
 }
 /// How long the handoff waits for the first title frame before building the
 /// world renderer anyway (a hidden window may never be asked to redraw).
@@ -21511,6 +21805,7 @@ impl Loading {
         event_loop.set_control_flow(ControlFlow::Poll);
     }
     fn draw(&mut self) {
+        self.room_frame();
         let diagnostic_started = Instant::now();
         let diagnostic_elapsed = self
             .menu
@@ -21773,6 +22068,10 @@ impl Loading {
         };
         drop(game_step);
         let game_ms = game_at.elapsed().as_millis();
+        // The room's TV is gone: the game's own title and screens take the headset's panel.
+        if self.room {
+            horizon_client::headset::set_room_tv(None);
+        }
         game.window = Some(window);
         game.renderer = Some(renderer);
         game.world_renderer_ready = true;
@@ -21794,18 +22093,21 @@ impl Loading {
 /// The application: the loading screen until the resources are ready, then
 /// the game itself, on the same event loop and window.
 enum App {
+    Room(Box<quest_room::Room>),
     Loading(Box<Loading>),
     Ready(Box<split::Split<'static>>),
 }
 impl ApplicationHandler for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         match self {
+            App::Room(room) => room.resumed(event_loop),
             App::Loading(loading) => loading.resumed(event_loop),
             App::Ready(game) => game.resumed(event_loop),
         }
     }
     fn window_event(&mut self, event_loop: &ActiveEventLoop, id: WindowId, event: WindowEvent) {
         match self {
+            App::Room(room) => room.window_event(event_loop, id, event),
             App::Loading(loading) => loading.window_event(event_loop, id, event),
             App::Ready(game) => game.window_event(event_loop, id, event),
         }
@@ -21818,6 +22120,7 @@ impl ApplicationHandler for App {
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         enum Step {
             Waiting,
+            Loading(Box<Loading>),
             Ready(Box<split::Split<'static>>),
             Done,
             Failed(Box<dyn std::error::Error>),
@@ -21827,6 +22130,14 @@ impl ApplicationHandler for App {
                 game.about_to_wait(event_loop);
                 return;
             }
+            App::Room(room) => match room.about_to_wait(event_loop) {
+                quest_room::Next::Waiting => Step::Waiting,
+                quest_room::Next::Play(handoff) => match room.start_loading(handoff) {
+                    Ok(loading) => Step::Loading(Box::new(loading)),
+                    Err(e) => Step::Failed(e),
+                },
+                quest_room::Next::Quit => Step::Done,
+            },
             App::Loading(loading) => {
                 loading.about_to_wait(event_loop);
                 if loading.error.is_some() {
@@ -21855,16 +22166,21 @@ impl ApplicationHandler for App {
         };
         match step {
             Step::Waiting => {}
+            Step::Loading(loading) => *self = App::Loading(loading),
             Step::Ready(game) => *self = App::Ready(game),
             Step::Done => event_loop.exit(),
             Step::Failed(e) => {
-                if let App::Loading(loading) = self {
-                    if cfg!(target_os = "android") {
-                        log::error!("Horizon: {e}");
-                        loading.failure = Some(e.to_string());
-                        return;
+                match self {
+                    App::Loading(loading) => {
+                        if cfg!(target_os = "android") && !loading.room {
+                            log::error!("Horizon: {e}");
+                            loading.failure = Some(e.to_string());
+                            return;
+                        }
+                        loading.error = Some(e);
                     }
-                    loading.error = Some(e);
+                    App::Room(room) => room.error = Some(e),
+                    App::Ready(_) => {}
                 }
                 event_loop.exit();
             }
@@ -21872,6 +22188,7 @@ impl ApplicationHandler for App {
     }
     fn suspended(&mut self, event_loop: &ActiveEventLoop) {
         match self {
+            App::Room(_) => {}
             App::Loading(loading) => loading.suspended(),
             App::Ready(game) => game.suspended(event_loop),
         }
@@ -21911,6 +22228,20 @@ fn run_loading(
     pack_error: Option<String>,
     started: Instant,
 ) -> Result<()> {
+    let loading = build_loading(options, settings, vanilla_root, pack_error, started, None)?;
+    run_app(App::Loading(Box::new(loading)))
+}
+
+/// The loading screen's state; `shell` is a window and renderer the headset launcher's room hands
+/// over, kept as they are.
+fn build_loading(
+    options: Options,
+    settings: Settings,
+    vanilla_root: PathBuf,
+    pack_error: Option<String>,
+    started: Instant,
+    shell: Option<(Arc<Window>, Renderer)>,
+) -> Result<Loading> {
     let progress = Progress::new();
     let (receiver, loader) =
         startup_menu::spawn_loader(&options, &settings, &vanilla_root, started, &progress)?;
@@ -21923,9 +22254,14 @@ fn run_loading(
             horizon_client::sound_events::SoundRegistry::load(&root)
         })
     });
-    let loading = Loading {
-        window: None,
-        renderer: None,
+    let (window, renderer) = match shell {
+        Some((window, renderer)) => (Some(window), Some(renderer)),
+        None => (None, None),
+    };
+    let room = renderer.is_some();
+    Ok(Loading {
+        window,
+        renderer,
         boot: horizon_client::hud::HudAtlas::boot(),
         gui: None,
         settings,
@@ -21953,14 +22289,19 @@ fn run_loading(
         audio: None,
         sound_registry,
         suspended: false,
-    };
-    let mut app = App::Loading(Box::new(loading));
+        room,
+        room_textures: Vec::new(),
+    })
+}
+
+fn run_app(mut app: App) -> Result<()> {
     let result = event_loop()?.run_app(&mut app);
     narrator::stop();
     match &mut app {
         // Ready: splitscreen around P1's game.
         App::Ready(split) => leave_fullscreen_after(&result, &mut split.host.settings),
         App::Loading(loading) => leave_fullscreen_after(&result, &mut loading.settings),
+        App::Room(room) => leave_fullscreen_after(&result, &mut room.settings),
     }
     result?;
     horizon_client::discord_presence::stop();
@@ -21976,13 +22317,120 @@ fn run_loading(
                 return Err(e);
             }
         }
+        App::Room(room) => {
+            if let Some(e) = room.error {
+                return Err(e);
+            }
+        }
     }
     Ok(())
 }
 
 pub use launch_api::{UsageError, exit_code};
 
+/// Quest: the render and server threads on the big cores (`horizonPinBigCores`, or
+/// `HORIZON_PIN_BIG_CORES`).
+pub(crate) fn pin_to_big_cores(thread: &str) {
+    use horizon_threads::cores::{Wanted, pin_current};
+    if !horizon_client::gfx::headset::installed() {
+        return;
+    }
+    let wanted = std::env::var("HORIZON_PIN_BIG_CORES")
+        .ok()
+        .and_then(|v| Wanted::parse(&v))
+        .unwrap_or_else(|| {
+            if horizon_client::headset::settings().bool("horizonPinBigCores") {
+                Wanted::Auto
+            } else {
+                Wanted::Off
+            }
+        });
+    if wanted == Wanted::Off {
+        return;
+    }
+    match pin_current(&wanted) {
+        Ok(Some(pinned)) => log::info!(
+            "Horizon: {thread} pinned to cores {:?} (process may use {:?}; speeds by core {:?})",
+            pinned.cores,
+            pinned.allowed,
+            pinned.capacities
+        ),
+        Ok(None) => log::info!("Horizon: {thread} left as is: one kind of core, or all allowed"),
+        // Not an error: the thread keeps running where the scheduler puts it.
+        Err(e) => log::info!("Horizon: {thread} left as is ({e})"),
+    }
+}
+
+/// What a start does before it loads the resources: the heartbeat, the content tables, a phone's
+/// first-start settings, the narrator and Discord. Returns the game's settings.
+fn before_loading(options: &Options, vanilla_root: &std::path::Path) -> Result<Settings> {
+    // Someone is playing: the anonymous ping behind the launcher's "N playing now", and the
+    // official server in their list (servers.dat in the game folder, the working directory). Not
+    // for a server, a benchmark, a run that quits by itself, a harness's fixture or a run that
+    // horizon-ctl drives: those start in a source checkout and wrote the list there.
+    if !options.offscreen && !synchronous_startup(options) {
+        horizon_client::heartbeat::start();
+        if let Err(e) =
+            horizon_client::multiplayer::add_official_server(&horizon_client::logging::player_dir())
+        {
+            log::warn!("could not add the official server to servers.dat: {e}");
+        }
+    }
+    mods::register_components(vanilla_root)?;
+    mods::register_standalone_models();
+    // Bedrock's touch buttons, fetched from Mojang once (bedrock_touch.rs) where the resources
+    // came without them (prepared on a computer, or no network then): drawn from the next start,
+    // or this one's if they come before its GUI atlas.
+    #[cfg(target_os = "android")]
+    if options.execution_role.is_client()
+        && vanilla_root.join("horizon-resources.json").is_file()
+        && let Err(e) = horizon_client::android_control_assets::fetch(vanilla_root, |_, _| {})
+    {
+        log::warn!("Original Android control textures: {e}");
+    }
+    if options.execution_role.is_client() && !horizon_client::bedrock_touch::present(vanilla_root) {
+        let root = vanilla_root.to_path_buf();
+        let _ = std::thread::Builder::new()
+            .name("bedrock touch".into())
+            .spawn(move || horizon_client::bedrock_touch::fetch_logged(&root));
+    }
+    let options_txt = Game::options_path();
+    #[cfg(target_os = "android")]
+    let first_start = !options_txt.exists();
+    #[allow(unused_mut)]
+    let mut early_settings = Settings::load(&options_txt);
+    // A phone's first start: settings for what it can take, saved before anything reads them.
+    #[cfg(target_os = "android")]
+    if first_start && let Some(tier) = horizon_client::system_stats::Tier::here() {
+        horizon_client::graphics::apply_mobile_defaults(tier, &mut early_settings);
+        early_settings.save(options_txt);
+        log::info!(
+            "Horizon: first start on a {} tier device: render distance {}, resolution {}%",
+            tier.name(),
+            early_settings.render_distance,
+            early_settings.horizon.resolution_scale
+        );
+    }
+    // Minecraft's constructor opens the narrator; a server has none.
+    if options.execution_role.is_client() {
+        narrator::start(&early_settings);
+    }
+    // "Playing Horizon" on Discord: never for a server; an automated run only talks to a test's fake Discord.
+    if options.dedicated.is_none() {
+        let automated = options.benchmark.is_some()
+            || options.offscreen
+            || options.frames.is_some()
+            || options.world_frames.is_some();
+        horizon_client::discord_presence::start(early_settings.extras.discord_presence, automated);
+    }
+    // Snapshots of derived tables live in the game folder (or its private
+    // half), never beside the shared resources.
+    Behaviours::set_cache_dir(horizon_client::logging::cache_dir());
+    Ok(early_settings)
+}
+
 pub fn run_with() -> Result<()> {
+    horizon_client::gfx::headset_sim::install_from_env();
     let Some(mut options) = Options::read()? else {
         return Ok(());
     };
@@ -22003,6 +22451,7 @@ pub fn run_with() -> Result<()> {
         // (horizon_threads::jobs) and other programs outnumber the cores, and a frame that gave its core up (in a GPU submit) waited
         // 10 to 200 ms to get one back.
         horizon_threads::favour_current();
+        pin_to_big_cores("Render thread");
     }
     if options.execution_role.is_client() {
         horizon_threads::catch_stop_signals();
@@ -22026,6 +22475,11 @@ pub fn run_with() -> Result<()> {
     {
         horizon_client::spans::record_here(true);
     }
+    if horizon_client::gfx::headset::installed()
+        && let Some(host) = horizon_client::room::take_host().or_else(quest_room::dev_host)
+    {
+        return quest_room::run(options, host, started);
+    }
     let vanilla_root = options.resources.clone();
     // Android has no launcher to start from: the setup screen asks for the game files instead.
     #[cfg(not(target_os = "android"))]
@@ -22040,69 +22494,7 @@ pub fn run_with() -> Result<()> {
         }
         return Err(error.into());
     }
-    // Someone is playing: the anonymous ping behind the launcher's "N playing now", and the
-    // official server in their list (servers.dat in the game folder, the working directory). Not
-    // for a server, a benchmark, a run that quits by itself, a harness's fixture or a run that
-    // horizon-ctl drives: those start in a source checkout and wrote the list there.
-    if !options.offscreen && !synchronous_startup(&options) {
-        horizon_client::heartbeat::start();
-        if let Err(e) =
-            horizon_client::multiplayer::add_official_server(&horizon_client::logging::player_dir())
-        {
-            log::warn!("could not add the official server to servers.dat: {e}");
-        }
-    }
-    mods::register_components(&vanilla_root)?;
-    mods::register_standalone_models();
-    // Bedrock's touch buttons, fetched from Mojang once (bedrock_touch.rs) where the resources
-    // came without them (prepared on a computer, or no network then): drawn from the next start,
-    // or this one's if they come before its GUI atlas.
-    #[cfg(target_os = "android")]
-    if options.execution_role.is_client()
-        && vanilla_root.join("horizon-resources.json").is_file()
-        && let Err(e) = horizon_client::android_control_assets::fetch(&vanilla_root, |_, _| {})
-    {
-        log::warn!("Original Android control textures: {e}");
-    }
-    if options.execution_role.is_client() && !horizon_client::bedrock_touch::present(&vanilla_root)
-    {
-        let root = vanilla_root.clone();
-        let _ = std::thread::Builder::new()
-            .name("bedrock touch".into())
-            .spawn(move || horizon_client::bedrock_touch::fetch_logged(&root));
-    }
-    let options_txt = Game::options_path();
-    #[cfg(target_os = "android")]
-    let first_start = !options_txt.exists();
-    #[allow(unused_mut)]
-    let mut early_settings = Settings::load(&options_txt);
-    // A phone's first start: settings for what it can take, saved before anything reads them.
-    #[cfg(target_os = "android")]
-    if first_start && let Some(tier) = horizon_client::system_stats::Tier::here() {
-        horizon_client::graphics::apply_mobile_defaults(tier, &mut early_settings);
-        early_settings.save(&options_txt);
-        log::info!(
-            "Horizon: first start on a {} tier device: render distance {}, resolution {}%",
-            tier.name(),
-            early_settings.render_distance,
-            early_settings.horizon.resolution_scale
-        );
-    }
-    // Minecraft's constructor opens the narrator; a server has none.
-    if options.execution_role.is_client() {
-        narrator::start(&early_settings);
-    }
-    // "Playing Horizon" on Discord: never for a server; an automated run only talks to a test's fake Discord.
-    if options.dedicated.is_none() {
-        let automated = options.benchmark.is_some()
-            || options.offscreen
-            || options.frames.is_some()
-            || options.world_frames.is_some();
-        horizon_client::discord_presence::start(early_settings.extras.discord_presence, automated);
-    }
-    // Snapshots of derived tables live in the game folder (or its private
-    // half), never beside the shared resources.
-    Behaviours::set_cache_dir(horizon_client::logging::cache_dir());
+    let early_settings = before_loading(&options, &vanilla_root)?;
     // Android's windowed harnesses need the same early adapter discovery as a
     // normal launch: packing before the window opens cannot know the GPU limit.
     let android_windowed = cfg!(target_os = "android")

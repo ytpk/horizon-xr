@@ -27,6 +27,10 @@ horizon-threads = { path = "../horizon-threads" }
 horizon-hdr = { path = "../horizon-hdr" }
 horizon-world = { path = "../horizon-world" }
 horizon-protocol = { path = "../horizon-protocol" }
+# Vivecraft port (LGPL-3.0-or-later): the vivecraft:data channel on the client and the server.
+horizon-vivecraft = { path = "../horizon-vivecraft" }
+# Visor port (MPL-2.0): the visor:channel protocol on the client and the server.
+horizon-visor = { path = "../horizon-visor" }
 # server.properties, eula.txt and the user lists, shared with horizon-server.
 horizon-server-files = { path = "../horizon-server-files" }
 # The dedicated server's anticheat, off unless server.toml's [anticheat] turns it on (docs/anticheat.md).

@@ -32,7 +32,7 @@ impl Game<'_> {
             .and_then(|(slot, _)| {
                 let g = host.hub.guest(conn)?;
                 let stack = if slot == super::shield::OFFHAND_SLOT {
-                    g.offhand.as_ref()
+                    g.offhand_item()
                 } else {
                     g.inventory.get(slot)?.as_ref()
                 }?;
@@ -60,7 +60,7 @@ impl Game<'_> {
                 g.inventory.get(g.selected).and_then(Option::as_ref),
                 "mainhand",
             )
-            || hand(g.offhand.as_ref(), "offhand");
+            || hand(g.offhand_item(), "offhand");
         if let Some(motion) = g.motion.as_deref_mut() {
             motion.glider = glider;
             motion.item_use_speed = item_use.map(|(speed, _)| speed);

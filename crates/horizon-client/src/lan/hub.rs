@@ -2600,7 +2600,7 @@ impl Hub {
                     let g = &self.guests[i];
                     (
                         g.inventory.get(g.selected).cloned().flatten(),
-                        g.offhand.clone(),
+                        g.offhand_item().cloned(),
                         g.armor.clone(),
                     )
                 };

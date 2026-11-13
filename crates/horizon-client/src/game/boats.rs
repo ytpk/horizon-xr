@@ -672,6 +672,20 @@ impl Game<'_> {
             if down {
                 acceleration -= 0.005;
             }
+            // Vivecraft's `AbstractBoatMixin`: controller steering and rowing.
+            let (mut left, mut right, mut up) = (left, right, up);
+            if let Some(steer) = self.vr_boat_steer(b.yaw, b.delta_rotation, up) {
+                if let Some(yaw) = steer.yaw {
+                    b.yaw = yaw;
+                }
+                b.delta_rotation += steer.delta_rotation;
+                if let Some(a) = steer.acceleration {
+                    acceleration = a;
+                }
+                left |= steer.left;
+                right |= steer.right;
+                up |= steer.up;
+            }
             let r = b.yaw.to_radians();
             b.velocity.x += f64::from((-r).sin() * acceleration);
             b.velocity.z += f64::from(r.cos() * acceleration);

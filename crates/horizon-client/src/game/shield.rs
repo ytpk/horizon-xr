@@ -15,20 +15,64 @@ use horizon_world::blocking_rules::{BlockingRules, DamageReduction, ItemDamageFu
 pub(super) const OFFHAND_SLOT: usize = 40;
 
 impl Game<'_> {
-    /// The stack in an inventory slot, the off hand at `OFFHAND_SLOT`.
+    /// The stack in an inventory slot, the off hand at `OFFHAND_SLOT`. In two-handed play
+    /// (`offhand_redirect`) the off hand is the hotbar slot the player chose
+    /// (`VROffhandEquipment.get`), and an unchosen slot is an empty hand.
     pub(super) fn stack_in(&self, slot: usize) -> Option<&ItemStack> {
         if slot == OFFHAND_SLOT {
-            self.offhand.as_ref()
+            self.offhand_cell().as_ref()
         } else {
             self.inventory.get(slot)?.as_ref()
         }
     }
     pub(super) fn stack_in_mut(&mut self, slot: usize) -> &mut Option<ItemStack> {
         if slot == OFFHAND_SLOT {
-            &mut self.offhand
+            self.offhand_cell_mut()
         } else {
             &mut self.inventory[slot]
         }
+    }
+    /// The cell the off hand is: the vanilla off-hand slot, or in two-handed play the hotbar slot
+    /// the player chose (`VROffhandEquipment.get`); no slot chosen is an empty hand.
+    pub(super) fn offhand_cell(&self) -> &Option<ItemStack> {
+        static EMPTY: Option<ItemStack> = None;
+        match self.offhand_redirect {
+            None => &self.offhand,
+            Some(hotbar) => usize::try_from(hotbar)
+                .ok()
+                .and_then(|i| self.inventory.get(i))
+                .unwrap_or(&EMPTY),
+        }
+    }
+    pub(super) fn offhand_cell_mut(&mut self) -> &mut Option<ItemStack> {
+        match self.offhand_redirect {
+            None => &mut self.offhand,
+            Some(hotbar) => match usize::try_from(hotbar) {
+                Ok(i) if i < self.inventory.len() => &mut self.inventory[i],
+                // `VROffhandEquipment.set` with no slot: the write goes nowhere.
+                _ => {
+                    self.offhand_void = None;
+                    &mut self.offhand_void
+                }
+            },
+        }
+    }
+    /// The stack in the off hand, as `stack_in(OFFHAND_SLOT)` has it.
+    pub(super) fn offhand_item(&self) -> Option<&ItemStack> {
+        self.stack_in(OFFHAND_SLOT)
+    }
+    /// Runs `f` with the hand that mines and attacks acting: the off hand when `ACTIVE_HAND` is
+    /// the off hand in two-handed play, else the hand already acting.
+    pub(super) fn with_active_hand<T>(&mut self, f: impl FnOnce(&mut Self) -> T) -> T {
+        if self.active_off && self.offhand_redirect.is_some() && self.hand == super::Hand::Main {
+            self.with_hand(super::Hand::Off, f)
+        } else {
+            f(self)
+        }
+    }
+    /// Two-handed play is on for the player in the game's seat.
+    pub(super) fn two_handed_play(&self) -> bool {
+        self.offhand_redirect.is_some()
     }
     /// The stack's `blocks_attacks`: its own component, else its item's.
     pub(super) fn blocks_attacks(
@@ -58,20 +102,41 @@ impl Game<'_> {
         from: Option<[f64; 3]>,
         damage_type: &str,
         pierce: bool,
+        projectile: bool,
     ) -> Option<Blocking> {
-        let (slot, ticks) = self.using?;
-        let component = self.blocks_attacks(self.stack_in(slot)?)?;
-        // BlocksAttacks.blockDelayTicks: Math.round(seconds * 20).
-        if (ticks as i32) < (component.delay_seconds * 20.0).round() as i32 {
-            return None;
-        }
         let tags = &self.stations().enchantments.damage_tags;
         let matches = |spec: &str| match spec.strip_prefix('#') {
             Some(tag) => tags.get(tag).is_some_and(|t| t.contains(damage_type)),
             None => spec == damage_type,
         };
+        // Vivecraft's roomscale shield: a VR player blocks with a shield held up against the hit
+        // even when not using it.
+        let roomscale = self
+            .using
+            .is_none()
+            .then(|| {
+                let bypassed = |c: &horizon_client::items::BlocksAttacks| {
+                    c.bypassed_by.as_deref().is_some_and(matches)
+                };
+                self.vr_roomscale_shield(from, projectile, &bypassed)
+                    .or_else(|| self.visor_roomscale_shield(from, projectile, &bypassed))
+            })
+            .flatten();
+        let (slot, ticks) = match (self.using, roomscale) {
+            (Some(using), _) => using,
+            (None, Some((slot, _))) => (slot, 1_000),
+            (None, None) => return None,
+        };
+        self.vr_shield_slot.set(roomscale.map(|r| r.0));
+        let component = self.blocks_attacks(self.stack_in(slot)?)?;
+        // BlocksAttacks.blockDelayTicks: Math.round(seconds * 20).
+        if (ticks as i32) < (component.delay_seconds * 20.0).round() as i32 {
+            return None;
+        }
         let p = self.player.as_ref()?;
         let angle = match from {
+            // The roomscale shield passes the dot product as the angle, as Vivecraft does.
+            _ if let Some((_, dot)) = roomscale => dot,
             Some(src) => {
                 // calculateViewVector(0, yHeadRot) against the flattened direction.
                 let yaw = (-self.yaw).to_radians();
@@ -121,7 +186,13 @@ impl Game<'_> {
         (attacker, projectile): (Option<u32>, bool),
         source: HurtSource<'_>,
     ) {
-        let Some((slot, _)) = self.using else { return };
+        let slot = match self.using {
+            Some((slot, _)) => slot,
+            None => match self.vr_shield_slot.take() {
+                Some(slot) => slot,
+                None => return,
+            },
+        };
         let Some(stack) = self.stack_in(slot).cloned() else {
             return;
         };

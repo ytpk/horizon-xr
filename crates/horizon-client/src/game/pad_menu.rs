@@ -384,6 +384,29 @@ impl Game<'_> {
         self.pad_pointer_to(event_loop, at);
     }
 
+    /// Run `f` with `key` held as a keyboard holds it, in the modifier word
+    /// screens read as well as the physical keys, then put both back. The
+    /// pad's only way to send Shift or Ctrl, so it can't fall out of step
+    /// with what the keyboard sends.
+    pub(super) fn pad_with_modifier<T>(
+        &mut self,
+        key: winit::keyboard::KeyCode,
+        f: impl FnOnce(&mut Self) -> T,
+    ) -> T {
+        let held = horizon_client_input::modifiers::hold(
+            &mut self.modifiers,
+            &mut self.physical_keys,
+            key,
+        );
+        let result = f(self);
+        horizon_client_input::modifiers::restore(
+            &mut self.modifiers,
+            &mut self.physical_keys,
+            held,
+        );
+        result
+    }
+
     /// Focus mode with something to focus on this screen.
     fn pad_focusing(&self) -> bool {
         self.pad_focus_mode() && self.pad.menu.focus.is_some()
@@ -1334,6 +1357,71 @@ impl Game<'_> {
         menu.pos = Some(self.cursor);
     }
 
+    // ---- a headset's pointer ----
+
+    /// Where the on-screen keyboard is: over the top when the field it
+    /// types into is in the lower half of a screen `height` tall.
+    fn osk_at_top(&self, height: f32) -> bool {
+        self.pad
+            .menu
+            .focus
+            .is_some_and(|f| f.center().1 > height / 2.0)
+            || self.screen == Screen::Chat
+    }
+
+    /// A headset's pointer over the on-screen keyboard focuses the key under
+    /// it; `press` types it. Whether the pointer is over a key (a press
+    /// there is no click on the screen under it).
+    pub(super) fn headset_keyboard(&mut self, press: bool) -> bool {
+        let Some(batch) = self.gui_scale() else {
+            return false;
+        };
+        let at_top = self.osk_at_top(batch.height);
+        let (x, y) = self.cursor;
+        let Some(keyboard) = self.pad.menu.osk.as_mut() else {
+            return false;
+        };
+        let Some((row, col)) = keyboard.key_at(batch.width, batch.height, at_top, x, y) else {
+            return false;
+        };
+        keyboard.focus(row, col);
+        if press && let Some(out) = keyboard.press() {
+            self.pad_osk_output(out);
+        }
+        true
+    }
+
+    /// Visor opens its keyboard with the chat and with a sign (`VROverlayGameScreen.onScreenChanged`):
+    /// here the on-screen keyboard opens on the screen's panel, once per screen; closing it keeps
+    /// it closed for that screen.
+    pub(super) fn headset_auto_keyboard(&mut self) {
+        let typing = self.pad_typing();
+        // Visor's own keyboard (`visorKeyboard`, on by default); Horizon's on-screen keyboard is
+        // only the fallback for a player who turned that off.
+        if self.visor_keyboard_wanted() {
+            self.visor_keyboard_auto(typing);
+            return;
+        }
+        let menu = &mut self.pad.menu;
+        if typing && menu.osk.is_none() && !menu.osk_dismissed {
+            menu.osk_dismissed = true;
+            self.pad_open_keyboard();
+        }
+    }
+
+    /// A headset's click on a text field opens the on-screen keyboard over it.
+    pub(super) fn headset_clicked(&mut self) {
+        if self.visor_keyboard_wanted() {
+            if field_at(&self.pad_targets(), self.cursor) {
+                self.visor_keyboard_clicked();
+            }
+            return;
+        }
+        if self.pad.menu.osk.is_none() && field_at(&self.pad_targets(), self.cursor) {
+            self.pad_open_keyboard();
+        }
+    }
+
     // ---- text fields ----
 
     /// A text field has keyboard focus: chat, a sign, a book being written,
@@ -1341,6 +1429,7 @@ impl Game<'_> {
     /// fields, the LAN port.
     fn pad_typing(&self) -> bool {
         (self.screen == Screen::Chat && self.title.is_none())
+            || self.dialog_typing()
             || self.sign_edit.is_some()
             || matches!(self.book, Some(super::books::BookScreen::Edit { .. }))
             || (self.screen == Screen::Creative && self.creative_screen.tab().search)
@@ -1352,6 +1441,11 @@ impl Game<'_> {
     /// Steam's on a Steam Deck (`steam://open/keyboard`, which types into
     /// the window like a real keyboard).
     fn pad_open_keyboard(&mut self) {
+        // In a headset it is Visor's keyboard that opens (`visorKeyboard`).
+        if self.visor_keyboard_wanted() {
+            self.visor_keyboard_open();
+            return;
+        }
         // Without xdg-open (macOS, Windows), Horizon's keyboard instead.
         if gamepad::steam_keyboard(self.settings.controller.keyboard)
             && std::process::Command::new("xdg-open")
@@ -1466,12 +1560,7 @@ impl Game<'_> {
             return;
         }
         if let Some(keyboard) = &self.pad.menu.osk {
-            let at_top = self
-                .pad
-                .menu
-                .focus
-                .is_some_and(|f| f.center().1 > batch.height / 2.0)
-                || self.screen == Screen::Chat;
+            let at_top = self.osk_at_top(batch.height);
             let mut ui = horizon_client::ui_theme::Ui::new(&self.gui.atlas, batch, self.cursor);
             keyboard.draw(&mut ui, at_top, self.ui.options.pad_style);
             ui.finish();

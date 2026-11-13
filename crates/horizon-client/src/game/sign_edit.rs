@@ -657,7 +657,7 @@ impl Game<'_> {
     /// `TextFieldHelper.keyPressed`'s shortcuts on the edited line. Paste
     /// reads `getClipboardContents` before `insertText`. A paste that would
     /// pass the sign's width is refused whole.
-    fn sign_shortcut(&mut self, shortcut: horizon_client::clipboard::EditShortcut) {
+    pub(super) fn sign_shortcut(&mut self, shortcut: horizon_client::clipboard::EditShortcut) {
         if shortcut == horizon_client::clipboard::EditShortcut::Paste {
             let raw = horizon_client::clipboard::Clipboard::get(&mut self.clipboard);
             let text = horizon_client::clipboard::helper_clipboard_contents(&raw);

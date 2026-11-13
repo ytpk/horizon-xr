@@ -198,7 +198,7 @@ impl Game<'_> {
             || self.keys.contains(&winit::keyboard::KeyCode::ShiftRight);
         // Horse / ZombieHorse.mobInteract: food is fed, and anything else in
         // hand makes an untamed one mad instead of seating the player.
-        let dandelion = [self.held(), self.offhand.as_ref()]
+        let dandelion = [self.held(), self.offhand_item()]
             .into_iter()
             .flatten()
             .any(|s| &*s.item == "minecraft:golden_dandelion");
@@ -429,7 +429,7 @@ impl Game<'_> {
         let steer = steering_item(
             self.mobs[i].species(),
             self.held().map(|s| s.item.as_ref()),
-            self.offhand.as_ref().map(|s| s.item.as_ref()),
+            self.offhand_item().map(|s| s.item.as_ref()),
         );
         let jump = self.charge_mount_jump(i, keys);
         let m = &mut self.mobs[i];

@@ -242,6 +242,13 @@ pub struct Guest {
     pub inventory: Vec<Option<ItemStack>>,
     pub armor: [Option<ItemStack>; 4],
     pub offhand: Option<ItemStack>,
+    /// Two-handed play (`VROffhandEquipment`): the off hand is this hotbar slot (-1: none
+    /// chosen) while the server plays two-handed and the player is a Visor VR player. The
+    /// Visor glue sets it (`game/visor_server.rs`); `None` is the vanilla off hand.
+    pub offhand_redirect: Option<i32>,
+    /// `getActiveHand() == OFFHAND` (`ACTIVE_HAND`, two-handed play only): the off hand mines and
+    /// attacks.
+    pub active_hand_off: bool,
     pub selected: usize,
     pub carried: Option<ItemStack>,
     /// The inventory menu's crafting grid (2x2) and its result
@@ -349,6 +356,18 @@ pub struct Guest {
 }
 
 impl Guest {
+    /// The stack in the off hand as the game sees it (`getOffhandItem`): the hotbar slot chosen
+    /// in two-handed play, else the vanilla off-hand slot.
+    pub fn offhand_item(&self) -> Option<&ItemStack> {
+        match self.offhand_redirect {
+            None => self.offhand.as_ref(),
+            Some(slot) => usize::try_from(slot)
+                .ok()
+                .and_then(|i| self.inventory.get(i))
+                .and_then(Option::as_ref),
+        }
+    }
+
     pub fn new(j: Joined, entity_id: i32, position: [f64; 3], view_distance: i32) -> Self {
         Self {
             conn: j.conn,
@@ -438,6 +457,8 @@ impl Guest {
             inventory: vec![None; 36],
             armor: [None, None, None, None],
             offhand: None,
+            offhand_redirect: None,
+            active_hand_off: false,
             selected: 0,
             carried: None,
             craft_grid: Default::default(),

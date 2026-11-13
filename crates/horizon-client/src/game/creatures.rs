@@ -3411,8 +3411,14 @@ impl Game<'_> {
                 .damage_tags
                 .get("minecraft:is_projectile")
                 .is_some_and(|t| t.contains(damage_type));
-        let blocking = self.player_blocking(from, damage_type, false);
+        // The roomscale shield judges a projectile from one block back along its flight.
+        let threat = self.combat.projectile_threat.take().filter(|_| projectile);
+        let blocking = self.player_blocking(threat.or(from), damage_type, false, projectile);
         let raised = blocking.is_some();
+        // A roomscale block puts the shield on cooldown (`roomscaleShieldCooldown`).
+        if raised && let Some(slot) = self.vr_shield_slot.get() {
+            self.vr_shield_cooldown(slot, amount);
+        }
         // Melee: the attacker stands at `from` (another player's hit has no mob behind it).
         let attacker = match known {
             Some(known) => known,
@@ -4277,6 +4283,44 @@ impl Game<'_> {
             }
             _ => None,
         };
+        self.combat.projectile_threat = match hit {
+            Hit::Entity {
+                who: Who::Player, ..
+            } if p.arrow.as_ref().is_none_or(|a| a.pierce == 0) => {
+                let v = p.velocity;
+                let len = (v.x * v.x + v.y * v.y + v.z * v.z).sqrt();
+                let back = if len > 0.0 {
+                    [v.x / len, v.y / len, v.z / len]
+                } else {
+                    [0.0; 3]
+                };
+                Some([
+                    p.position.x - back[0],
+                    p.position.y - back[1],
+                    p.position.z - back[2],
+                ])
+            }
+            _ => None,
+        };
+        self.combat.projectile_threat = match hit {
+            Hit::Entity {
+                who: Who::Player, ..
+            } if p.arrow.as_ref().is_none_or(|a| a.pierce == 0) => {
+                let v = p.velocity;
+                let len = (v.x * v.x + v.y * v.y + v.z * v.z).sqrt();
+                let back = if len > 0.0 {
+                    [v.x / len, v.y / len, v.z / len]
+                } else {
+                    [0.0; 3]
+                };
+                Some([
+                    p.position.x - back[0],
+                    p.position.y - back[1],
+                    p.position.z - back[2],
+                ])
+            }
+            _ => None,
+        };
         let at = match hit {
             Hit::Entity { at, .. } | Hit::Block { at, .. } => at,
             Hit::None => return Ok(()),
@@ -4445,6 +4489,13 @@ impl Game<'_> {
             }
             (ProjectileKind::Arrow { .. }, Hit::Entity { who, .. }) => {
                 let mut arrow = p.clone();
+                // Vivecraft's bow damage: a VR shooter's multiplier, and the headshot's.
+                let multiplier = self.vr_arrow_multiplier(p, who);
+                if multiplier != 1.0
+                    && let ProjectileKind::Arrow { base_damage, .. } = &mut arrow.kind
+                {
+                    *base_damage *= multiplier;
+                }
                 let amount = arrow_damage(&mut arrow, &mut self.world.random) + p.bonus.damage;
                 let player_fire = self.player.as_ref().map(|pl| pl.fire_ticks);
                 let mut dodged = false;

@@ -215,9 +215,19 @@ impl Game<'_> {
             display.tick();
         }
     }
+    /// The yaw and pitch (degrees) what faces the camera is turned by: particles, sprites.
+    /// In a headset the head's, never the aim hand's that `yaw` and `pitch` follow.
+    pub(super) fn billboard_angles(&self) -> [f32; 2] {
+        let (yaw, pitch) = self.posed_rotation.unwrap_or((self.yaw, self.pitch));
+        [yaw, pitch]
+    }
     /// The camera's yaw and pitch as `DisplayRenderer` reads them (the
     /// front view turns around).
-    fn display_camera_angles(&self) -> [f32; 2] {
+    pub(super) fn display_camera_angles(&self) -> [f32; 2] {
+        // A headset's head (or a mod's pose), already the frame's camera facing.
+        if let Some((yaw, pitch)) = self.posed_rotation {
+            return [yaw, pitch];
+        }
         if self.camera_type == super::perspective::CameraType::ThirdPersonFront {
             [self.yaw + 180.0, -self.pitch]
         } else {

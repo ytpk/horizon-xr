@@ -744,7 +744,12 @@ impl Game<'_> {
     /// below 260 frames per second, sleeping then spin-waiting until the
     /// frame's slot ends (not in scripted frame-count runs).
     pub(super) fn limit_frame(&mut self) {
-        if self.options.frames.is_some() || self.options.paced_by_split {
+        // A headset's runtime paces the frames (xrWaitFrame); the idle (AFK)
+        // throttle would hold a headset lying still, or a still player, at 30.
+        if self.options.frames.is_some()
+            || self.options.paced_by_split
+            || horizon_client::headset::active()
+        {
             return;
         }
         let limit = self.framerate_limit();

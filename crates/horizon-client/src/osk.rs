@@ -148,6 +148,11 @@ const SYMBOLS: [Row; 5] = [
     BOTTOM,
 ];
 
+/// A key's width unit, the gap between keys and a key's height (GUI units).
+const UNIT: f32 = 50.0;
+const GAP: f32 = 6.0;
+const KEY_H: f32 = 38.0;
+
 /// The keyboard's state while open.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Keyboard {
@@ -271,6 +276,43 @@ impl Keyboard {
         }
     }
 
+    /// The keys' top left corner on a screen `w` by `h` (GUI units).
+    fn origin(w: f32, h: f32, at_top: bool) -> (f32, f32) {
+        let width = 10.0 * UNIT + 9.0 * GAP;
+        let height = 5.0 * KEY_H + 4.0 * GAP + 24.0 + 30.0;
+        let x0 = ((w - width) / 2.0).round();
+        let y0 = if at_top { 16.0 } else { h - height - 16.0 };
+        (x0, y0)
+    }
+
+    /// The key under a pointer at `(x, y)` on a screen `w` by `h` (GUI
+    /// units), drawn as `draw` draws it: its row and column.
+    pub fn key_at(&self, w: f32, h: f32, at_top: bool, x: f32, y: f32) -> Option<(usize, usize)> {
+        let (x0, y0) = Self::origin(w, h, at_top);
+        let row = ((y - y0) / (KEY_H + GAP)).floor();
+        if row < 0.0 || y - y0 - row * (KEY_H + GAP) > KEY_H {
+            return None;
+        }
+        let row = row as usize;
+        let keys = *self.rows().get(row)?;
+        let units = (x - x0 + GAP / 2.0) / (UNIT + GAP);
+        (0..keys.len())
+            .find(|&i| {
+                let (left, width) = Self::span(keys, i);
+                units >= left && units < left + width
+            })
+            .map(|col| (row, col))
+    }
+
+    /// A pointer over the key at `row` and `col` focuses it.
+    pub fn focus(&mut self, row: usize, col: usize) {
+        if let Some(keys) = self.rows().get(row)
+            && col < keys.len()
+        {
+            (self.row, self.col) = (row, col);
+        }
+    }
+
     /// Draw the keyboard across the bottom of the screen, or the top when
     /// the field it types into is in the lower half.
     pub fn draw(&self, ui: &mut Ui, at_top: bool, glyphs: GlyphStyle) {
@@ -279,8 +321,7 @@ impl Keyboard {
         const KEY_H: f32 = 38.0;
         let width = 10.0 * UNIT + 9.0 * GAP;
         let height = 5.0 * KEY_H + 4.0 * GAP + 24.0 + 30.0;
-        let x0 = ((ui.w - width) / 2.0).round();
-        let y0 = if at_top { 16.0 } else { ui.h - height - 16.0 };
+        let (x0, y0) = Self::origin(ui.w, ui.h, at_top);
         ui.rounded(
             x0 - 12.0,
             y0 - 12.0,
@@ -372,6 +413,21 @@ mod tests {
                 assert_eq!(units, 10.0);
             }
         }
+    }
+
+    #[test]
+    fn a_pointer_finds_the_key_drawn_under_it() {
+        let k = Keyboard::default();
+        let (w, h) = (640.0, 360.0);
+        let (x0, y0) = Keyboard::origin(w, h, false);
+        // The middle of `q` (second row, first key) and of Space.
+        let q = (x0 + UNIT / 2.0, y0 + (KEY_H + GAP) + KEY_H / 2.0);
+        assert_eq!(k.key_at(w, h, false, q.0, q.1), Some((1, 0)));
+        let space = (x0 + 5.0 * (UNIT + GAP), y0 + 4.0 * (KEY_H + GAP) + 5.0);
+        assert_eq!(k.key_at(w, h, false, space.0, space.1), Some((4, 2)));
+        // Above the keys, and in the gap between two rows.
+        assert_eq!(k.key_at(w, h, false, q.0, y0 - 5.0), None);
+        assert_eq!(k.key_at(w, h, false, q.0, y0 + KEY_H + GAP / 2.0), None);
     }
 
     #[test]

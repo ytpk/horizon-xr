@@ -169,6 +169,11 @@ impl Game<'_> {
                     if self.debug && !own_lines.is_empty() {
                         d.group("Horizon passes", own_lines);
                     }
+                    // The headset frame's parts (`horizonVrProfile`), in a group of their own.
+                    let vr_lines = horizon_client::vr_profile::overlay_lines();
+                    if self.debug && !vr_lines.is_empty() {
+                        d.group("Horizon VR frame", vr_lines);
+                    }
                 }
                 "tps" => self.debug_tps_line(d),
                 // DebugEntryChunkGeneration, where the world is generated

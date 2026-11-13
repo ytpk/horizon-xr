@@ -900,7 +900,7 @@ impl Game<'_> {
         if self.main_hand_rod() {
             self.held()
         } else {
-            self.offhand.as_ref()
+            self.offhand_item()
         }
     }
     pub(super) fn main_hand_rod(&self) -> bool {

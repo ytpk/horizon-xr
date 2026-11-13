@@ -963,6 +963,9 @@ pub fn setup(
             humanoid(p, s, &h);
             if player {
                 player_model_visibility(p, m.extra.hidden_model_parts, m.extra.spectator);
+                if let Some(vr) = &m.extra.vr_body {
+                    vr_player_model(m, vr, s, &h, p);
+                }
             }
             if m.ai.aggressive && !bow {
                 // SkeletonModel melee pose.
@@ -1071,6 +1074,62 @@ pub fn setup(
     }
 }
 
+/// `VRPlayerModel.animateVRModel`: a VR player's head, body, arms and legs follow the pose its
+/// client sent (`player_model` of horizon-vivecraft), drawn `partial` of the way between the last
+/// two ticks.
+fn vr_player_model(
+    m: &Mob,
+    vr: &horizon_vivecraft::player_model::VrBody,
+    s: &State,
+    h: &Hum,
+    p: &mut Poses,
+) {
+    use horizon_vivecraft::player_model::{Input, Part, Parts, SwingKind, animate};
+    let rot = vr.rot(s.partial);
+    let mut parts = Parts {
+        head: Part::from_array(*p.get("head")),
+        body: Part::from_array(*p.get("body")),
+        left_arm: Part::from_array(*p.get("left_arm")),
+        right_arm: Part::from_array(*p.get("right_arm")),
+        left_leg: Part::from_array(*p.get("left_leg")),
+        right_leg: Part::from_array(*p.get("right_leg")),
+    };
+    let gliding = h.fall_flying;
+    let lay_amount = if gliding { 1.0 } else { h.swim };
+    let input = Input {
+        rot,
+        slim: m.slim,
+        crouching: h.crouching,
+        passenger: h.passenger,
+        auto_spin_attack: m.extra.auto_spin_attack,
+        lay_amount,
+        swimming: (lay_amount > 0.0 && m.fluids.in_water) || gliding,
+        head_pitch: s.x_rot,
+        attack_time: s.swing,
+        // Vivecraft ignores the vanilla main arm: the swinging arm is the main hand's.
+        attack_is_main: m.extra.swing_right_arm.unwrap_or(true),
+        is_main_player: false,
+        body_scale: 1.0,
+        arm_scale: 1.0,
+        leg_scale: 1.0,
+        swing: SwingKind::Attack,
+        limbs_connected: vr.options.limbs_connected,
+        limbs_limit: vr.options.limbs_limit,
+        arm_anim: vr.options.arm_anim,
+        apply_world_scale: vr.options.apply_world_scale,
+    };
+    animate(&mut parts, &input);
+    for (name, part) in [
+        ("head", parts.head),
+        ("body", parts.body),
+        ("left_arm", parts.left_arm),
+        ("right_arm", parts.right_arm),
+        ("left_leg", parts.left_leg),
+        ("right_leg", parts.right_leg),
+    ] {
+        *p.get(name) = part.to_array();
+    }
+}
 /// `PlayerModel.setupAnim`'s visibility: a spectator shows only its head (`showBody`), and the
 /// skin layers the player hid (`PlayerModelPart`, bit set = hidden) are off.
 fn player_model_visibility(p: &mut Poses, hidden: u8, spectator: bool) {

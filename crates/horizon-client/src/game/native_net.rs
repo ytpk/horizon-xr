@@ -90,6 +90,8 @@ impl Game<'_> {
         // The allowance is a server tick's, not a level pass's: it starts over
         // after the last level.
         if self.level_pass.last {
+            self.flush_vivecraft(host);
+            self.flush_visor(host);
             self.native_net.from_counts.clear();
             self.native_net.to_counts.clear();
         }

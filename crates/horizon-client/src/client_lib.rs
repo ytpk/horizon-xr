@@ -22,7 +22,8 @@ pub use horizon_client_render::{
     sculk, section_mask, server_terrain, settings, shader_options, shader_pack_list, signs, skins,
     sound_engine, sound_events, sound_preview, spans, split_layout, split_map, split_profiles,
     sprites, streaming, structure_block, system_stats, tab_list, telemetry, test_block,
-    test_instance_block, testgen, title_edition, trims, ui, vault, weather, widgets, world,
+    test_instance_block, testgen, title_edition, trims, ui, vault, visor_art, vr_profile, weather, widgets,
+    world,
     worldborder, zip,
 };
 pub mod attack_strength;
@@ -122,6 +123,7 @@ pub mod pose;
 pub mod pregen;
 pub mod preparer;
 pub mod projectiles;
+pub mod quest_room;
 pub mod raid;
 pub mod ram_limit;
 pub mod random_tick_sections;

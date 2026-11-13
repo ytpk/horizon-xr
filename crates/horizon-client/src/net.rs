@@ -878,6 +878,19 @@ fn receive_play(
     }
 }
 
+/// The `minecraft:register` payload of a headset: the NUL separated channels of the VR
+/// protocols `preference` (`AUTO`, `VISOR`, `VIVECRAFT`) may speak.
+pub(crate) fn vr_register_payload(preference: &str) -> Vec<u8> {
+    let mut names: Vec<&str> = Vec::new();
+    if preference != "VIVECRAFT" {
+        names.push(horizon_visor::CHANNEL);
+    }
+    if preference != "VISOR" {
+        names.push(horizon_vivecraft::network::CHANNEL);
+    }
+    names.join("\0").into_bytes()
+}
+
 /// The configuration phase: registries, tags and known packs until the
 /// server finishes it (ClientConfigurationPacketListenerImpl). Err: the connection failed;
 /// Ok(Err): the server ended it, with its reason.
@@ -900,6 +913,21 @@ fn configure(
             None => Err(Reason::plain("Disconnected")),
         }
     };
+    // A Vivecraft client names its channel to the server (`minecraft:register`, as
+    // Fabric API does in the configuration phase): plugin servers (Paper, Spigot) only
+    // send on channels the client registered.
+    // The channels follow the VR protocol the player picked (`horizonVrProtocol`): Auto names both,
+    // since the answer of the server decides later.
+    let vr_settings = crate::headset::settings();
+    let vr_protocol = vr_settings.enum_name("horizonVrProtocol");
+    let vr_active = crate::headset::active();
+    // Flat observers also register Visor, so plugin servers can send other players' poses.
+    if vr_active || vr_protocol != "VIVECRAFT" {
+        reply(cfg::Serverbound::CustomPayload(cfg::CustomPayload {
+            channel: horizon_vivecraft::network::REGISTER_CHANNEL.into(),
+            data: vr_register_payload(if vr_active { vr_protocol } else { "VISOR" }),
+        }))?;
+    }
     loop {
         let (id, payload) = reader
             .recv()
@@ -1373,6 +1401,16 @@ mod tests {
             )
         });
         let mut server = Connection::local(server);
+        // Flat clients register Visor to observe remote VR players, before configuration replies.
+        let (id, body) = server.recv().unwrap();
+        assert_eq!(
+            cfg::Serverbound::decode(id, &body).unwrap(),
+            cfg::Serverbound::CustomPayload(cfg::CustomPayload {
+                channel: horizon_vivecraft::network::REGISTER_CHANNEL.into(),
+                data: vr_register_payload("VISOR"),
+            })
+        );
+
         server
             .send(
                 &cfg::Clientbound::CustomPayload(cfg::CustomPayload {
@@ -1391,6 +1429,15 @@ mod tests {
             cfg::Serverbound::CustomPayload(cfg::CustomPayload {
                 channel: crate::content_identity::CHANNEL.into(),
                 data: expected.to_vec(),
+            })
+        );
+        // Flat clients register Visor to observe remote VR players, before configuration replies.
+        let (id, body) = server.recv().unwrap();
+        assert_eq!(
+            cfg::Serverbound::decode(id, &body).unwrap(),
+            cfg::Serverbound::CustomPayload(cfg::CustomPayload {
+                channel: horizon_vivecraft::network::REGISTER_CHANNEL.into(),
+                data: vr_register_payload("VISOR"),
             })
         );
         let (id, body) = server.recv().unwrap();
@@ -1564,6 +1611,16 @@ mod tests {
         assert_eq!(
             play::Serverbound::decode(id, &body).unwrap(),
             play::Serverbound::ConfigurationAcknowledged(Empty)
+        );
+
+        // Flat clients register Visor to observe remote VR players, before configuration replies.
+        let (id, body) = server.recv().unwrap();
+        assert_eq!(
+            cfg::Serverbound::decode(id, &body).unwrap(),
+            cfg::Serverbound::CustomPayload(cfg::CustomPayload {
+                channel: horizon_vivecraft::network::REGISTER_CHANNEL.into(),
+                data: vr_register_payload("VISOR"),
+            })
         );
         // The game thread still ticks the old level: nothing of it goes out.
         session.send(tick_end.clone());

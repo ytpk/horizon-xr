@@ -28,6 +28,8 @@ horizon-threads = { path = "../horizon-threads" }
 horizon-hdr = { path = "../horizon-hdr" }
 horizon-world = { path = "../horizon-world" }
 horizon-protocol = { path = "../horizon-protocol" }
+horizon-vivecraft = { path = "../horizon-vivecraft" }
+horizon-visor = { path = "../horizon-visor" }
 # server.properties, eula.txt and the user lists, shared with horizon-server.
 horizon-server-files = { path = "../horizon-server-files" }
 # The dedicated server's anticheat, off unless server.toml's [anticheat] turns it on (docs/anticheat.md).
@@ -50,6 +52,8 @@ pollster = "0.4"
 bytemuck = { version = "1.24", features = ["derive"] }
 glam = "0.30"
 png = "0.18"
+# The QR code on the room's sign-in page (MIT, Nayuki).
+qrcodegen = "1.8"
 sha2 = "0.10.9"
 # Server resource packs are checked and cached by their SHA-1, as vanilla does.
 sha1 = "0.10"

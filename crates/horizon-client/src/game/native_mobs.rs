@@ -70,7 +70,7 @@ impl Game<'_> {
         for g in host.hub.guests.iter().filter(|g| host.hub.here(g)) {
             let now: [Option<crate::items::ItemStack>; 6] = [
                 g.inventory.get(g.selected).cloned().flatten(),
-                g.offhand.clone(),
+                g.offhand_item().cloned(),
                 g.armor[3].clone(),
                 g.armor[2].clone(),
                 g.armor[1].clone(),

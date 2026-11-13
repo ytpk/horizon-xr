@@ -2029,7 +2029,15 @@ impl Game<'_> {
                     }
                 }
                 HostEvent::Packet(conn, packet) => {
+                    // `AimFixHandler` captures only these three packets.
+                    self.vr_aim_packet = matches!(
+                        *packet,
+                        play::Serverbound::UseItem(_)
+                            | play::Serverbound::UseItemOn(_)
+                            | play::Serverbound::PlayerAction(_)
+                    );
                     self.lan_guest_packet(&mut host, conn, *packet);
+                    self.vr_aim_packet = false;
                     if !host.commands.is_empty() {
                         self.lan = Some(host);
                         self.run_guest_commands();

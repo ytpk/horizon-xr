@@ -2640,6 +2640,12 @@ pub fn held_item_transform(
         t *= crate::spear::third_person_attack_item(s.swing, forward);
     }
     let off_hand = left != m.main_arm_left();
+    // A Visor player's item is held by Visor's pose (`ItemInHandLayerMixin.visor$applyHandPose`):
+    // the controller's roll about its aim undone, then `VRItemPoseDefault` with the aim to grip
+    // turn of the gun angle the player sent (`OTHER_GUN_ANGLE`).
+    if let Some(pose) = visor_item_pose(m, alpha, off_hand) {
+        t *= pose;
+    }
     if super::spear_use::is_using_item(m)
         && m.extra.using_off_hand == off_hand
         && let Some(kinetic) = (if off_hand {
@@ -2654,6 +2660,68 @@ pub fn held_item_transform(
         t *= crate::spear::third_person_use_item(&kinetic, time_held, s.swing, 0.0, !left);
     }
     Some(t)
+}
+
+/// What Visor puts on a remote player's hand item after the arm's own transform: the roll of the
+/// controller about its aim taken out, then the pose of the item's class with the sender's gun
+/// angle as the aim to grip turn. `None` for a player that is not a Visor player.
+fn visor_item_pose(m: &Mob, alpha: f32, off_hand: bool) -> Option<glam::Mat4> {
+    use horizon_visor::item_pose::{self, ItemFacts, PoseState, TransformType};
+    let vr = m.extra.vr_body.as_ref()?;
+    let rot = vr.rot(alpha);
+    let gun = rot.gun_angle?;
+    let item = (if off_hand {
+        &m.extra.off_hand
+    } else {
+        &m.extra.main_hand
+    })
+    .as_deref()?;
+    let quat = if off_hand {
+        rot.off_hand_quat
+    } else {
+        rot.main_hand_quat
+    };
+    // `visor$applyHandPose`: the roll from the reference up (world up taken off the aim) to the
+    // controller's own up, undone about Z.
+    let aim = (quat * glam::Vec3::NEG_Z).normalize_or_zero();
+    let mut roll = 0.0;
+    if aim.length_squared() > 1e-8 {
+        let mut reference = glam::Vec3::Y - aim * glam::Vec3::Y.dot(aim);
+        if reference.length_squared() < 1e-6 {
+            reference = glam::Vec3::NEG_Z - aim * glam::Vec3::NEG_Z.dot(aim);
+        }
+        let reference = reference.normalize_or_zero();
+        let mut up = quat * glam::Vec3::Y;
+        up -= aim * up.dot(aim);
+        if up.length_squared() > 1e-8 {
+            let up = up.normalize();
+            let cos = reference.dot(up).clamp(-1.0, 1.0);
+            let sin = reference.cross(up).dot(aim);
+            roll = sin.atan2(cos);
+        }
+    }
+    let name = item.strip_prefix("minecraft:").unwrap_or(item);
+    let facts = ItemFacts {
+        id: item,
+        shield: name == "shield",
+        spear: name.ends_with("_spear"),
+        tool: name.ends_with("_pickaxe")
+            || name.ends_with("_axe")
+            || name.ends_with("_shovel")
+            || name.ends_with("_hoe")
+            || name == "shears",
+        ..ItemFacts::default()
+    };
+    let kind = item_pose::transform_type(&facts);
+    let main_arm_dir = if off_hand { -1.0 } else { 1.0 };
+    let state = PoseState::default();
+    let aim_to_grip = glam::Quat::from_rotation_x(gun.to_radians());
+    let params = if kind == TransformType::Tool {
+        item_pose::compute_tool(item, main_arm_dir, aim_to_grip, &state)
+    } else {
+        item_pose::compute(kind, main_arm_dir, aim_to_grip, &state)
+    };
+    Some(glam::Mat4::from_rotation_z(-roll) * params.matrix())
 }
 
 /// `ArmedEntityRenderState.extractArmedEntityRenderState`: each arm's item
