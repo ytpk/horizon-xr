@@ -223,6 +223,11 @@ impl Pool {
             let spawned = std::thread::Builder::new()
                 .name(format!("{name}-{i}"))
                 .spawn(move || {
+                    match crate::cores::pin_worker(i) {
+                        Ok(Some(cpu)) => log::info!("Horizon worker {i} pinned to CPU {cpu}"),
+                        Ok(None) => {}
+                        Err(e) => log::warn!("Horizon worker {i} affinity left as is ({e})"),
+                    }
                     // Ticks and frames come first.
                     crate::behind_server();
                     work(&worker, i);

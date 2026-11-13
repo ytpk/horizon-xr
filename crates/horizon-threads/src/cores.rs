@@ -6,8 +6,11 @@
 //! the headset setting `horizonPinBigCores`), the calling thread is restricted to the cores that
 //! are not in the chip's slowest tier. Chips whose cores are all alike are left alone.
 //!
-//! The speed of a core is its highest frequency (`cpuinfo_max_freq`), or else `cpu_capacity`, both read from sysfs; either may be hidden from an app, in which case nothing is
+//! The speed of a core is its architectural `cpu_capacity`, or else its highest frequency
+//! (`cpuinfo_max_freq`), on one consistent scale read from sysfs. These may be hidden, in which case nothing is
 //! pinned and the caller is told why.
+mod hybrid;
+pub use hybrid::{hybrid_plan, pin_background, pin_worker};
 
 /// What was asked for.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -92,17 +95,26 @@ pub struct Pinned {
 pub fn pin_current(wanted: &Wanted) -> Result<Option<Pinned>, String> {
     let capacities = read_capacities();
     let allowed = allowed_cores()?;
+    // Threads spawned after this call inherit its restricted mask. Preserve the original
+    // allowance before pinning so opt-in background workers can still reach E cores.
+    hybrid::remember_allowed(&allowed);
     let cores = match wanted {
         Wanted::Off => return Ok(None),
         Wanted::Auto => {
             if capacities.is_empty() {
                 return Err("the kernel does not tell the cores' speed (no cpu_capacity or cpuinfo_max_freq)".into());
             }
-            restrict(&big_cores(&capacities), &allowed)
+            hybrid_plan().map_or_else(
+                || restrict(&big_cores(&capacities), &allowed),
+                |plan| restrict(&plan.foreground, &allowed),
+            )
         }
         Wanted::List(list) => restrict(list, &allowed),
     };
-    if cores.is_empty() || cores.len() == allowed.len() {
+    if cores == allowed {
+        return Ok(None);
+    }
+    if cores.is_empty() {
         return match wanted {
             Wanted::List(_) => Err(format!(
                 "none of the listed cores is allowed to this process (it may use {allowed:?})"
@@ -123,33 +135,45 @@ pub fn pin_current(_wanted: &Wanted) -> Result<Option<Pinned>, String> {
     Ok(None)
 }
 
-/// Each core's speed from sysfs: the highest frequency, else `cpu_capacity` (one scale per chip).
+/// Architectural capacity from sysfs, else maximum frequency; one scale for every core.
 #[cfg(any(target_os = "linux", target_os = "android"))]
 pub fn read_capacities() -> Vec<(usize, u64)> {
-    let mut out = Vec::new();
+    let mut capacities = Vec::new();
+    let mut frequencies = Vec::new();
+    let mut count = 0;
     for core in 0..1024 {
         let base = format!("/sys/devices/system/cpu/cpu{core}");
         if !std::path::Path::new(&base).exists() {
-            if core > 0 {
-                break;
-            }
-            continue;
+            break;
         }
+        count += 1;
         let read = |name: &str| {
             std::fs::read_to_string(format!("{base}/{name}"))
                 .ok()
                 .and_then(|text| text.trim().parse::<u64>().ok())
+                .filter(|&value| value > 0)
         };
-        if let Some(capacity) = read("cpufreq/cpuinfo_max_freq").or_else(|| read("cpu_capacity")) {
-            out.push((core, capacity));
+        if let Some(value) = read("cpu_capacity") {
+            capacities.push((core, value));
+        }
+        if let Some(value) = read("cpufreq/cpuinfo_max_freq") {
+            frequencies.push((core, value));
         }
     }
-    out
+    // Architectural capacity distinguishes P/E cores more reliably than clock alone.
+    // Never compare capacity units on one CPU with kHz on another.
+    if capacities.len() == count {
+        capacities
+    } else if frequencies.len() == count {
+        frequencies
+    } else {
+        Vec::new()
+    }
 }
 
 /// The cores the process may run on now (`sched_getaffinity`).
 #[cfg(any(target_os = "linux", target_os = "android"))]
-fn allowed_cores() -> Result<Vec<usize>, String> {
+pub(super) fn allowed_cores() -> Result<Vec<usize>, String> {
     // SAFETY: a zeroed cpu_set_t is the empty set; the call fills it for the calling thread.
     let set = unsafe {
         let mut set: libc::cpu_set_t = std::mem::zeroed();
@@ -168,11 +192,14 @@ fn allowed_cores() -> Result<Vec<usize>, String> {
 }
 
 #[cfg(any(target_os = "linux", target_os = "android"))]
-fn set_affinity(cores: &[usize]) -> Result<(), String> {
+pub(super) fn set_affinity(cores: &[usize]) -> Result<(), String> {
     // SAFETY: builds a set of small core numbers and hands it to the kernel for this thread (pid 0).
     unsafe {
         let mut set: libc::cpu_set_t = std::mem::zeroed();
         for &core in cores {
+            if core >= libc::CPU_SETSIZE as usize {
+                return Err("CPU index exceeds cpu_set_t".into());
+            }
             libc::CPU_SET(core, &mut set);
         }
         if libc::sched_setaffinity(0, std::mem::size_of::<libc::cpu_set_t>(), &set) != 0 {

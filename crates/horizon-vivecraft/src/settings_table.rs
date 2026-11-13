@@ -1587,6 +1587,24 @@ pub const DEFS: &[Def] = &[
         range: None,
     },
     Def {
+        key: "horizonAggressiveMesh",
+        kind: Kind::Bool,
+        default: "false",
+        range: None,
+    },
+    Def {
+        key: "horizonPlantDensity",
+        kind: Kind::Float,
+        default: "100.0",
+        range: Some((0.0f32, 100.0f32, 25.0f32)),
+    },
+    Def {
+        key: "horizonNearestLightmap",
+        kind: Kind::Bool,
+        default: "false",
+        range: None,
+    },
+    Def {
         key: "horizonShrinkPlants",
         kind: Kind::Bool,
         default: "false",

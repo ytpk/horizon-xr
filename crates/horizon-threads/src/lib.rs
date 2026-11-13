@@ -140,6 +140,10 @@ mod par_chunks_tests {
 /// a base M4 (4 performance and 6 efficiency cores) a fast flight's p99 frame went from
 /// 20 ms with 9 workers to 7 ms with 3 (#11294).
 pub fn default_workers() -> usize {
+    if let Some(plan) = cores::hybrid_plan() {
+        return parse_worker_count(std::env::var("HORIZON_WORKER_THREADS").ok())
+            .map_or(plan.workers.len(), |n| n.min(plan.workers.len()));
+    }
     workers_for(worker_count(), performance_cores)
 }
 

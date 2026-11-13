@@ -12,6 +12,7 @@ mod sides;
 #[cfg(test)]
 #[path = "mesher/source_tests.rs"]
 mod source_tests;
+mod vegetation;
 use crate::connected::{Pick, TileLayer};
 use crate::{
     assets::{Assets, RenderAssets},
@@ -32,13 +33,14 @@ use horizon_world::{
     registry::BlockStateId,
 };
 pub use merge::{
-    MERGED_STEP, Stats as MergeStats, merge_faces, merging, shrink_plants, shrinking_plants,
-    stats as merge_stats,
+    MERGED_STEP, Stats as MergeStats, aggressive_merging, merge_faces, merging, shrink_plants,
+    shrinking_plants, stats as merge_stats,
 };
 #[cfg(test)]
 pub(crate) use sides::sort_tinted;
 pub use sides::{Part, Sides, group_parts};
 use std::sync::Arc;
+pub use vegetation::plant_density;
 
 /// An entity, item and effect vertex (the entity pipelines), with a face
 /// normal for `entity.wgsl`'s directional light.
@@ -1895,8 +1897,19 @@ impl Mesher<'_> {
         &mut self,
         region: &[[Option<&Chunk>; 3]; 3],
         sy: i32,
+        out: SectionMesh,
+        scratch: &mut MeshScratch,
+    ) -> SectionMesh {
+        self.mesh_density(region, sy, out, scratch, vegetation::density())
+    }
+
+    fn mesh_density(
+        &mut self,
+        region: &[[Option<&Chunk>; 3]; 3],
+        sy: i32,
         mut out: SectionMesh,
         scratch: &mut MeshScratch,
+        plant_density: u32,
     ) -> SectionMesh {
         out.clear();
         let center = region[1][1].expect("centre chunk");
@@ -1985,6 +1998,19 @@ impl Mesher<'_> {
                     let Some(first) = models.first() else {
                         continue;
                     };
+                    // Only complete crossed cutout models are thinned. Keep mixed models,
+                    // fluids, light sources and block entities, and shader-pack source meshes.
+                    if !self.shader_pack
+                        && state.emission == 0
+                        && !state.block_entity
+                        && state.fluid.kind() == FluidKind::Empty
+                        && !vegetation::keep(world.x, world.z, plant_density)
+                        && models.iter().all(|m| {
+                            !m.faces.is_empty() && m.faces.iter().all(BakedFace::crossed_cutout)
+                        })
+                    {
+                        continue;
+                    }
                     let ao = self.smooth_lighting && state.emission == 0 && first.ambient_occlusion;
                     let origin = match offset(state, world.x, world.z) {
                         Some(o) => [

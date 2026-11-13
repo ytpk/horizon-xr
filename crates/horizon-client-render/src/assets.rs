@@ -160,6 +160,9 @@ impl SpritePixels {
         }
         let store = self.0.clone();
         let job = move || {
+            if let Err(e) = horizon_threads::cores::pin_background() {
+                log::warn!("Sprite packing affinity left as is ({e})");
+            }
             let raw = store.raw.lock().unwrap_or_else(|e| e.into_inner()).clone();
             if let Some(raw) = raw {
                 let _ = store.packed.set(lz4_flex::compress_prepend_size(&raw));
