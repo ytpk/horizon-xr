@@ -1435,9 +1435,11 @@ name = "horizon-client-input"
 version = "0.1.0"
 dependencies = [
  "arboard",
+ "glam",
  "horizon-client-core",
  "horizon-dualsense",
  "horizon-theme",
+ "horizon-vivecraft",
  "png",
  "winit",
 ]

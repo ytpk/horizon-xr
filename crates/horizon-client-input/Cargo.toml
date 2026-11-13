@@ -9,6 +9,10 @@ description = "The client's input layer: key bindings and their names, mouse, co
 [dependencies]
 horizon-client-core = { path = "../horizon-client-core" }
 winit = "0.30.13"
+# The headset's poses (`headset`).
+glam = "0.30"
+# The VR settings table (`headset::settings`).
+horizon-vivecraft = { path = "../horizon-vivecraft" }
 # The window icon.
 horizon-theme = { path = "../horizon-theme" }
 png = "0.18"
