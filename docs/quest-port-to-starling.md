@@ -219,6 +219,34 @@ Third pass (2026-11-13). Both assets are now made from this tree:
   `target/quest/horizon-quest.apk`, 131498824 bytes, sha256 `5a033dfa998bdfce72aa909b0e2d3e0105ecc94825d5cb487010d192b90ae1a3`;
   exporter guard passed, bundle `research-lock.json` equals the tree's (cmp). Not installed on any headset.
 
+## Fifth pass (2026-11-13): fixes from the first headset test
+
+1. On-device prepare: "Java 25 is needed ... No java was found." Starling's `horizon-prepare::java` does not read
+   `HORIZON_JAVA_EXE`; `horizon-quest-launcher::prepare` now hands `horizon-jvm` to Starling's own `java::supply` hook
+   (`java` = libhorizon_jvm.so, `HORIZON_JVM_HOME` in the environment of every JVM command). horizon-prepare is
+   unchanged, so the exporter bundle and its key stay as they were. Test:
+   `the_quests_runtime_is_found_without_java_home_or_path`. The rest of the chain was read, not run on a host: the
+   download (`Selection::all`, strict assets) fetches `indexes/<id>.json` and the objects; `horizon-prepare`'s steps import
+   `asset-index.json`, packs, panorama, fonts, languages and sounds from them; `horizon-data.bin` is written by the game
+   at its start (`prepared_files::write`), not by prepare. The earlier host run lacked those only because it had no asset
+   store (no `indexes/34.json`).
+2. Multiview never engaged. Cause: `Reuse::try_create_render_pipeline` (Starling's Adreno paths: `solid_paths` static
+   cutout, settled, lean and flat passes, and `late_sky`) made no multiview variant, so `swap_stereo_pipelines` found none
+   and returned false at every frame. All routes now end in `add_stereo`; a failed swap logs `Quest multiview: no stereo
+   variant for pipelines: ...` by slot name. Test: `solid_paths::tests::every_adreno_path_pipeline_has_a_multiview_variant`
+   (fails without the fix, passes on a MULTIVIEW device).
+3. Phone HUD in the world: Android's touch mode was the start mode and the vanilla tutorial's "Move with W,A,S,D" ran.
+   `touch_shown()` is false while a headset session runs, the touch platform is "Android and no headset", the tutorial is
+   off in a headset. The first-start card "Keep your files where you can reach them" stays and now answers the headset
+   pointer (`files_offer_click`, a `MouseInput` arm). Its "Set up" button calls StarlingActivity's Java (`openFileAccessSettings`,
+   `fileAccessAllowed`, `restart`) which the Quest's NativeActivity lacks, and `SHARED_FOLDER` is never set there: Set up
+   does nothing on a Quest until a Quest-side equivalent exists (an Intent to Settings' all-files page through JNI, and
+   `set_shared_folder` at start). Not done: reported.
+4. Gray foliage and the pink-brown sky: probably the biome at that spot (the same seed looks the same in vanilla);
+   not investigated further.
+5. Bedrock touch buttons and Starling's control textures are no longer fetched in a headset. The `horizon-data.bin` and
+   other Permission denied lines came from files pushed by adb (owner shell); a normal install writes them as the app.
+
 ## Remaining work
 1. Test on the headset: stereo/multiview, SpaceWarp, room, controls, then A/B the switches (including
    `HORIZON_QUEST_LEAN_OPAQUE`, `HORIZON_QUEST_LEAN_CUTOUT`); check the on-device prepare and the download (Range resume).
