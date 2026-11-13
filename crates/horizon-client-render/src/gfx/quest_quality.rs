@@ -37,6 +37,17 @@ fn lightmap_shader(source: String, nearest: bool) -> String {
     source
 }
 
+/// An A/B switch for one of Starling's Adreno paths (`late_sky`, `solid_paths`): the environment
+/// variable `env` set to `0` or `1` decides, else `default` (what the phone app does). Read when the
+/// renderer is made; on the headset `launch.txt` can set it (`HORIZON_LATE_SKY=0`).
+pub(super) fn env_switch(env: &str, default: bool) -> bool {
+    match std::env::var(env).as_deref() {
+        Ok("1") => true,
+        Ok("0") => false,
+        _ => default,
+    }
+}
+
 /// A Quest rendering switch (the VR settings' Experiments page): the environment variable
 /// `env` set to `1` or `0` decides, else the VR setting `setting`. Read when the renderer
 /// is made, so a change takes a restart.

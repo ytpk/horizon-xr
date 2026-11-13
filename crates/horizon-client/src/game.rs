@@ -22438,7 +22438,7 @@ fn before_loading(options: &Options, vanilla_root: &std::path::Path) -> Result<S
     #[cfg(target_os = "android")]
     if first_start && let Some(tier) = horizon_client::system_stats::Tier::here() {
         horizon_client::graphics::apply_mobile_defaults(tier, &mut early_settings);
-        early_settings.save(options_txt);
+        early_settings.save(&options_txt);
         log::info!(
             "Horizon: first start on a {} tier device: render distance {}, resolution {}%",
             tier.name(),

@@ -102,9 +102,61 @@ Known breakages / caveats
 - `horizon-prepare::Inputs` of Starling's base has no `prism_dir`; the launcher no longer passes it.
 - Cargo.lock grew with the Quest crates' dependencies.
 
+## Second pass (2026-11-13): headset render path, game integration, SpaceWarp
+
+Commits: `806ca66eaf` (render path, SpaceWarp, mesher switches), `20d4631f09` and `54c476cdc5` (game).
+The 3-way merge of gfx.rs against upstream-11-10 was too noisy, so every hunk of the Quest delta was
+applied to Starling's renderer with exact context, then by hand; `quest_pending/` and
+`docs/quest-port-pending/` are gone (the files live in `src/gfx/`). Starling was adapted, no
+upstream merge was done.
+
+### Ported
+- Render: headset device (`open_headset`), stereo views and multiview targets, room and menu scenes, vis mask,
+  headset hands over the world, screen effects in the stereo pass, per-eye translucent sorting, headset
+  frustum, `quest_render` (the multiview pipeline swap now lists Starling's pipelines: solid, solid_paths,
+  late_sky, flat, ...), SpaceWarp (`gfx/spacewarp*`, horizon-xr, vivecraft refresh; GPU tests pass),
+  planar water, pipeline cache (+ horizon-hdr fn), split vertex streams, emissive table (Vulkan source only:
+  Starling's GLES lowering unrolls the old search), merged-face shader decoding, A/B shader experiments.
+- Mesher: face merging, aggressive merge, plant density, plant shrink, optional opaque water.
+- VR pages in options_ui, headset resolution scale in graphics_ui, horizon-threads affinity recovery (bcfb1a7f82).
+- Game: game/vr, headset*, visor_*, vivecraft_*, quest_room (App::Room, `build_loading`, `run_app`), aim ray,
+  two-handed off hand and VR guest swap in `as_guest`, hand geometry with controllers, HUD overlay panels,
+  bow, mounts, remote ticks, headset pointer, upload budget, Visor game menu.
+
+### Starling optimizations kept (overlaps) and how to A/B them on the headset (`launch.txt` lines)
+| Starling | Reachable on Quest | Switch |
+|---|---|---|
+| two solid passes (`splits_solid`) | yes (Adreno + Android + Vulkan) | `HORIZON_SPLIT_SOLID=0/1` |
+| flat draws (512 sections on Adreno) | yes | `HORIZON_FLAT_DRAWS=0/1`, VR setting `horizonFlatDraws` |
+| late sky | yes, also in the stereo pass (pipelines swapped) | `HORIZON_LATE_SKY=0/1` |
+| solid_paths: static cutout, settled terrain | yes | `HORIZON_STATIC_CUTOUT=0/1`, `HORIZON_SETTLED_TERRAIN=0/1` |
+| cull.wgsl and panorama array fixes for Adreno | Starling's own kept | |
+| multi-draw indirect | off on a headset's Adreno (our measurement: draws nothing) | `HORIZON_MULTI_DRAW=0/1` |
+Ours, opt-in: `HORIZON_QUEST_SPLIT_STREAMS`, `_MERGE_FACES`, `_AGGRESSIVE_MESH`, `_SHRINK_PLANTS`,
+`_PLANT_DENSITY`, `_PLANT_DISTANCE`, `_NEAREST_LIGHTMAP`, `HORIZON_TERRAIN_EXPERIMENT`, `HORIZON_QUEST_EXPERIMENT`.
+
+### Not ported / differences
+- Lean varyings (`lean_opaque`, `lean_cutout`): need upstream's `HDR_LIGHTING` pipeline override; Starling's
+  terrain shader has HDR lighting always in. Removed from the port.
+- Upstream-origin changes inside our delta were skipped (light.rs relight scratch, occlusion edit cap and
+  resident sort, cull.wgsl box table, frame_gen tests). Occlusion keeps Starling's code; only the worker pin was added.
+- Mesher: no per-quad sources or tints (Starling has none); `shader_pack` guard replaced by plain settings.
+- `held.rs` (Source::Room): Starling's `keys` is a plain set; the room's sneak is a `room_sneaking` flag.
+- GPU-culling `Unsupported` offer for the split path (Starling has no GpuCulling).
+- Tests for several ported files are partly missing (cull stereo GPU test, occlusion/relight benches).
+- Provisioning stays our stack (horizon-quest-launcher, Prismarine sign-in, horizon-fetch, horizon-jvm); not merged with starling-account.
+- Language keys: en_us and ru_ru only; SpaceWarp keys came from 54ba05033f.
+- `tools/quest_room_sim.py` and harness tests of the fork not ported.
+
+### APK
+`build_jre.sh` fails: the pinned Termux openjdk deb returns 404, so `horizon-jre.zip` was copied from the
+source worktree's build (it holds no code of ours). `build_bundle.sh` fails (`Manifest checksum changed`: Starling's
+prepare state in `.local` differs), so `horizon-bundle.zip` was also copied; its research-lock differs from Starling's:
+rebuild it after `horizon-prepare --prepare` on this tree.
+
 ## Remaining work
-1. Adapt gfx.rs (stereo views, multiview, `quest_render`, room and menu scenes) to Starling's renderer, or merge Starling with upstream first; then move `quest_pending/*` back into `src/gfx/`.
-2. Game integration: `game/vr.rs`, `headset*.rs`, visor and vivecraft glue, `quest_room`, hooks in Starling's monolithic game.rs, a Room crouch source.
-3. Adreno terrain switches (after 1), keeping Starling's `adreno.rs` / `solid_paths.rs` where they overlap.
-4. Merge the provisioning stacks (starling-account, java_launcher.c) with horizon-quest-launcher.
-5. Translations of the new keys in the other languages; tests/ and tools/ of the Quest fork (`tools/quest_room_sim.py`, harness tests) were not ported.
+1. Test on the headset: stereo/multiview, SpaceWarp, room, controls, then A/B the switches above.
+2. Rebuild the JRE (new Termux URL) and the exporter bundle from Starling's tree.
+3. Lean varyings after porting the `HDR_LIGHTING` override; missing tests above.
+4. Merge provisioning with starling-account if wanted.
+5. Translations of new keys in the other languages.

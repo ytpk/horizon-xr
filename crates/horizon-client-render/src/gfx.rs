@@ -4451,7 +4451,15 @@ impl Renderer {
                     &terrain_buffers,
                 )
             })
-            .flatten();
+            .flatten()
+            .map(|mut paths| {
+                // A/B switches (`HORIZON_STATIC_CUTOUT`, `HORIZON_SETTLED_TERRAIN`, 0 or 1).
+                paths.static_cutout_on =
+                    quest_quality::env_switch("HORIZON_STATIC_CUTOUT", paths.static_cutout_on);
+                paths.settled_on =
+                    quest_quality::env_switch("HORIZON_SETTLED_TERRAIN", paths.settled_on);
+                paths
+            });
         // Without indirect draws (OpenGL before 4.0 without indirect execution, or
         // before 4.2 + GL_ARB_shader_draw_parameters without indirect first instance)
         // even creating an indirect buffer fails; one draw per section reads
@@ -4599,7 +4607,7 @@ impl Renderer {
             flat,
             sky,
             late_sky,
-            late_sky_on: true,
+            late_sky_on: quest_quality::env_switch("HORIZON_LATE_SKY", true),
             sky_base,
             sunrise_pipeline,
             sunrise_buffer,
