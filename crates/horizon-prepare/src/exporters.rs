@@ -268,4 +268,14 @@ mod tests {
         assert!(!available(&root), "every class is still hashed");
         fs::remove_dir_all(root).unwrap();
     }
+
+    /// A headset's folder, the bundle unzipped alone (packaging/quest/build_bundle.sh's zip):
+    /// `HORIZON_QUEST_BUNDLE_ROOT=<folder> cargo test -p horizon-prepare --lib -- --ignored`.
+    #[test]
+    #[ignore = "needs an unzipped Quest bundle"]
+    fn the_shipped_quest_bundle_is_chosen_without_a_compiler() {
+        let root = PathBuf::from(std::env::var("HORIZON_QUEST_BUNDLE_ROOT").expect("the folder"));
+        assert!(!root.join("crates").exists(), "not a checkout");
+        assert!(available(&root), "classes() would compile with javac");
+    }
 }
