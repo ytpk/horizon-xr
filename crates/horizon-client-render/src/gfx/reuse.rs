@@ -218,26 +218,21 @@ impl On<'_> {
             self.device.create_pipeline_layout(descriptor)
         })
     }
-    pub fn create_render_pipeline(
+    /// The multiview variant of `pipeline` (made from `descriptor`), kept beside it for the
+    /// headset's stereo swap. Every route that makes a render pipeline ends here, `try_`
+    /// ones included: a pipeline without one keeps the whole world out of multiview.
+    fn add_stereo(
         &self,
         descriptor: &wgpu::RenderPipelineDescriptor<'_>,
-    ) -> wgpu::RenderPipeline {
-        let mut cached = descriptor.clone();
-        cached.cache = cached
-            .cache
-            .or_else(|| super::pipeline_cache::get(self.device));
-        let descriptor = &cached;
-        let key = format!("{descriptor:?}");
-        let pipeline = self.reuse.render.get(key, self.generation, || {
-            self.device.create_render_pipeline(descriptor)
-        });
+        pipeline: &wgpu::RenderPipeline,
+    ) {
         if self.stereo && descriptor.multiview_mask.is_none() {
             let mut variants = self
                 .reuse
                 .stereo_pipelines
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner);
-            if !variants.contains_key(&pipeline) {
+            if !variants.contains_key(pipeline) {
                 let shaders = self
                     .reuse
                     .stereo_shaders
@@ -260,7 +255,10 @@ impl On<'_> {
                     let scope = self.device.push_error_scope(wgpu::ErrorFilter::Validation);
                     let variant = self.device.create_render_pipeline(&stereo);
                     if let Some(error) = pollster::block_on(scope.pop()) {
-                        log::warn!("Quest multiview pipeline unavailable: {error}");
+                        log::warn!(
+                            "Quest multiview pipeline {:?} unavailable: {error}",
+                            descriptor.label
+                        );
                     } else {
                         variants.insert(pipeline.clone(), variant.clone());
                         variants.insert(variant, pipeline.clone());
@@ -268,6 +266,21 @@ impl On<'_> {
                 }
             }
         }
+    }
+    pub fn create_render_pipeline(
+        &self,
+        descriptor: &wgpu::RenderPipelineDescriptor<'_>,
+    ) -> wgpu::RenderPipeline {
+        let mut cached = descriptor.clone();
+        cached.cache = cached
+            .cache
+            .or_else(|| super::pipeline_cache::get(self.device));
+        let descriptor = &cached;
+        let key = format!("{descriptor:?}");
+        let pipeline = self.reuse.render.get(key, self.generation, || {
+            self.device.create_render_pipeline(descriptor)
+        });
+        self.add_stereo(descriptor, &pipeline);
         pipeline
     }
     /// `create_render_pipeline` for a path only some GPUs take: None where the device refuses it,
@@ -278,7 +291,7 @@ impl On<'_> {
         descriptor: &wgpu::RenderPipelineDescriptor<'_>,
     ) -> Option<wgpu::RenderPipeline> {
         let key = format!("{descriptor:?}");
-        self.reuse.tried.get(key, self.generation, || {
+        let pipeline = self.reuse.tried.get(key, self.generation, || {
             let validation = self.device.push_error_scope(wgpu::ErrorFilter::Validation);
             let internal = self.device.push_error_scope(wgpu::ErrorFilter::Internal);
             let pipeline = self.device.create_render_pipeline(descriptor);
@@ -290,7 +303,11 @@ impl On<'_> {
                 }
                 None => Some(pipeline),
             }
-        })
+        });
+        if let Some(pipeline) = &pipeline {
+            self.add_stereo(descriptor, pipeline);
+        }
+        pipeline
     }
 }
 

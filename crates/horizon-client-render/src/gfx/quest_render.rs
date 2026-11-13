@@ -43,64 +43,111 @@ impl Renderer {
     /// Swap the entire compatible pipeline set atomically; a failed variant
     /// leaves the original renderer intact. Calling again restores mono handles.
     pub(super) fn swap_stereo_pipelines(&mut self) -> bool {
-        let mut slots = vec![
-            &mut self.solid,
-            &mut self.solid_opaque,
-            &mut self.solid_cutout,
-            &mut self.solid_mirror,
-            &mut self.translucent,
-            &mut self.translucent_mark,
-            &mut self.sky,
-            &mut self.sky_base,
-            &mut self.sunrise_pipeline,
-            &mut self.dark_disc,
-            &mut self.depth_reset,
-            &mut self.lines,
-            &mut self.lines_secondary,
-            &mut self.debug_lines,
-            &mut self.debug_lines_on_top,
-            &mut self.entity_pipeline,
-            &mut self.static_entity_pipeline,
-            &mut self.crumbling_pipeline,
-            &mut self.shadow_blob_pipeline,
-            &mut self.translucent_item_pipeline,
-            &mut self.water_mask_pipeline,
-            &mut self.cloud_pipeline,
-            &mut self.additive_pipeline,
-            &mut self.dragon_rays_pipeline,
-            &mut self.energy_swirl_pipeline,
-            &mut self.lightning_pipeline,
-            &mut self.see_through_pipeline,
-            &mut self.text_polygon_offset_pipeline,
-            &mut self.celestial_pipeline,
-            &mut self.stars.pipeline,
-            &mut self.weather.pipeline,
+        let mut slots: Vec<(String, &mut wgpu::RenderPipeline)> = Vec::new();
+        let fixed: [(&str, &mut wgpu::RenderPipeline); 31] = [
+            ("solid", &mut self.solid),
+            ("solid_opaque", &mut self.solid_opaque),
+            ("solid_cutout", &mut self.solid_cutout),
+            ("solid_mirror", &mut self.solid_mirror),
+            ("translucent", &mut self.translucent),
+            ("translucent_mark", &mut self.translucent_mark),
+            ("sky", &mut self.sky),
+            ("sky_base", &mut self.sky_base),
+            ("sunrise_pipeline", &mut self.sunrise_pipeline),
+            ("dark_disc", &mut self.dark_disc),
+            ("depth_reset", &mut self.depth_reset),
+            ("lines", &mut self.lines),
+            ("lines_secondary", &mut self.lines_secondary),
+            ("debug_lines", &mut self.debug_lines),
+            ("debug_lines_on_top", &mut self.debug_lines_on_top),
+            ("entity_pipeline", &mut self.entity_pipeline),
+            ("static_entity_pipeline", &mut self.static_entity_pipeline),
+            ("crumbling_pipeline", &mut self.crumbling_pipeline),
+            ("shadow_blob_pipeline", &mut self.shadow_blob_pipeline),
+            (
+                "translucent_item_pipeline",
+                &mut self.translucent_item_pipeline,
+            ),
+            ("water_mask_pipeline", &mut self.water_mask_pipeline),
+            ("cloud_pipeline", &mut self.cloud_pipeline),
+            ("additive_pipeline", &mut self.additive_pipeline),
+            ("dragon_rays_pipeline", &mut self.dragon_rays_pipeline),
+            ("energy_swirl_pipeline", &mut self.energy_swirl_pipeline),
+            ("lightning_pipeline", &mut self.lightning_pipeline),
+            ("see_through_pipeline", &mut self.see_through_pipeline),
+            (
+                "text_polygon_offset_pipeline",
+                &mut self.text_polygon_offset_pipeline,
+            ),
+            ("celestial_pipeline", &mut self.celestial_pipeline),
+            ("stars.pipeline", &mut self.stars.pipeline),
+            ("weather.pipeline", &mut self.weather.pipeline),
         ];
+        slots.extend(fixed.into_iter().map(|(name, p)| (name.to_string(), p)));
+        let numbered = |what: &str, i: usize| format!("{what}[{i}]");
         if let Some(paths) = &mut self.solid_paths {
-            slots.extend(paths.pipelines_mut());
+            slots.extend(
+                paths
+                    .pipelines_mut()
+                    .into_iter()
+                    .enumerate()
+                    .map(|(i, p)| (numbered("solid_paths", i), p)),
+            );
         }
         if let Some(sky) = &mut self.late_sky {
-            slots.extend(sky.pipelines_mut());
+            slots.extend(
+                sky.pipelines_mut()
+                    .into_iter()
+                    .enumerate()
+                    .map(|(i, p)| (numbered("late_sky", i), p)),
+            );
         }
-        slots.extend(self.screen_pipelines.iter_mut());
+        slots.extend(
+            self.screen_pipelines
+                .iter_mut()
+                .enumerate()
+                .map(|(i, p)| (numbered("screen_pipelines", i), p)),
+        );
         if let Some(pipelines) = &mut self.screen_world_pipelines {
-            slots.extend(pipelines.iter_mut());
+            slots.extend(
+                pipelines
+                    .iter_mut()
+                    .enumerate()
+                    .map(|(i, p)| (numbered("screen_world_pipelines", i), p)),
+            );
         }
         if let Some(flat) = &mut self.flat {
-            slots.extend([
-                &mut flat.solid,
-                &mut flat.solid_opaque,
-                &mut flat.solid_cutout,
-                &mut flat.solid_mirror,
-                &mut flat.translucent,
-                &mut flat.translucent_mark,
-            ]);
+            slots.extend(
+                [
+                    ("flat.solid", &mut flat.solid),
+                    ("flat.solid_opaque", &mut flat.solid_opaque),
+                    ("flat.solid_cutout", &mut flat.solid_cutout),
+                    ("flat.solid_mirror", &mut flat.solid_mirror),
+                    ("flat.translucent", &mut flat.translucent),
+                    ("flat.translucent_mark", &mut flat.translucent_mark),
+                ]
+                .map(|(name, p)| (name.to_string(), p)),
+            );
         }
-        let variants = self.reuse.alternates(slots.iter().map(|p| &**p));
+        let variants = self.reuse.alternates(slots.iter().map(|(_, p)| &**p));
         let Some(variants) = variants else {
+            // Say which pipeline has no multiview variant, once per set of missing ones.
+            let missing: Vec<&str> = slots
+                .iter()
+                .filter(|(_, p)| self.reuse.alternates(std::iter::once(&**p)).is_none())
+                .map(|(name, _)| name.as_str())
+                .collect();
+            static LOGGED: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+            let text = missing.join(", ");
+            if let Ok(mut logged) = LOGGED.lock()
+                && !logged.contains(&text)
+            {
+                log::warn!("Quest multiview: no stereo variant for pipelines: {text}");
+                logged.push(text);
+            }
             return false;
         };
-        for (slot, variant) in slots.into_iter().zip(variants) {
+        for ((_, slot), variant) in slots.into_iter().zip(variants) {
             *slot = variant;
         }
         true

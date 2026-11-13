@@ -119,6 +119,10 @@ struct Gpu {
 
 impl Gpu {
     fn new() -> Option<Self> {
+        Self::open(false)
+    }
+    /// A device with MULTIVIEW, as a headset's, where the adapter has it.
+    fn open(multiview: bool) -> Option<Self> {
         let instance = crate::gfx::test_gpu::instance();
         let adapter = pollster::block_on(instance.request_adapter(&Default::default())).ok()?;
         eprintln!("Solid paths test adapter: {:?}", adapter.get_info());
@@ -126,7 +130,15 @@ impl Gpu {
             .get_downlevel_capabilities()
             .flags
             .contains(wgpu::DownlevelFlags::VERTEX_STORAGE);
+        if multiview && !adapter.features().contains(wgpu::Features::MULTIVIEW) {
+            return None;
+        }
         let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+            required_features: if multiview {
+                wgpu::Features::MULTIVIEW
+            } else {
+                wgpu::Features::empty()
+            },
             required_limits: adapter.limits(),
             ..Default::default()
         }))
@@ -708,4 +720,65 @@ fn lean_opaque_serves_frames_with_fades() {
     // The opaque pass has no fade to know; the cutout keeps the usual pipeline.
     assert_eq!(frame(&pipelines.lean), (true, false));
     assert_eq!(frame(&pipelines.paths), (false, false));
+}
+
+/// The headset's multiview swap needs a stereo variant of every pipeline the Adreno paths build
+/// (they go through `try_create_render_pipeline`): without one the world never leaves the
+/// separate eye passes.
+#[test]
+fn every_adreno_path_pipeline_has_a_multiview_variant() {
+    let Some(gpu) = Gpu::open(true) else {
+        eprintln!("no GPU adapter with MULTIVIEW: skipped");
+        return;
+    };
+    gpu.reuse.begin();
+    let kept = gpu.reuse.stereo_for_test(&gpu.device);
+    let source = terrain_source::terrain_shader(false);
+    let shader = kept.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("Solid paths, stereo"),
+        source: wgpu::ShaderSource::Wgsl(source),
+    });
+    let attributes = crate::gfx::TERRAIN_ATTRIBUTES;
+    let instance_attributes = wgpu::vertex_attr_array![5=>Float32x4];
+    let buffers = [
+        Some(wgpu::VertexBufferLayout {
+            array_stride: 24,
+            step_mode: wgpu::VertexStepMode::Vertex,
+            attributes: &attributes,
+        }),
+        Some(wgpu::VertexBufferLayout {
+            array_stride: 16,
+            step_mode: wgpu::VertexStepMode::Instance,
+            attributes: &instance_attributes,
+        }),
+    ];
+    let terrain = TerrainModule {
+        kept: &kept,
+        shader: &shader,
+        format: FORMAT,
+        constants: &[("SPRITE_ARRAYS", 1.0), ("SPRITE_SPLIT", 2048.0)],
+    };
+    for lean in [
+        Lean::default(),
+        Lean {
+            opaque: true,
+            cutout: true,
+        },
+    ] {
+        let mut paths = SolidPaths::new(
+            &terrain,
+            &gpu.bindings,
+            &gpu.layout,
+            gpu.flat_bindings.as_ref(),
+            &buffers,
+            lean,
+        )
+        .expect("the test GPU takes these pipelines");
+        let all = paths.pipelines_mut();
+        assert!(!all.is_empty());
+        assert!(
+            gpu.reuse.alternates(all.iter().map(|p| &**p)).is_some(),
+            "a pipeline of the Adreno paths has no multiview variant ({lean:?})"
+        );
+    }
 }
