@@ -1554,16 +1554,24 @@ impl Game<'_> {
     // ---- drawing ----
 
     /// The pad's cursor (pointer mode) or focus highlight (focus mode), and
-    /// the on-screen keyboard, over everything else.
-    pub(super) fn draw_pad_cursor(&self, batch: &mut HudBatch) {
+    /// the on-screen keyboard, over everything else. The keyboard draws in the first call
+    /// (`pointer` false, before the offers' cards); the pointer and the focus in the last, over
+    /// the cards too.
+    pub(super) fn draw_pad_cursor(&self, batch: &mut HudBatch, pointer: bool) {
         if !self.pad_in_menu() {
             return;
         }
         if let Some(keyboard) = &self.pad.menu.osk {
+            if pointer {
+                return;
+            }
             let at_top = self.osk_at_top(batch.height);
             let mut ui = horizon_client::ui_theme::Ui::new(&self.gui.atlas, batch, self.cursor);
             keyboard.draw(&mut ui, at_top, self.ui.options.pad_style);
             ui.finish();
+            return;
+        }
+        if !pointer {
             return;
         }
         // A headset's pointer is the mouse, which no system pointer shows there.

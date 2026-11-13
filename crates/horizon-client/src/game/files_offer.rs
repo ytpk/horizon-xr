@@ -276,35 +276,54 @@ impl Game<'_> {
         true
     }
 
-    /// A headset's pointer (or a mouse) pressed on the card at the cursor: the card takes the
-    /// click as a lifted finger. False when no card shows.
+    /// A mouse's click on the card at the cursor: the card takes it as a lifted finger. False when
+    /// no card shows.
     pub(super) fn files_offer_click(&mut self) -> bool {
         let Some(card) = self.files_offer_shown() else {
             return false;
         };
-        // The size the card was drawn for: the renderer's (a headset's menu panel), not the window's.
+        // The size the card was drawn for: the renderer's, not the window's.
         let Some(r) = &self.renderer else {
             return false;
         };
-        let (w, h) = (r.config.width, r.config.height);
-        let scale = horizon_client::hud::HudBatch::new([w, h]).scale;
-        let d = density(w as f32, h as f32);
-        let p = [self.cursor.0 * scale / d, self.cursor.1 * scale / d];
+        let p = super::pointer_ui::gui_to_ui(self.cursor, [r.config.width, r.config.height]);
         self.files_offer_press(card, p);
+        true
+    }
+
+    /// A headset pointer's button, from the headset frame (game/headset.rs): while a card shows it
+    /// takes the pointer's buttons whole, so nothing under it is clicked. `at` is where the
+    /// pointer meets the menu panel, in the renderer's pixels, which the press is hit-tested at
+    /// directly (not through the cursor, which another input may have moved since). True when the
+    /// card took it.
+    pub(super) fn files_offer_pointer(
+        &mut self,
+        at: Option<(f64, f64)>,
+        button: usize,
+        pressed: bool,
+    ) -> bool {
+        let Some(card) = self.files_offer_shown() else {
+            return false;
+        };
+        if button == 0
+            && pressed
+            && let Some(at) = at
+            && let Some(r) = &self.renderer
+        {
+            let size = [r.config.width, r.config.height];
+            let p = super::pointer_ui::pixel_to_ui([at.0 as f32, at.1 as f32], size);
+            log::info!(
+                "Headset: the files card is clicked at {p:?} (buttons {:?})",
+                self.files_offer.buttons.get()
+            );
+            self.files_offer_press(card, p);
+        }
         true
     }
 
     /// The card's button at `p` (UI units), if any, acts.
     fn files_offer_press(&mut self, card: Card, p: [f32; 2]) {
-        let inside = |r: [f32; 4]| {
-            p[0] >= r[0] && p[0] <= r[0] + r[2] && p[1] >= r[1] && p[1] <= r[1] + r[3]
-        };
-        let [primary, other] = self.files_offer.buttons.get();
-        let button = if inside(primary) {
-            0
-        } else if inside(other) {
-            1
-        } else {
+        let Some(button) = super::pointer_ui::rect_at(&self.files_offer.buttons.get(), p) else {
             return;
         };
         let offer = &mut self.files_offer;

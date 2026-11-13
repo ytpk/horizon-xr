@@ -285,6 +285,8 @@ mod pickups;
 mod piglins;
 mod piston_push;
 mod player_equip;
+#[cfg(any(target_os = "android", test))]
+mod pointer_ui;
 mod postprocess;
 mod potent_sulfur;
 mod potions;
@@ -8401,11 +8403,13 @@ impl Game<'_> {
         self.frame_graph
             .draw(self.settings.horizon.overlay, &mut batch, &self.gui.atlas);
         self.draw_stats_overlay(&mut batch);
-        self.draw_pad_cursor(&mut batch);
+        self.draw_pad_cursor(&mut batch, false);
         self.lift_over_keyboard(&mut batch);
         self.draw_phone_offers(&mut batch);
         // Over the keyboard's lift: the note stays at the top.
         self.draw_imports(&mut batch);
+        // The pointer is the last thing drawn: over the cards of the phone's offers too.
+        self.draw_pad_cursor(&mut batch, true);
         self.resolve_inline_profiles(&batch.inline_profiles);
         batch
     }

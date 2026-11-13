@@ -297,6 +297,26 @@ Third pass (2026-11-13). Both assets are now made from this tree:
   when it passes (it prints only the stale exporters): the build ran to the end. Bundle `research-lock.json` equals the
   tree's (cmp). Not installed on any headset.
 
+### Seventh pass: the pointer on the title (user's headset test of the sixth APK)
+Report: on the title nothing could be clicked with the controllers, the files card's buttons neither, and the cursor was
+drawn under the card.
+- Found by reading (no controller input can be injected here, so the click path itself is not reproduced): the files card is
+  modal and takes every `MouseInput` while it shows (game.rs arm `files_offer_shown()`), so the title below it is dead until the
+  card goes; the card's own click went the long way (headset frame -> `CursorMoved` -> `self.cursor` -> `MouseInput` ->
+  hit test), where `self.cursor` can be somewhere else than the laser (the pad's menu focus moves it to a widget, and the
+  headset sends `CursorMoved` only when the laser moves). Sure bug: `draw_pad_cursor` ran before `draw_phone_offers`, so the
+  arrow was under the card.
+- Fixes: (1) the pointer is drawn last (`draw_pad_cursor(batch, true)` after offers and imports; the keyboard keeps its
+  place); (2) `headset_frame` sends `CursorMoved` to the laser on every press edge, even when the pointer did not move;
+  (3) while a card shows, `files_offer_pointer` takes the headset pointer's buttons and hit-tests the press directly at the
+  laser's panel pixel in UI units of the renderer's size (`game/pointer_ui.rs`, tests), not through the cursor; (4) every pointer
+  button edge is logged (`Headset: pointer button ...`, and `the files card is clicked at ...`) so the next logcat shows where
+  a click fails. The Starling touch-only overlays (update offer, native builds, catalog) still answer touches only; the update
+  offer does not appear on the Quest (`app_version` has no Java behind it).
+- Checks: fmt; clippy `-D warnings --all-targets` horizon-client clean (android-target clippy still stops on horizon-threads);
+  horizon-client --lib 798, horizon-client-input 90, render `headset|quest` 14 pass; `cargo check --target aarch64-linux-android`
+  passes. APK rebuilt on the same bundle (research-lock equal), installed on the headset with launch.txt untouched.
+
 ## Remaining work
 1. Test on the headset: stereo/multiview, SpaceWarp, room, controls, then A/B the switches (including
    `HORIZON_QUEST_LEAN_OPAQUE`, `HORIZON_QUEST_LEAN_CUTOUT`); check the on-device prepare and the download (Range resume).

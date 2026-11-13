@@ -165,8 +165,15 @@ impl Game<'_> {
         if at.is_none() {
             self.pad.headset.pointer = None;
         }
+        // A press lands where the laser points: the cursor goes there first, even where the pointer
+        // has not moved (the pad's menu focus may have taken the cursor to a widget since).
+        let pressing = at.is_some()
+            && headset::pointer_buttons()
+                .into_iter()
+                .zip(self.pad.headset.buttons)
+                .any(|(now, before)| now && !before);
         if let Some(at) = at
-            && self.pad.headset.pointer != Some(at)
+            && (self.pad.headset.pointer != Some(at) || pressing)
         {
             self.pad.headset.pointer = Some(at);
             self.handle_window_event(
@@ -214,6 +221,16 @@ impl Game<'_> {
                 continue;
             }
             self.pad.headset.buttons[i] = buttons[i];
+            log::info!(
+                "Headset: pointer button {i} {} at {at:?}, cursor {:?}",
+                if buttons[i] { "down" } else { "up" },
+                self.cursor,
+            );
+            // A card over the title (game/files_offer.rs) takes the buttons whole.
+            #[cfg(target_os = "android")]
+            if self.files_offer_pointer(at, i, buttons[i]) {
+                continue;
+            }
             if over_keys {
                 if i == 0 && buttons[i] {
                     self.headset_keyboard(true);
