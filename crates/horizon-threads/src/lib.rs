@@ -4,6 +4,7 @@
 /// The game window's boot screen, before wgpu's first frame paints over it.
 #[cfg(target_os = "windows")]
 pub mod boot_paint;
+pub mod cores;
 pub mod heap_census;
 pub mod jobs;
 pub mod memory_limit;
@@ -24,6 +25,11 @@ use std::sync::{
 pub fn worker_count() -> usize {
     static COUNT: OnceLock<usize> = OnceLock::new();
     *COUNT.get_or_init(|| {
+        // The headset's hybrid chip with the P/E plan asked for (cores.rs): the plan's workers.
+        if let Some(plan) = cores::hybrid_plan() {
+            return parse_worker_count(std::env::var("HORIZON_WORKER_THREADS").ok())
+                .map_or(plan.workers.len(), |n| n.min(plan.workers.len()));
+        }
         parse_worker_count(std::env::var("HORIZON_WORKER_THREADS").ok())
             .unwrap_or_else(|| std::thread::available_parallelism().map_or(1, |n| n.get()))
     })
