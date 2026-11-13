@@ -252,6 +252,8 @@ impl super::Game<'_> {
             || self.player.is_none()
             || self.options.dedicated.is_some()
             || self.serving.is_some()
+            // Its hints name keys and a mouse: a headset's player has controllers.
+            || horizon_client::headset::active()
         {
             return;
         }
@@ -440,7 +442,10 @@ impl super::Game<'_> {
         batch: &mut horizon_client::hud::HudBatch,
         hidden: bool,
     ) {
-        let wanted = self.tutorial.hint();
+        let wanted = self
+            .tutorial
+            .hint()
+            .filter(|_| !horizon_client::headset::active());
         for t in &mut self.tutorial_toasts {
             t.wanted = wanted.is_some_and(|(hint, _)| hint == t.hint);
             if t.wanted {

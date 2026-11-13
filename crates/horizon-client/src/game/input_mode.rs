@@ -5,12 +5,18 @@
 use super::Game;
 #[cfg(target_os = "android")]
 use super::{event_loop::EventLoopCtl, input_trace::InputOrigin};
-use horizon_client::input_mode::InputMode;
+use horizon_client::{headset, input_mode::InputMode};
 #[cfg(target_os = "android")]
 use winit::{
     dpi::PhysicalPosition,
     event::{DeviceId, ElementState, MouseScrollDelta, TouchPhase, WindowEvent},
 };
+
+/// Whether the touch screen is the platform's own input: Android's, but not a headset's, whose
+/// player has controllers and no touch screen (the touch buttons would hang over the world).
+fn touch_platform() -> bool {
+    cfg!(target_os = "android") && !headset::active()
+}
 
 impl Game<'_> {
     /// The player used `input`. Off the touch screen the fingers let go of what they held and the
@@ -21,7 +27,7 @@ impl Game<'_> {
             .settings
             .touch
             .input_selection
-            .resolve(self.input_mode.after(input, cfg!(target_os = "android")));
+            .resolve(self.input_mode.after(input, touch_platform()));
         if mode == self.input_mode {
             return;
         }
@@ -36,7 +42,7 @@ impl Game<'_> {
 
     /// The touch controls, the chat's bar and the on-screen keyboard show.
     pub(super) fn touch_shown(&self) -> bool {
-        self.input_mode == InputMode::Touch
+        self.input_mode == InputMode::Touch && !headset::active()
     }
 
     /// Once per loop iteration, before the touch frame: the pointer capture Android took back,

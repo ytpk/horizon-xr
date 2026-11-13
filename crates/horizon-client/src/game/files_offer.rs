@@ -235,6 +235,30 @@ impl Game<'_> {
         let [w, h] = self.touch_size();
         let d = density(w as f32, h as f32);
         let p = [touch.location.x as f32 / d, touch.location.y as f32 / d];
+        self.files_offer_press(card, p);
+        true
+    }
+
+    /// A headset's pointer (or a mouse) pressed on the card at the cursor: the card takes the
+    /// click as a lifted finger. False when no card shows.
+    pub(super) fn files_offer_click(&mut self) -> bool {
+        let Some(card) = self.files_offer_shown() else {
+            return false;
+        };
+        // The size the card was drawn for: the renderer's (a headset's menu panel), not the window's.
+        let Some(r) = &self.renderer else {
+            return false;
+        };
+        let (w, h) = (r.config.width, r.config.height);
+        let scale = horizon_client::hud::HudBatch::new([w, h]).scale;
+        let d = density(w as f32, h as f32);
+        let p = [self.cursor.0 * scale / d, self.cursor.1 * scale / d];
+        self.files_offer_press(card, p);
+        true
+    }
+
+    /// The card's button at `p` (UI units), if any, acts.
+    fn files_offer_press(&mut self, card: Card, p: [f32; 2]) {
         let inside = |r: [f32; 4]| {
             p[0] >= r[0] && p[0] <= r[0] + r[2] && p[1] >= r[1] && p[1] <= r[1] + r[3]
         };
@@ -244,7 +268,7 @@ impl Game<'_> {
         } else if inside(other) {
             1
         } else {
-            return true;
+            return;
         };
         let offer = &mut self.files_offer;
         match (card, button) {
@@ -277,6 +301,5 @@ impl Game<'_> {
                 offer.horizon = None;
             }
         }
-        true
     }
 }

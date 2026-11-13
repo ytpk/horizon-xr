@@ -18165,6 +18165,15 @@ impl Game<'_> {
                         self.advancements_scroll(scaled(raw_x) as f32, d);
                     }
                 }
+                // The Starling folder's card over the title takes the headset pointer's click.
+                #[cfg(target_os = "android")]
+                WindowEvent::MouseInput { state, button, .. }
+                    if self.files_offer_shown().is_some() =>
+                {
+                    if state == ElementState::Pressed && button == MouseButton::Left {
+                        self.files_offer_click();
+                    }
+                }
                 WindowEvent::MouseInput { state, button, .. } if self.command_prompt.is_some() => {
                     if state == ElementState::Pressed && button == MouseButton::Left {
                         self.command_prompt_click();
