@@ -247,6 +247,56 @@ Third pass (2026-11-13). Both assets are now made from this tree:
 5. Bedrock touch buttons and Starling's control textures are no longer fetched in a headset. The `horizon-data.bin` and
    other Permission denied lines came from files pushed by adb (owner shell); a normal install writes them as the app.
 
+## Sixth pass (2026-11-13): the second headset test
+
+1. On-device prepare still wanted javac ("Java 25 is needed (javac ...)"). Cause: `exporters::key` hashed every `.java`
+   under the parity folder, but the APK bundle ships the sources of its 26 bundled classes only (of 326), so on the
+   headset the key never matched `exporters/manifest.json`, `valid(shipped)` failed and `classes()` took the javac branch.
+   Fix (ported from the source repo): a root without `crates/horizon-prepare/src/exporters.rs` (the Quest's app data)
+   returns the key of its own `exporters/manifest.json`; `valid` still hashes every class against it. The phone's kit
+   ships `crates/` and is unchanged. Tests: `a_root_without_a_checkout_uses_the_bundles_own_key` (fails without the
+   branch); host proof with the rebuilt zip unzipped alone: `HORIZON_QUEST_BUNDLE_ROOT=<dir> cargo test -p
+   horizon-prepare --lib the_shipped -- --ignored` passes, and fails with the branch disabled ("classes() would compile
+   with javac"). The only javac user reachable from prepare is `exporters::classes` (compile branch); everything else uses
+   `java::find_runtime`.
+   `Languages not imported: Missing asset object .../2ab603...`: prepare's language import took every `minecraft/lang/*`
+   of the asset index, but the headset downloads only en_us and the chosen languages (44 objects). The shared downloader
+   did not drop anything (`Selection.languages` selects them); the importer was the strict side. Ported the source's rule:
+   absent `lang` objects are left out and counted in the log, everything else stays all or nothing. Test:
+   `languages_missing_from_the_store_are_left_out_not_an_error`.
+2. Multiview still never engaged: `no stereo variant for pipelines: solid_paths[0..7], late_sky[0..4]`. Cause: not a missing
+   shader module. `Reuse::finish` kept the stereo variants only of pipelines in the `render` map; the pipelines made by
+   `try_create_render_pipeline` (the Adreno solid paths, the late sky) live in the `tried` map, so their variants were
+   dropped when the renderer finished building. RADV never builds those paths, and the old test did not call `finish`.
+   Fix: `finish` also retains the variants of the `tried` pipelines; `add_stereo` now warns which pipeline lacked a stereo
+   copy of its vertex/fragment module instead of skipping silently. Test (rewritten):
+   `solid_paths::tests::every_adreno_path_pipeline_has_a_multiview_variant` builds the solid paths (plain and lean) and the
+   late sky with the stereo flag, calls `finish`, and asserts a variant for all of them; it failed before the fix and
+   passes now. A full-renderer swap test is not possible without a surface; every other pipeline of the swap list is made
+   through `kept.create_render_pipeline` (retained already) and the headset log named only these two sets.
+3. The files card's "Set up" now works on the Quest by JNI (needs a headset check): `android.rs` has a Quest branch
+   (`embed::set_android_app` marks it): `Environment.isExternalStorageManager`, an Intent to
+   `MANAGE_APP_ALL_FILES_ACCESS_PERMISSION` with `package:` Uri (then `MANAGE_ALL_FILES_ACCESS_PERMISSION`), restart by the
+   launch intent (NEW_TASK|CLEAR_TASK, then the process ends). `AndroidManifest.xml` declares `MANAGE_EXTERNAL_STORAGE`.
+   At start `android_main` calls `embed::quest_game_folder`: when allowed, the game folder is `<external storage>/Starling`
+   (the phone's name rule, `shared_folder::name`), files are moved once by `game_folder`, `HORIZON_PRIVATE` keeps caches
+   in the app's files, the headset-defaults mark stays in the private home. When no settings page opens the card turns
+   into "Your files are here" with the folder's path (no dead button). Texts: `horizon.quest.files.*` in en_us and ru_ru
+   (test `the_headset_files_card_is_translated`). To check on the headset: that Horizon OS opens the all-files page, that
+   the card returns to "All set" after coming back, that Restart relaunches, and that worlds appear in /sdcard/Starling.
+
+### Sixth pass: tests, APK
+- fmt clean; clippy `-D warnings --all-targets` clean for horizon-prepare, horizon-client-render, horizon-quest-launcher,
+  horizon-fetch, starling-account, and `-p horizon-client --lib --tests`. (`clippy --target aarch64-linux-android` stops on
+  two `unnecessary_cast` in `horizon-threads/src/cores.rs`, untouched here.) Tests: horizon-prepare 62 (+2 integration,
+  +1 ignored bundle check), horizon-client-render --lib 1411 pass + the 2 known frame_gen failures, quest-launcher 37,
+  horizon-fetch 11, starling-account 26, horizon-client --lib 794: pass. `cargo check --target aarch64-linux-android -p
+  horizon-quest -p horizon-android`: passes.
+- Bundle rebuilt (`build_bundle.sh`, 282605 bytes); JRE reused. APK `target/quest/horizon-quest.apk`, 131711816 bytes,
+  sha256 `006e3231bd23cd73e859f2f1c38133df9c036a5a156e5533404829ca38785013`. The exporter guard in `build_apk.sh` is silent
+  when it passes (it prints only the stale exporters): the build ran to the end. Bundle `research-lock.json` equals the
+  tree's (cmp). Not installed on any headset.
+
 ## Remaining work
 1. Test on the headset: stereo/multiview, SpaceWarp, room, controls, then A/B the switches (including
    `HORIZON_QUEST_LEAN_OPAQUE`, `HORIZON_QUEST_LEAN_CUTOUT`); check the on-device prepare and the download (Range resume).
