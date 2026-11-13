@@ -14,6 +14,7 @@ use crate::{
     vr_profile,
 };
 use glam::{DVec3, Mat4, Vec3, Vec4};
+use quest_quality::{lean_cutout, lean_opaque, plant_distance, quest_switch};
 use std::{collections::HashMap, path::PathBuf, sync::Arc, time::Instant};
 use wgpu::util::DeviceExt;
 use winit::window::Window;
@@ -53,62 +54,6 @@ fn split_solid_gpu(info: &wgpu::AdapterInfo) -> bool {
     }
 }
 
-/// A Quest rendering switch (the VR settings' Experiments page): the environment variable
-/// `env` set to `1` or `0` decides, else the VR setting `setting`. Read when the renderer
-/// is made, so a change takes a restart.
-fn quest_switch(env: &str, setting: &str) -> bool {
-    match std::env::var(env).as_deref() {
-        Ok("1") => true,
-        Ok("0") => false,
-        _ => headset::installed() && horizon_client_input::headset::settings().bool(setting),
-    }
-}
-
-/// Whether the opaque solid pass without HDR output exports terrain.wgsl's `OpaqueWire` (3
-/// interpolant locations) instead of `TerrainWire` (5): a headset's Adreno shades each vertex
-/// about 2.5 times a frame (once per view, once for binning) and pays for every location. On
-/// a Quest 3S at 24 chunks it took 10% of the ALU per vertex and 0.9 ms of 21 off the frame.
-/// The picture is the same. Only there, and `HORIZON_QUEST_LEAN_OPAQUE=0` keeps `TerrainWire`.
-fn lean_opaque(info: &wgpu::AdapterInfo) -> bool {
-    headset::installed()
-        && info.backend == wgpu::Backend::Vulkan
-        && info.vendor == 0x5143
-        && quest_switch("HORIZON_QUEST_LEAN_OPAQUE", "horizonLeanOpaque")
-}
-
-/// Whether the cutout solid pass without HDR output draws its lists that are not fading
-/// through terrain.wgsl's `vs_terrain_cutout_lean` and `fs_cutout_lean`: `OpaqueWire`'s 3
-/// interpolant locations instead of `TerrainWire`'s 5, and the cutout before any other work
-/// (as `lean_opaque`, for the same GPU). The fading lists keep `fs_solid`, in a group of their
-/// own after them. The picture is the same. `HORIZON_QUEST_LEAN_CUTOUT=0` turns it off.
-fn lean_cutout(info: &wgpu::AdapterInfo) -> bool {
-    headset::installed()
-        && info.backend == wgpu::Backend::Vulkan
-        && info.vendor == 0x5143
-        && split_solid_gpu(info)
-        && quest_switch("HORIZON_QUEST_LEAN_CUTOUT", "horizonLeanCutout")
-}
-
-/// `HORIZON_QUEST_PLANT_DISTANCE=<blocks>`: on a headset's Adreno, sections whose centre is
-/// farther than this leave out their crossed cutout quads (`Quads::CutoutAligned`): short and
-/// tall grass, ferns, flowers, saplings. It changes the picture (the plants appear a section
-/// at a time as the player nears them), so it is off unless set; the squared distance.
-fn plant_distance(info: &wgpu::AdapterInfo) -> Option<f64> {
-    static BLOCKS: std::sync::OnceLock<Option<f64>> = std::sync::OnceLock::new();
-    let blocks = *BLOCKS.get_or_init(|| {
-        match std::env::var("HORIZON_QUEST_PLANT_DISTANCE") {
-            Ok(v) => v.parse::<f64>().ok(),
-            Err(_) => headset::installed().then(|| {
-                f64::from(horizon_client_input::headset::settings().float("horizonPlantDistance"))
-            }),
-        }
-        .filter(|d| *d > 0.0)
-    });
-    blocks
-        .filter(|_| headset::installed() && info.vendor == 0x5143)
-        .map(|d| d * d)
-}
-
 fn light_marks(format: wgpu::TextureFormat, hdr: bool) -> bool {
     hdr && format != LINEAR_FRAME
 }
@@ -120,32 +65,7 @@ fn terrain_shader() -> String {
     } else {
         source
     };
-    terrain_experiments(source)
-}
-
-/// Whether section meshes merge their coplanar block faces (`mesher::merge`): on a headset's
-/// Adreno, whose frame is bound by how many triangles the terrain has, where solid terrain
-/// draws in two passes and no shader pack reads the quads' sources. The picture is the same:
-/// only faces whose four corners share one colour and light merge. `HORIZON_QUEST_MERGE_FACES=1`
-/// turns it on.
-fn merge_faces_gpu(info: &wgpu::AdapterInfo, shader_pack: bool) -> bool {
-    headset::installed()
-        && info.backend == wgpu::Backend::Vulkan
-        && info.vendor == 0x5143
-        && split_solid_gpu(info)
-        && !shader_pack
-        && quest_switch("HORIZON_QUEST_MERGE_FACES", "horizonMergeFaces")
-}
-
-/// Whether plants' crossed quads are meshed over the part of their sprite that draws
-/// (`mesher::shrink_plants`): on a headset's Adreno, where the pixels the cutout pass throws
-/// away cost as much as the ones it keeps. `HORIZON_QUEST_SHRINK_PLANTS=1` turns it on.
-fn shrink_plants_gpu(info: &wgpu::AdapterInfo, shader_pack: bool) -> bool {
-    headset::installed()
-        && info.backend == wgpu::Backend::Vulkan
-        && info.vendor == 0x5143
-        && !shader_pack
-        && quest_switch("HORIZON_QUEST_SHRINK_PLANTS", "horizonShrinkPlants")
+    terrain_experiments(quest_quality::shader(source))
 }
 
 /// The terrain shader for meshes with merged faces (`mesher::merge`). A merged quad's packed
@@ -299,6 +219,7 @@ mod fluid;
 mod inter_stage_tests;
 mod multiview;
 mod planar_water;
+mod quest_quality;
 mod quest_render;
 mod terrain_model;
 #[cfg(test)]
@@ -3353,16 +3274,7 @@ impl Renderer {
         let pipelines_step = crate::spans::startup::step("renderer.pipelines_textures");
         let terrain_step = crate::spans::startup::step("renderer.terrain_pipelines");
         let gpu_timer = timing::GpuTimer::new(&device, &queue);
-        // Before any terrain shader is built: it reads merged UVs where the meshes have them.
-        let merge_faces = merge_faces_gpu(&adapter.get_info(), shader_pack);
-        crate::mesher::merge_faces(merge_faces);
-        let shrink_plants = shrink_plants_gpu(&adapter.get_info(), shader_pack);
-        crate::mesher::shrink_plants(shrink_plants);
-        if headset::installed() {
-            log::info!(
-                "Quest terrain merged block faces: {merge_faces}, shrunk plant quads: {shrink_plants}"
-            );
-        }
+        quest_quality::configure(&info, shader_pack);
         let shader = kept.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Horizon terrain"),
             source: wgpu::ShaderSource::Wgsl(terrain_shader().into()),

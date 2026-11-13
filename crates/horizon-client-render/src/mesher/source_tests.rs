@@ -369,3 +369,89 @@ fn opaque_water_routes_fluid_to_depth_writing_mesh_and_preserves_shader_fallback
     let restored = mesher.mesh(&region, 0);
     assert_eq!(restored.translucent.len(), normal.translucent.len());
 }
+
+#[test]
+fn plant_density_removes_complete_models_and_keeps_sources_and_game_data() {
+    let (_scratch, assets, mut render, mut tables, biomes) = fixture();
+    // Two multipart crossed faces per block, built from original synthetic data.
+    for (_, model) in render.model_catalog.models_mut() {
+        for face in &mut model.faces {
+            let mut quad = face.quad.clone();
+            quad.positions = [[0., 1., 0.], [0., 0., 0.], [1., 0., 1.], [1., 1., 1.]];
+            *face = BakedFace::new(quad, 0, false, false, None);
+        }
+    }
+    let mut chunk = Chunk::with_layout(-1, 1, crate::chunk::ColumnLayout::new(0, 16).unwrap());
+    for z in 0..16 {
+        for x in 0..16 {
+            chunk.set(x, 2, z, 1);
+            chunk.set(x, 3, z, 1);
+        }
+    }
+    let region = [
+        [None, None, None],
+        [None, Some(&chunk), None],
+        [None, None, None],
+    ];
+    let run = |tables: &MeshTables, shader_pack, percent| {
+        Mesher {
+            nether_shading: false,
+            shader_pack_lighting: false,
+            separate_ao: false,
+            shader_pack,
+            assets: &assets,
+            render: &render,
+            tables,
+            biomes: &biomes,
+            visibility: FaceVisibility::empty(),
+            zoom: BiomeZoom::new(0),
+            blend_radius: 0,
+            smooth_lighting: false,
+            cutout_leaves: true,
+            opaque_ice: false,
+            opaque_water: false,
+            translucent_layers: &[],
+            leaf_culling: LeafCullingMode::Off,
+        }
+        .mesh_density(
+            &region,
+            0,
+            SectionMesh::default(),
+            &mut MeshScratch::default(),
+            percent,
+        )
+    };
+    let all = run(&tables, false, 100);
+    assert_eq!(all.solid.len(), 256 * 2 * 2 * 4);
+    assert!(run(&tables, false, 0).solid.is_empty());
+    let sparse = run(&tables, false, 25);
+    assert!(sparse.solid.len() < all.solid.len() / 2 && !sparse.solid.is_empty());
+    for z in 0..16 {
+        for x in 0..16 {
+            let vertices = sparse
+                .solid
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .filter(|q| q[0].pos[0] == x as f32 && q[0].pos[2] == z as f32)
+                .count();
+            assert!(
+                vertices == 0 || vertices == 4,
+                "both faces and both heights stay together"
+            );
+            assert_eq!(
+                chunk.get(x, 2, z),
+                1,
+                "visual thinning leaves the world unchanged"
+            );
+        }
+    }
+    assert_eq!(run(&tables, true, 0).solid.len(), all.solid.len());
+    tables.info[1].emission = 7;
+    assert_eq!(run(&tables, false, 0).solid.len(), all.solid.len());
+    tables.info[1].emission = 0;
+    tables.info[1].block_entity = true;
+    let protected = run(&tables, false, 0);
+    assert_eq!(protected.solid.len(), all.solid.len());
+    assert_eq!(protected.block_entities.len(), 512);
+}

@@ -37,6 +37,12 @@ pub fn shrinking_plants() -> bool {
 }
 
 static MERGE: AtomicBool = AtomicBool::new(false);
+static AGGRESSIVE: AtomicBool = AtomicBool::new(false);
+/// Allows lower-quality meshes: quantized flat light/colour and uniform texture orientation.
+/// Still keeps sprites, emission, winding and overlaid faces separate.
+pub fn aggressive_merging(on: bool) {
+    AGGRESSIVE.store(on, Ordering::Relaxed);
+}
 /// Turns merging on or off for the meshes sorted from now on. The terrain shader built
 /// while it is on reads merged UVs.
 pub fn merge_faces(on: bool) {
@@ -268,16 +274,88 @@ pub fn merge(
     tints: &mut Vec<u32>,
     translucent: &[TerrainVertex],
 ) -> Stats {
-    let stats = SCRATCH.with_borrow_mut(|s| merge_with(solid, tints, translucent, s));
+    let aggressive = AGGRESSIVE.load(Ordering::Relaxed);
+    let stats =
+        SCRATCH.with_borrow_mut(|s| merge_quality(solid, tints, translucent, s, aggressive));
     record(&stats);
     stats
 }
 
+#[cfg(test)]
 fn merge_with(
     solid: &mut Vec<TerrainVertex>,
     tints: &mut Vec<u32>,
     translucent: &[TerrainVertex],
     s: &mut Scratch,
+) -> Stats {
+    merge_quality(solid, tints, translucent, s, false)
+}
+
+/// Normalize only whole, non-overlaid opaque faces. Never move positions or change sprites.
+fn simplify(q: &mut [TerrainVertex; 4], corners: u8, tint: u32) -> Face {
+    // Preserve emission and spare alpha bits; unlike RGB, they are discrete flags.
+    let alpha = q[0].color & 0xff00_0000;
+    let uniform = q.map(|v| TerrainVertex {
+        color: q[0].color,
+        light: q[0].light,
+        ..v
+    });
+    if q.iter()
+        .any(|v| v.color & 0xff00_0000 != alpha || v.layer != q[0].layer)
+    {
+        return Face::Shaded;
+    }
+    match face(&uniform, corners, tint) {
+        Face::Mergeable(_) => {}
+        other => return other,
+    }
+    // Baked block rotations can change which corner starts the quad as well as its UVs.
+    // Canonicalize the start without reversing the winding; flat lighting has no diagonal.
+    let first = (0..4)
+        .find(|&i| corners >> i & 1 == 0 && corners >> (4 + i) & 1 == 0)
+        .expect("a whole face has a low/low corner");
+    q.rotate_left(first);
+    let rotate = |bits: u8| ((bits >> first) | (bits << (4 - first))) & 15;
+    let corners = rotate(corners & 15) | (rotate(corners >> 4) << 4);
+    let mut color = alpha;
+    for shift in [0, 8, 16] {
+        let mean = q.iter().map(|v| (v.color >> shift) & 255).sum::<u32>() / 4;
+        color |= ((mean + 16) / 32 * 32).min(255) << shift;
+    }
+    let mut light = 0u16;
+    for shift in [0, 8] {
+        let mean = q
+            .iter()
+            .map(|v| u32::from(v.light >> shift & 255))
+            .sum::<u32>()
+            / 4;
+        // Four-light-level steps, retaining level 15 rather than exceeding the lightmap.
+        light |= (((mean + 32) / 64 * 64).min(240) as u16) << shift;
+    }
+    for (i, v) in q.iter_mut().enumerate() {
+        v.color = color;
+        v.light = light;
+        v.uv = [
+            u16::from(corners >> i & 1) * ONE,
+            u16::from(corners >> (4 + i) & 1) * ONE,
+        ];
+    }
+    Face::Mergeable(Key {
+        corners,
+        layer: q[0].layer,
+        light,
+        color,
+        uv: q.map(|v| v.uv),
+        tint,
+    })
+}
+
+fn merge_quality(
+    solid: &mut Vec<TerrainVertex>,
+    tints: &mut Vec<u32>,
+    translucent: &[TerrainVertex],
+    s: &mut Scratch,
+    aggressive: bool,
 ) -> Stats {
     let quads = solid.as_chunks::<4>().0;
     let mut stats = Stats {
@@ -306,7 +384,7 @@ fn merge_with(
         }
     }
     let mut any = false;
-    for (i, q) in quads.iter().enumerate() {
+    for (i, q) in solid.as_chunks_mut::<4>().0.iter_mut().enumerate() {
         if q[0].layer & OPAQUE_LAYER == 0 {
             continue;
         }
@@ -320,7 +398,12 @@ fn merge_with(
             continue;
         }
         let tint = if tinted { tints[i] } else { 0 };
-        match face(q, corners, tint) {
+        let candidate = if aggressive {
+            simplify(q, corners, tint)
+        } else {
+            face(q, corners, tint)
+        };
+        match candidate {
             Face::Mergeable(key) => {
                 s.keys[i] = Some(key);
                 s.quad[cell] = i as u32 + 1;
@@ -333,6 +416,7 @@ fn merge_with(
     if !any {
         return stats;
     }
+    let quads = solid.as_chunks::<4>().0;
     s.fate.clear();
     s.fate.resize(quads.len(), 0);
     s.merged.clear();
@@ -418,6 +502,102 @@ mod tests {
     const STONE: u16 = 7 | OPAQUE_LAYER;
     const WHITE: u32 = 0xFFFF_FFFF;
     const DAY: u16 = 0x00F0;
+
+    #[test]
+    fn aggressive_merging_flattens_shading_and_rotation_without_changing_coverage() {
+        let mut solid = Vec::new();
+        for z in 0..16 {
+            for x in 0..16 {
+                let mut q = top(x, 0, z, STONE, WHITE, DAY);
+                let uv = q.map(|v| v.uv);
+                for (i, v) in q.iter_mut().enumerate() {
+                    v.color = [0xffe0_e0e0, 0xffe8_e8e8, 0xfff0_f0f0, 0xffe8_e8e8][i];
+                    v.light = [0x20e0, 0x20d0, 0x20e0, 0x20d0][i];
+                    v.uv = uv[(i + (x + z) as usize) % 4];
+                }
+                q.rotate_left(usize::from((3 * x + z) % 4));
+                solid.extend(q);
+            }
+        }
+        let mut exact = solid.clone();
+        merge_quality(&mut exact, &mut vec![], &[], &mut Scratch::default(), false);
+        assert_eq!(
+            bytemuck::cast_slice::<_, u8>(&exact),
+            bytemuck::cast_slice::<_, u8>(&solid),
+            "exact mode keeps AO and texture variation"
+        );
+        let stats = merge_quality(&mut solid, &mut vec![], &[], &mut Scratch::default(), true);
+        assert_eq!((stats.quads, stats.out), (256, 1));
+        let q: &[TerrainVertex; 4] = solid.as_slice().try_into().unwrap();
+        assert_eq!(
+            q.map(|v| v.pos),
+            [[0., 1., 0.], [0., 1., 16.], [16., 1., 16.], [16., 1., 0.]]
+        );
+        assert!(
+            q.iter()
+                .all(|v| v.layer == STONE && v.color == 0xffe0_e0e0 && v.light == 0x40c0)
+        );
+        assert_eq!(
+            q.map(|v| v.uv.map(decoded)),
+            [[-15., -15.], [1., -15.], [1., 1.], [-15., 1.]]
+        );
+    }
+
+    #[test]
+    fn aggressive_merging_preserves_overlays_partial_uvs_cutout_and_emission_boundaries() {
+        let a = top(0, 0, 0, STONE, 0xffe8_e8e8, DAY);
+        let mut partial = top(1, 0, 0, STONE, WHITE, DAY);
+        partial.iter_mut().for_each(|v| v.uv[0] /= 2);
+        let overlay = top(0, 0, 0, 7, 0xff12_3456, DAY);
+        let mut solid = [a, partial, overlay].as_flattened().to_vec();
+        let original = solid.clone();
+        merge_quality(&mut solid, &mut vec![], &[], &mut Scratch::default(), true);
+        assert_eq!(
+            bytemuck::cast_slice::<_, u8>(&solid),
+            bytemuck::cast_slice::<_, u8>(&original)
+        );
+        let mut solid = [a, top(1, 0, 0, STONE, 0xfce8_e8e8, DAY)]
+            .as_flattened()
+            .to_vec();
+        merge_quality(&mut solid, &mut vec![], &[], &mut Scratch::default(), true);
+        assert_eq!(solid.len(), 8, "different emission tiers must not merge");
+        assert_eq!(solid[0].color >> 24, 255);
+        assert_eq!(solid[4].color >> 24, 252);
+    }
+
+    #[test]
+    #[ignore = "synthetic geometry/CPU benchmark; no game resources or GPU FPS"]
+    fn quality_mesh_benchmark() {
+        let mut source = Vec::new();
+        for z in 0..16 {
+            for x in 0..16 {
+                let mut q = top(x, 0, z, STONE, WHITE, DAY);
+                q[1].color = 0xfff0_f0f0;
+                let uv = q.map(|v| v.uv);
+                for (i, v) in q.iter_mut().enumerate() {
+                    v.uv = uv[(i + usize::from((x + z) % 4)) % 4];
+                }
+                source.extend(q);
+            }
+        }
+        for aggressive in [false, true] {
+            let mut scratch = Scratch::default();
+            let mut work = Vec::new();
+            let mut output = 0;
+            let started = std::time::Instant::now();
+            for _ in 0..1000 {
+                work.clear();
+                work.extend_from_slice(&source);
+                let stats = merge_quality(&mut work, &mut vec![], &[], &mut scratch, aggressive);
+                output = stats.out;
+                std::hint::black_box(&work);
+            }
+            println!(
+                "aggressive={aggressive} quads_in=256 quads_out={output} iterations=1000 elapsed_us={}",
+                started.elapsed().as_micros()
+            );
+        }
+    }
 
     /// The top face of the block at (`x`, `y`, `z`), its sprite the usual way up: u along
     /// +X, v along +Z.
