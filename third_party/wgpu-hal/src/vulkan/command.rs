@@ -790,6 +790,7 @@ impl crate::CommandEncoder for super::CommandEncoder {
             depth_stencil: None,
             sample_count: desc.sample_count,
             multiview_mask: desc.multiview_mask,
+            density_map: false,
         };
         let mut fb_key = super::FramebufferKey {
             raw_pass: vk::RenderPass::null(),
@@ -847,6 +848,24 @@ impl crate::CommandEncoder for super::CommandEncoder {
                 stencil_ops: ds.stencil_ops,
             });
             fb_key.push_view(ds.target.view.identified_raw_view());
+        }
+
+        // A foveated headset image: its density map is the pass's last attachment.
+        let density = desc
+            .color_attachments
+            .first()
+            .and_then(|cat| cat.as_ref())
+            .and_then(|cat| {
+                self.device
+                    .density_maps
+                    .lock()
+                    .get(&cat.target.view.raw_texture)
+                    .copied()
+            });
+        if let Some(density) = density {
+            rp_key.density_map = true;
+            fb_key.push_view(density);
+            vk_clear_values.push(unsafe { mem::zeroed() });
         }
 
         let render_area = vk::Rect2D {

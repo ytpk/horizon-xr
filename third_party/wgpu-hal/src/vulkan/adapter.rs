@@ -2966,6 +2966,7 @@ impl super::Adapter {
             features,
             workarounds: self.workarounds,
             render_passes: Mutex::new(Default::default()),
+            density_maps: Mutex::new(Default::default()),
             sampler_cache: Mutex::new(super::sampler::SamplerCache::new(
                 self.private_caps.maximum_samplers,
             )),
@@ -3048,9 +3049,11 @@ impl super::Adapter {
         let mut family_infos = Vec::from([family_info]);
 
         let mut pre_info = vk::DeviceCreateInfo::default();
+        let mut creator: Option<super::DeviceCreator> = None;
 
         if let Some(callback) = callback {
             callback(super::CreateDeviceCallbackArgs {
+                creator: &mut creator,
                 extensions: &mut enabled_extensions,
                 device_features: &mut enabled_phd_features,
                 queue_create_infos: &mut family_infos,
@@ -3074,10 +3077,18 @@ impl super::Adapter {
         let raw_device = {
             profiling::scope!("vkCreateDevice");
             unsafe {
-                self.instance
-                    .raw
-                    .create_device(self.raw, &info, None)
-                    .map_err(map_err)?
+                match creator.take() {
+                    Some(create) => create(&self.instance.raw, self.raw, &info)
+                        .map(|raw| {
+                            ash::Device::load(self.instance.raw.fp_v1_0(), raw)
+                        })
+                        .map_err(map_err)?,
+                    None => self
+                        .instance
+                        .raw
+                        .create_device(self.raw, &info, None)
+                        .map_err(map_err)?,
+                }
             }
         };
         fn map_err(err: vk::Result) -> crate::DeviceError {

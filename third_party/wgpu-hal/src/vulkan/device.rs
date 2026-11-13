@@ -85,6 +85,7 @@ impl super::DeviceShared {
                     ref depth_stencil,
                     sample_count,
                     multiview_mask,
+                    density_map,
                 } = *e.key();
 
                 let mut vk_attachments = Vec::new();
@@ -183,6 +184,26 @@ impl super::DeviceShared {
                     vk_attachments.push(vk_attachment);
                 }
 
+                // The fragment density map comes last, after every colour, resolve and depth
+                // attachment, as the framebuffer lists its view (`begin_render_pass`).
+                let density_ref = density_map.then(|| {
+                    let reference = vk::AttachmentReference {
+                        attachment: vk_attachments.len() as u32,
+                        layout: vk::ImageLayout::FRAGMENT_DENSITY_MAP_OPTIMAL_EXT,
+                    };
+                    vk_attachments.push(
+                        vk::AttachmentDescription::default()
+                            .format(vk::Format::R8G8_UNORM)
+                            .samples(vk::SampleCountFlags::TYPE_1)
+                            .load_op(vk::AttachmentLoadOp::LOAD)
+                            .store_op(vk::AttachmentStoreOp::DONT_CARE)
+                            .stencil_load_op(vk::AttachmentLoadOp::DONT_CARE)
+                            .stencil_store_op(vk::AttachmentStoreOp::DONT_CARE)
+                            .initial_layout(vk::ImageLayout::FRAGMENT_DENSITY_MAP_OPTIMAL_EXT)
+                            .final_layout(vk::ImageLayout::FRAGMENT_DENSITY_MAP_OPTIMAL_EXT),
+                    );
+                    reference
+                });
                 let vk_subpasses = [{
                     let mut vk_subpass = vk::SubpassDescription::default()
                         .pipeline_bind_point(vk::PipelineBindPoint::GRAPHICS)
@@ -206,6 +227,13 @@ impl super::DeviceShared {
                 let mut vk_info = vk::RenderPassCreateInfo::default()
                     .attachments(&vk_attachments)
                     .subpasses(&vk_subpasses);
+
+                let mut density_info;
+                if let Some(reference) = density_ref {
+                    density_info = vk::RenderPassFragmentDensityMapCreateInfoEXT::default()
+                        .fragment_density_map_attachment(reference);
+                    vk_info = vk_info.push_next(&mut density_info);
+                }
 
                 let mut multiview_info;
                 let mask;
@@ -825,6 +853,34 @@ impl super::Device {
 
     pub fn raw_device(&self) -> &ash::Device {
         &self.shared.raw
+    }
+
+    /// Draws into `colour_image` from now on with `density_map` (an `R8G8_UNORM` view of the
+    /// runtime's fragment density map for it, in `FRAGMENT_DENSITY_MAP_OPTIMAL_EXT` layout) as the
+    /// render pass's fragment density map; `None` stops. Every pass whose first colour attachment
+    /// is that image takes it, so the device must have `VK_EXT_fragment_density_map` and its
+    /// `fragmentDensityMap` feature enabled.
+    ///
+    /// # Safety
+    ///
+    /// - The view must outlive its use here, and the extension and feature must be enabled.
+    /// - Pipelines drawn in these passes were made for passes without a density map: drivers
+    ///   have to accept that (it is the caller's check on a real device).
+    pub unsafe fn set_density_map(
+        &self,
+        colour_image: vk::Image,
+        density_map: Option<vk::ImageView>,
+    ) {
+        let mut maps = self.shared.density_maps.lock();
+        match density_map {
+            Some(raw) => {
+                let identity = self.shared.texture_view_identity_factory.next();
+                maps.insert(colour_image, super::IdentifiedTextureView { raw, identity });
+            }
+            None => {
+                maps.remove(&colour_image);
+            }
+        }
     }
 
     pub fn raw_physical_device(&self) -> vk::PhysicalDevice {

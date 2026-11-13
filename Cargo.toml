@@ -1,5 +1,5 @@
 [workspace]
-exclude = ["launcher", "crates/horizon-telemetry-server", "crates/horizon-mod-registry", "third_party/wgpu-hal", "third_party/naga", "third_party/libmimalloc-sys", "third_party/winit"]
+exclude = ["launcher", "crates/horizon-telemetry-server", "crates/horizon-mod-registry", "third_party/wgpu-hal", "third_party/wgpu-core", "third_party/naga", "third_party/libmimalloc-sys", "third_party/winit"]
 members = [
     "crates/starling-catalog",
     "crates/horizon-core",
@@ -76,6 +76,9 @@ large_enum_variant = "allow"
 # backend, marked "Horizon's patch"; nothing changes on the other platforms.
 [patch.crates-io]
 wgpu-hal = { path = "third_party/wgpu-hal" }
+# wgpu-core 30.0.1 with one line changed: an instance made from a HAL one (a headset's) reads the
+# `WGPU_*` variables too, so `WGPU_VALIDATION_INDIRECT_CALL=0` can drop the indirect draw validation.
+wgpu-core = { path = "third_party/wgpu-core" }
 winit = { path = "third_party/winit" }
 # naga 30.0.1, with the fixes to its GLSL frontend that shader packs need (THIRD_PARTY_NOTICES.md).
 naga = { path = "third_party/naga" }
@@ -119,3 +122,10 @@ opt-level = 1
 
 [profile.quick.package.horizon-client-lib]
 opt-level = 1
+
+# The Meta Quest library (packaging/quest/build_apk.sh): optimized like a release, but
+# without its whole-program LTO, which takes far longer on this workspace for little gain.
+[profile.quest]
+inherits = "release"
+lto = false
+codegen-units = 16
