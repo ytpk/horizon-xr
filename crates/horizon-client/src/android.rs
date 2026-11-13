@@ -20,6 +20,145 @@ static APP: OnceLock<AndroidApp> = OnceLock::new();
 static ARGS: OnceLock<Vec<String>> = OnceLock::new();
 /// Shared storage's Starling folder, when the player allowed the app to use it.
 static SHARED_FOLDER: OnceLock<PathBuf> = OnceLock::new();
+/// The game runs in a plain NativeActivity (the Quest's, `embed::set_android_app`): there is no
+/// StarlingActivity Java to call, so the file-access calls go to Android's own classes.
+static QUEST: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+fn quest() -> bool {
+    QUEST.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Android's "all files" permission (MANAGE_EXTERNAL_STORAGE), as the system has it now.
+fn all_files_allowed(env: &mut jni::JNIEnv) -> jni::errors::Result<bool> {
+    env.call_static_method(
+        "android/os/Environment",
+        "isExternalStorageManager",
+        "()Z",
+        &[],
+    )?
+    .z()
+}
+
+/// The app id, for the shared folder's name.
+fn package_name(env: &mut jni::JNIEnv, activity: &jni::objects::JObject) -> Option<String> {
+    let name = env
+        .call_method(activity, "getPackageName", "()Ljava/lang/String;", &[])
+        .ok()?
+        .l()
+        .ok()?;
+    env.get_string(&name.into()).ok().map(String::from)
+}
+
+/// Android's all-files setting for this app, else the general list, started in a task of its
+/// own (what StarlingActivity.openFileAccessSettings does). False when no settings page opened
+/// (a system without them: the Quest's Horizon OS may be one).
+fn open_all_files_settings(
+    env: &mut jni::JNIEnv,
+    activity: &jni::objects::JObject,
+) -> jni::errors::Result<bool> {
+    use jni::objects::JValue;
+    let package = package_name(env, activity).unwrap_or_default();
+    let uri_text = env.new_string(format!("package:{package}"))?;
+    let uri = env
+        .call_static_method(
+            "android/net/Uri",
+            "parse",
+            "(Ljava/lang/String;)Landroid/net/Uri;",
+            &[JValue::Object(&uri_text)],
+        )?
+        .l()?;
+    for (action, with_package) in [
+        (
+            "android.settings.MANAGE_APP_ALL_FILES_ACCESS_PERMISSION",
+            true,
+        ),
+        ("android.settings.MANAGE_ALL_FILES_ACCESS_PERMISSION", false),
+    ] {
+        let action = env.new_string(action)?;
+        let intent = if with_package {
+            env.new_object(
+                "android/content/Intent",
+                "(Ljava/lang/String;Landroid/net/Uri;)V",
+                &[JValue::Object(&action), JValue::Object(&uri)],
+            )?
+        } else {
+            env.new_object(
+                "android/content/Intent",
+                "(Ljava/lang/String;)V",
+                &[JValue::Object(&action)],
+            )?
+        };
+        // FLAG_ACTIVITY_NEW_TASK: home brings the player back to the game, not to the setting.
+        env.call_method(
+            &intent,
+            "addFlags",
+            "(I)Landroid/content/Intent;",
+            &[JValue::Int(0x1000_0000)],
+        )?;
+        let started = env.call_method(
+            activity,
+            "startActivity",
+            "(Landroid/content/Intent;)V",
+            &[JValue::Object(&intent)],
+        );
+        if started.is_ok() && !env.exception_check()? {
+            return Ok(true);
+        }
+        // ActivityNotFoundException and the like: the general list, then.
+        let _ = env.exception_clear();
+    }
+    Ok(false)
+}
+
+/// The app's launcher activity again, in a new task, then this process ends: the game folder is
+/// chosen at start (the Quest's counterpart of StarlingActivity.restart).
+fn restart_quest(
+    env: &mut jni::JNIEnv,
+    activity: &jni::objects::JObject,
+) -> jni::errors::Result<()> {
+    use jni::objects::JValue;
+    let package = package_name(env, activity).unwrap_or_default();
+    let name = env.new_string(package)?;
+    let manager = env
+        .call_method(
+            activity,
+            "getPackageManager",
+            "()Landroid/content/pm/PackageManager;",
+            &[],
+        )?
+        .l()?;
+    let intent = env
+        .call_method(
+            &manager,
+            "getLaunchIntentForPackage",
+            "(Ljava/lang/String;)Landroid/content/Intent;",
+            &[JValue::Object(&name)],
+        )?
+        .l()?;
+    if intent.is_null() {
+        return Err(jni::errors::Error::NullPtr("no launch intent"));
+    }
+    // NEW_TASK | CLEAR_TASK
+    env.call_method(
+        &intent,
+        "addFlags",
+        "(I)Landroid/content/Intent;",
+        &[JValue::Int(0x1000_0000 | 0x0000_8000)],
+    )?;
+    env.call_method(
+        activity,
+        "startActivity",
+        "(Landroid/content/Intent;)V",
+        &[JValue::Object(&intent)],
+    )?;
+    // A process of this game cannot start another winit loop (see `main`): it ends, and the
+    // system starts the activity in a fresh one.
+    std::thread::spawn(|| {
+        std::thread::sleep(std::time::Duration::from_millis(600));
+        std::process::exit(0);
+    });
+    Ok(())
+}
 
 /// `StarlingActivity.onStorage`, called on the UI thread before the game's thread starts.
 pub fn set_shared_folder(folder: PathBuf) {
@@ -82,7 +221,14 @@ pub unsafe fn on_create(
 pub(crate) fn with_activity<R>(
     f: impl FnOnce(&mut jni::JNIEnv, &jni::objects::JObject) -> jni::errors::Result<R>,
 ) -> Option<R> {
-    let app = APP.get()?;
+    with_app(APP.get()?, f)
+}
+
+/// [`with_activity`] for an activity before the game's `APP` is set (the Quest's start-up).
+fn with_app<R>(
+    app: &AndroidApp,
+    f: impl FnOnce(&mut jni::JNIEnv, &jni::objects::JObject) -> jni::errors::Result<R>,
+) -> Option<R> {
     // SAFETY: the VM and the activity are NativeActivity's, alive as long as the process; the
     // activity is a global reference, which this neither deletes nor keeps.
     let vm = unsafe { jni::JavaVM::from_raw(app.vm_as_ptr().cast()) }.ok()?;
@@ -260,6 +406,9 @@ fn open_link(url: &str) -> bool {
 /// Whether the player has allowed the Starling folder in shared storage (now: they may have just
 /// come back from the setting).
 pub fn file_access_allowed() -> bool {
+    if quest() {
+        return with_activity(|env, _| all_files_allowed(env)).unwrap_or(false);
+    }
     with_activity(|env, activity| {
         env.call_method(activity, "fileAccessAllowed", "()Z", &[])?
             .z()
@@ -269,6 +418,9 @@ pub fn file_access_allowed() -> bool {
 
 /// Whether Horizon Android is on the phone: the setup offers to bring its worlds and packs over.
 pub fn horizon_android_installed() -> bool {
+    if quest() {
+        return false;
+    }
     with_activity(|env, activity| {
         env.call_method(activity, "horizonAndroidInstalled", "()Z", &[])?
             .z()
@@ -279,6 +431,9 @@ pub fn horizon_android_installed() -> bool {
 /// The system's folder picker on Horizon Android's folder: the worlds and packs picked arrive in
 /// the import inbox (StarlingActivity, HorizonImport.java). False when it could not open.
 pub fn import_horizon_android() -> bool {
+    if quest() {
+        return false;
+    }
     with_activity(|env, activity| {
         env.call_method(activity, "importFromHorizonAndroid", "()Z", &[])?
             .z()
@@ -287,12 +442,21 @@ pub fn import_horizon_android() -> bool {
 }
 
 /// Android's setting that allows it, in a task of its own: home and the icon come back to the
-/// game.
-pub fn open_file_access_settings() {
+/// game. False when no settings page could be opened (the Quest's may have none).
+pub fn open_file_access_settings() -> bool {
+    if quest() {
+        return with_activity(open_all_files_settings).unwrap_or(false);
+    }
     with_activity(|env, activity| {
         env.call_method(activity, "openFileAccessSettings", "()V", &[])
             .map(drop)
-    });
+    })
+    .is_some()
+}
+
+/// Whether this is the Quest's plain NativeActivity (no StarlingActivity Java behind it).
+pub fn is_quest() -> bool {
+    quest()
 }
 
 /// The game drew its first frame: the activity lets its window show, and the system's
@@ -329,6 +493,10 @@ pub fn hide_keyboard() {
 
 /// Start the game again in a new process (the game folder is chosen at start).
 pub fn restart_app() {
+    if quest() {
+        with_activity(restart_quest);
+        return;
+    }
     with_activity(|env, activity| env.call_method(activity, "restart", "()V", &[]).map(drop));
 }
 
@@ -1389,6 +1557,7 @@ pub fn open_recovery() {
 /// `android_main`. The same two values `main` above sets for the phone.
 pub mod embed {
     use super::{APP, ARGS, AndroidApp};
+    use std::path::{Path, PathBuf};
     /// The game's command line from now on, in place of `horizon-args.txt`'s (once).
     pub fn set_args(args: Vec<String>) {
         let _ = ARGS.set(args);
@@ -1396,5 +1565,42 @@ pub mod embed {
     /// The activity the game's event loop runs in (once, from `android_main`).
     pub fn set_android_app(app: AndroidApp) {
         let _ = APP.set(app);
+        super::QUEST.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// The Quest's game folder: `Starling` in shared storage once the player allowed the app all
+    /// files (the same choice and the same move of their files as a phone's, `game_folder`),
+    /// else `private`, the app's own files. Notes for the log, which starts after. Called
+    /// before `set_android_app`, from `android_main`.
+    pub fn quest_game_folder(app: &AndroidApp, private: &Path) -> (PathBuf, Vec<String>) {
+        let shared = super::with_app(app, |env, activity| {
+            if !super::all_files_allowed(env)? {
+                return Ok(None);
+            }
+            let root = env
+                .call_static_method(
+                    "android/os/Environment",
+                    "getExternalStorageDirectory",
+                    "()Ljava/io/File;",
+                    &[],
+                )?
+                .l()?;
+            let path = env
+                .call_method(&root, "getPath", "()Ljava/lang/String;", &[])?
+                .l()?;
+            let root = String::from(env.get_string(&path.into())?);
+            let package = super::package_name(env, activity).unwrap_or_default();
+            Ok(Some(
+                PathBuf::from(root).join(crate::shared_folder::name(&package)),
+            ))
+        })
+        .flatten();
+        let mut notes = Vec::new();
+        let Some(shared) = shared else {
+            return (private.to_path_buf(), notes);
+        };
+        super::set_shared_folder(shared);
+        let home = super::game_folder(private, &mut notes);
+        (home, notes)
     }
 }

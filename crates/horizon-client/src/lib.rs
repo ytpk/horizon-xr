@@ -8,6 +8,7 @@ pub mod android;
 pub mod entry;
 pub mod game;
 pub mod mod_api;
+pub mod shared_folder;
 
 pub mod diagnostics;
 pub mod performance;

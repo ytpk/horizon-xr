@@ -28,6 +28,8 @@ pub(super) enum Stage {
     Waiting,
     /// Allowed: a restart moves the files.
     Restart,
+    /// A headset whose system opened no all-files setting: where the folder is instead.
+    Unavailable,
 }
 
 /// The card over the title.
@@ -80,12 +82,38 @@ pub(super) fn texts(stage: Stage) -> [&'static str; 4] {
             "Restart now",
             "Later",
         ],
+        // A phone's setting always opens: only the Quest reaches this (`quest_texts`).
+        Stage::Unavailable => ["", "", "OK", "OK"],
     }
 }
 
-fn card_texts(card: Card) -> [&'static str; 4] {
+/// The key of a Quest card's text in the horizon language file (`horizon.quest.files.*`).
+fn quest_key(stage: Stage, part: &str) -> String {
+    let stage = match stage {
+        Stage::Ask => "ask",
+        Stage::Waiting => "waiting",
+        Stage::Restart => "restart",
+        Stage::Unavailable => "unavailable",
+    };
+    format!("horizon.quest.files.{stage}.{part}")
+}
+
+/// The headset's card: the phone's, said for a headset and in the player's language.
+fn quest_texts(stage: Stage, folder: &str) -> [String; 4] {
+    let get = |part| {
+        if stage == Stage::Unavailable && part == "body" {
+            horizon_client::lang::tr(&quest_key(stage, part), &[&folder])
+        } else {
+            horizon_client::lang::get(&quest_key(stage, part))
+        }
+    };
+    ["title", "body", "primary", "other"].map(get)
+}
+
+fn card_texts(card: Card, quest: bool, folder: &str) -> [String; 4] {
     match card {
-        Card::Folder(stage) => texts(stage),
+        Card::Folder(stage) if quest => quest_texts(stage, folder),
+        Card::Folder(stage) => texts(stage).map(String::from),
         Card::Horizon(false) => [
             "Coming from Horizon Android?",
             "Horizon Android is part of Starling now: bring your worlds and resource packs over. \
@@ -93,14 +121,16 @@ fn card_texts(card: Card) -> [&'static str; 4] {
              Allow. They are copied: Horizon Android keeps its own.",
             "Bring them over",
             "Not now",
-        ],
+        ]
+        .map(String::from),
         Card::Horizon(true) => [
             "Coming from Horizon Android?",
             "Your worlds and resource packs are on their way: the note at the top says what each \
              one added. Tap Done when they are in.",
             "Done",
             "Pick the folder again",
-        ],
+        ]
+        .map(String::from),
     }
 }
 
@@ -170,7 +200,9 @@ impl Game<'_> {
         let Some(card) = self.files_offer_shown() else {
             return;
         };
-        let [title, body, primary, other] = card_texts(card);
+        let folder = horizon_client::logging::game_home().display().to_string();
+        let [title, body, primary, other] = card_texts(card, crate::android::is_quest(), &folder);
+        let (title, body) = (title.as_str(), body.as_str());
         let mut ui = Ui::new(&self.gui.atlas, batch, (-1.0, -1.0));
         let (w, h) = (ui.w, ui.h);
         ui.fill(0.0, 0.0, w, h, color::with_alpha(color::BG, 0.72));
@@ -207,8 +239,13 @@ impl Game<'_> {
         let primary_rect = [x + card_w - pad - bw, by, bw, button_h];
         let other_rect = [x + pad, by, bw, button_h];
         for (rect, text, fill, ink) in [
-            (primary_rect, primary, color::ACCENT, color::ON_ACCENT),
-            (other_rect, other, color::RAISED, color::TEXT),
+            (
+                primary_rect,
+                primary.as_str(),
+                color::ACCENT,
+                color::ON_ACCENT,
+            ),
+            (other_rect, other.as_str(), color::RAISED, color::TEXT),
         ] {
             ui.rounded(rect[0], rect[1], rect[2], rect[3], 10.0, fill);
             ui.text_centered(
@@ -273,8 +310,14 @@ impl Game<'_> {
         let offer = &mut self.files_offer;
         match (card, button) {
             (Card::Folder(Stage::Ask | Stage::Waiting), 0) => {
-                crate::android::open_file_access_settings();
-                offer.stage = Some(Stage::Waiting);
+                let opened = crate::android::open_file_access_settings();
+                // A phone's setting always opens; a headset's system may have none: the card then
+                // says where the folder is, not a button that does nothing.
+                offer.stage = Some(if !opened && crate::android::is_quest() {
+                    Stage::Unavailable
+                } else {
+                    Stage::Waiting
+                });
             }
             (Card::Folder(Stage::Restart), 0) => crate::android::restart_app(),
             (Card::Folder(stage), _) => {

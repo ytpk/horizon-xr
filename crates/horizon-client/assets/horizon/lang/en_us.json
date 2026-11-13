@@ -2059,5 +2059,21 @@
   "horizon.quest.room.graphics.foveated_multiview.on": "Experimental multiview + foveation: ON",
   "horizon.quest.room.graphics.foveated_multiview.off": "Experimental multiview + foveation: OFF",
   "horizon.vr.multiview": "Multiview",
-  "horizon.vr.multiview.tooltip": "Render both eyes in one world pass when compatible. Active foveation disables this unless Experimental Foveated Multiview succeeds."
+  "horizon.vr.multiview.tooltip": "Render both eyes in one world pass when compatible. Active foveation disables this unless Experimental Foveated Multiview succeeds.",
+  "horizon.quest.files.ask.title": "Keep your files where you can reach them",
+  "horizon.quest.files.ask.body": "Horizon can keep your worlds, packs, shaders, mods and screenshots in a Starling folder on the headset's storage, which a computer opens over USB and any file manager shows. Horizon OS will ask you to allow access to all files for that.",
+  "horizon.quest.files.ask.primary": "Set up",
+  "horizon.quest.files.ask.other": "Not now",
+  "horizon.quest.files.waiting.title": "Allow access to files",
+  "horizon.quest.files.waiting.body": "Turn on the switch for Horizon in the settings that opened, then come back here.",
+  "horizon.quest.files.waiting.primary": "Open it again",
+  "horizon.quest.files.waiting.other": "Not now",
+  "horizon.quest.files.restart.title": "All set",
+  "horizon.quest.files.restart.body": "Restart Horizon to move your worlds, packs and settings into the Starling folder. It copies them first: nothing is lost.",
+  "horizon.quest.files.restart.primary": "Restart now",
+  "horizon.quest.files.restart.other": "Later",
+  "horizon.quest.files.unavailable.title": "Your files are here",
+  "horizon.quest.files.unavailable.body": "This headset has no setting to allow access to all files. Your worlds, packs, shaders and mods are in %s. Open that folder from a computer over USB.",
+  "horizon.quest.files.unavailable.primary": "OK",
+  "horizon.quest.files.unavailable.other": "OK"
 }

@@ -15,7 +15,7 @@
 //! log is also in `home/logs/latest.log`.
 #![cfg(target_os = "android")]
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use winit::platform::android::activity::AndroidApp;
 
 mod logcat;
@@ -51,7 +51,26 @@ fn android_main(app: AndroidApp) {
         logcat::write(logcat::ERROR, "Horizon: the app has no files directory");
         return;
     };
-    let mut args = match prepare(&files, app.internal_data_path().as_deref()) {
+    // The game folder: `Starling` in shared storage once the player allowed all files (the files
+    // card of the title), else the app's own `home`.
+    let private_home = files.join("home");
+    if let Err(e) = std::fs::create_dir_all(&private_home) {
+        logcat::write(
+            logcat::ERROR,
+            &format!("Horizon: {}: {e}", private_home.display()),
+        );
+        return;
+    }
+    let (home, notes) = horizon_client::android::embed::quest_game_folder(&app, &private_home);
+    for note in &notes {
+        logcat::write(logcat::INFO, note);
+    }
+    let mut args = match prepare(
+        &files,
+        app.internal_data_path().as_deref(),
+        &private_home,
+        &home,
+    ) {
         Ok(args) => args,
         Err(e) => {
             logcat::write(logcat::ERROR, &format!("Horizon: {e}"));
@@ -145,33 +164,43 @@ fn use_activity_as_context(app: &AndroidApp) {
 
 /// Makes the game's folders and environment under `files` and returns its
 /// command line.
-fn prepare(files: &Path, internal: Option<&Path>) -> Result<Vec<String>, String> {
-    let home = files.join("home");
+/// `private`: the app's own `home`, which keeps the caches and the process's folders;
+/// `home`: the game folder, the same or the shared one (what the player made, options).
+fn prepare(
+    files: &Path,
+    internal: Option<&Path>,
+    private: &Path,
+    home: &Path,
+) -> Result<Vec<String>, String> {
     let resources = files.join("resources");
-    std::fs::create_dir_all(&home).map_err(|e| format!("{}: {e}", home.display()))?;
+    std::fs::create_dir_all(home).map_err(|e| format!("{}: {e}", home.display()))?;
     // The game keeps caches and servers.dat in its working directory.
-    std::env::set_current_dir(&home).map_err(|e| format!("{}: {e}", home.display()))?;
-    let tmp = internal.map_or_else(|| home.join("tmp"), |dir| dir.join("tmp"));
+    std::env::set_current_dir(home).map_err(|e| format!("{}: {e}", home.display()))?;
+    let tmp = internal.map_or_else(|| private.join("tmp"), |dir| dir.join("tmp"));
     let _ = std::fs::create_dir_all(&tmp);
     // Safety: before any other thread of ours starts (the logcat pump reads no
     // environment); nothing else in the process reads it concurrently.
     unsafe {
-        std::env::set_var("HOME", &home);
-        std::env::set_var("XDG_DATA_HOME", home.join(".local/share"));
-        std::env::set_var("XDG_CONFIG_HOME", home.join(".config"));
-        std::env::set_var("XDG_CACHE_HOME", home.join(".cache"));
+        std::env::set_var("HOME", private);
+        std::env::set_var("XDG_DATA_HOME", private.join(".local/share"));
+        std::env::set_var("XDG_CONFIG_HOME", private.join(".config"));
+        std::env::set_var("XDG_CACHE_HOME", private.join(".cache"));
         std::env::set_var("TMPDIR", &tmp);
+        // The caches stay in the app's files when the game folder is shared storage's.
+        if home != private {
+            std::env::set_var("HORIZON_PRIVATE", private);
+        }
     }
-    headset_defaults(&home);
+    headset_defaults(private, home);
     // The headset's own settings before the game starts: the eyes' resolution
     // is fixed when the headset opens, before the game's first frame.
     horizon_client::headset::set_settings(&std::sync::Arc::new(
-        horizon_client::headset::VrSettings::load(&home),
+        horizon_client::headset::VrSettings::load(home),
     ));
-    let text = |p: &PathBuf| p.to_string_lossy().into_owned();
+    let text = |p: &Path| p.to_string_lossy().into_owned();
     let mut args = vec![
         "--home".to_owned(),
-        text(&home),
+        text(home),
         "--resources".to_owned(),
         text(&resources),
         // No window surface: the frames go to the headset (gfx::headset).
@@ -207,9 +236,10 @@ const HEADSET_OPTIONS: &[(&str, &str)] = &[
 /// Marks `HEADSET_OPTIONS` as applied in the game's home.
 const HEADSET_DEFAULTS_MARK: &str = ".headset-defaults-1";
 
-/// Writes `HEADSET_OPTIONS` into `home/options.txt` once (made if missing).
-fn headset_defaults(home: &Path) {
-    let mark = home.join(HEADSET_DEFAULTS_MARK);
+/// Writes `HEADSET_OPTIONS` into `home/options.txt` once (made if missing); the mark stays in
+/// the app's own `private` home, so a game folder moved to shared storage is not set again.
+fn headset_defaults(private: &Path, home: &Path) {
+    let mark = private.join(HEADSET_DEFAULTS_MARK);
     if mark.exists() {
         return;
     }

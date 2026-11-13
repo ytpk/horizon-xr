@@ -1657,5 +1657,21 @@
   "horizon.quest.room.graphics.foveated_multiview.on": "Эксперимент: multiview + фовеация — ВКЛ",
   "horizon.quest.room.graphics.foveated_multiview.off": "Эксперимент: multiview + фовеация — ВЫКЛ",
   "horizon.vr.multiview": "Multiview",
-  "horizon.vr.multiview.tooltip": "Рисует оба глаза одним проходом при совместимости. Активная фовеация отключает этот режим, если экспериментальное сочетание не работает."
+  "horizon.vr.multiview.tooltip": "Рисует оба глаза одним проходом при совместимости. Активная фовеация отключает этот режим, если экспериментальное сочетание не работает.",
+  "horizon.quest.files.ask.title": "Храните файлы там, где до них легко добраться",
+  "horizon.quest.files.ask.body": "Horizon может хранить ваши миры, паки, шейдеры, моды и скриншоты в папке Starling на памяти шлема: её открывает компьютер по USB и любой файловый менеджер. Для этого Horizon OS попросит разрешить доступ ко всем файлам.",
+  "horizon.quest.files.ask.primary": "Настроить",
+  "horizon.quest.files.ask.other": "Не сейчас",
+  "horizon.quest.files.waiting.title": "Разрешите доступ к файлам",
+  "horizon.quest.files.waiting.body": "Включите переключатель для Horizon в открывшихся настройках и вернитесь сюда.",
+  "horizon.quest.files.waiting.primary": "Открыть снова",
+  "horizon.quest.files.waiting.other": "Не сейчас",
+  "horizon.quest.files.restart.title": "Готово",
+  "horizon.quest.files.restart.body": "Перезапустите Horizon, чтобы перенести миры, паки и настройки в папку Starling. Сначала всё копируется: ничего не потеряется.",
+  "horizon.quest.files.restart.primary": "Перезапустить",
+  "horizon.quest.files.restart.other": "Позже",
+  "horizon.quest.files.unavailable.title": "Ваши файлы здесь",
+  "horizon.quest.files.unavailable.body": "В этом шлеме нет настройки доступа ко всем файлам. Ваши миры, паки, шейдеры и моды лежат в %s. Откройте эту папку с компьютера по USB.",
+  "horizon.quest.files.unavailable.primary": "OK",
+  "horizon.quest.files.unavailable.other": "OK"
 }
