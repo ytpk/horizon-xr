@@ -14,6 +14,10 @@ horizon-assets = { path = "../horizon-assets" }
 horizon-bench = { path = "../horizon-bench" }
 horizon-client-core = { path = "../horizon-client-core" }
 horizon-client-input = { path = "../horizon-client-input" }
+# The VR options (`vr_options`): Vivecraft's settings table and page structure.
+horizon-vivecraft = { path = "../horizon-vivecraft" }
+# The Visor presets (`horizon_visor::presets`).
+horizon-visor = { path = "../horizon-visor" }
 horizon-command = { path = "../horizon-command" }
 horizon-core = { path = "../horizon-core" }
 horizon-hdr = { path = "../horizon-hdr" }

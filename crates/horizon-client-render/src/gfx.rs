@@ -203,6 +203,8 @@ mod hdr_stats;
 mod terrain_source;
 pub use hdr::Calibration as HdrCalibration;
 pub mod block_light;
+/// A VR headset drawn for instead of a window (`horizon-xr`).
+pub mod headset;
 mod late_sky;
 pub mod lightning;
 mod lod;

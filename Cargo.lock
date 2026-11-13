@@ -1532,6 +1532,8 @@ dependencies = [
  "horizon-telemetry",
  "horizon-theme",
  "horizon-threads",
+ "horizon-visor",
+ "horizon-vivecraft",
  "horizon-world",
  "junction",
  "log",

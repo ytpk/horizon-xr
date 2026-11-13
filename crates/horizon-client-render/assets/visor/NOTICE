@@ -1,0 +1,5 @@
+These textures are Visor's own, copied unchanged from the Visor mod
+(src/visor-core/src/main/resources/assets/visor/...): the hotbar wheel
+(textures/gui/overlays/hotbar/*), movement_state.png, warning.png and icon_headset.png.
+Visor is MPL-2.0, copyright (C) Phoenix-Ra and Visor contributors; used here with the
+authors' permission. See crates/horizon-visor/LICENSE-MPL-2.0 and THIRD_PARTY_NOTICES.md.

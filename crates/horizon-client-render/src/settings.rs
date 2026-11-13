@@ -138,6 +138,9 @@ impl CustomButton {
 pub struct Settings {
     pub touch: crate::android_controls::Settings,
     pub keypad: crate::keypad::Settings,
+    /// A VR headset's settings: Vivecraft's table (`vivecraft-client-config.json`). Shared with
+    /// the headset's side; an edit clones it (`Arc::make_mut`).
+    pub vr: std::sync::Arc<horizon_client_input::headset::VrSettings>,
     /// Degrees, 30..=110 (options.txt stores (fov - 70) / 40).
     pub fov: f32,
     /// Chunks, 2..=32.
@@ -260,6 +263,7 @@ impl Default for Settings {
         Self {
             touch: crate::android_controls::Settings::load(),
             keypad: Default::default(),
+            vr: std::sync::Arc::new(horizon_client_input::headset::VrSettings::horizon()),
             fov: 70.0,
             render_distance: 12,
             simulation_distance: 12,
@@ -401,10 +405,16 @@ impl Settings {
             .map(|dir| crate::mod_list::ModList::load(&crate::logging::shared_dir(dir)))
             .unwrap_or_default();
         let keypad = crate::keypad::Settings::load(&path.with_file_name("horizon-keypad.json"));
+        let vr = std::sync::Arc::new(
+            path.parent()
+                .map(horizon_client_input::headset::VrSettings::load)
+                .unwrap_or_else(horizon_client_input::headset::VrSettings::horizon),
+        );
         let settings = match fs::read(path) {
             Ok(bytes) => Self {
                 horizon,
                 controller,
+                vr,
                 keypad,
                 extras,
                 mods,
@@ -413,6 +423,7 @@ impl Settings {
             Err(_) => Self {
                 horizon,
                 controller,
+                vr,
                 keypad,
                 extras,
                 mods,
@@ -479,6 +490,7 @@ impl Settings {
         Self {
             touch: crate::android_controls::Settings::load(),
             keypad: Default::default(),
+            vr: std::sync::Arc::new(horizon_client_input::headset::VrSettings::horizon()),
             fov: f.int("fov") as f32,
             render_distance: f.int("renderDistance"),
             simulation_distance: f.int("simulationDistance"),
@@ -699,6 +711,7 @@ impl Settings {
             horizon: self.horizon.clone(),
             controller: self.controller.clone(),
             keypad: self.keypad.clone(),
+            vr: self.vr.clone(),
             extras: self.extras.clone(),
             mods: self.mods.clone(),
             video_modes: self.video_modes.clone(),
@@ -715,6 +728,7 @@ impl Settings {
         if let Some(dir) = path.parent() {
             self.horizon.save(dir);
             self.controller.save(dir);
+            self.vr.save(dir);
             let _ = self.keypad.save(&dir.join("horizon-keypad.json"));
             self.extras.save(dir);
             self.mods.save(&crate::logging::shared_dir(dir));
