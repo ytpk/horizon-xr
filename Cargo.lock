@@ -1823,6 +1823,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "horizon-visor"
+version = "0.1.0"
+dependencies = [
+ "glam",
+ "horizon-vivecraft",
+ "log",
+]
+
+[[package]]
+name = "horizon-vivecraft"
+version = "0.1.0"
+dependencies = [
+ "glam",
+ "log",
+]
+
+[[package]]
 name = "horizon-world"
 version = "0.1.0"
 dependencies = [
