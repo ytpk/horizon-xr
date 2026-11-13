@@ -188,7 +188,7 @@ fn the_late_sky_draws_the_usual_pixels() {
         cache: None,
     };
     let usual_celestial = device.create_render_pipeline(&celestial);
-    let stars = Stars::new(&device, FORMAT);
+    let stars = Stars::new(&device, FORMAT, &kept);
     let late = LateSky::new(
         &TerrainModule {
             kept: &kept,
@@ -407,7 +407,7 @@ fn the_late_sky_draws_the_usual_pixels() {
                 mapped_at_creation: false,
             });
             let mut encoder = device.create_command_encoder(&Default::default());
-            stars.prepare(&mut uploads, &mut encoder, view_proj, 1.0);
+            stars.prepare(&mut uploads, &mut encoder, [view_proj; 2], 1.0);
             uploads.finish(&encoder);
             {
                 let view = target.create_view(&Default::default());

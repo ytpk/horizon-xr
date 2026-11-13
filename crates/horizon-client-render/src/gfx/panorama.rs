@@ -24,6 +24,9 @@ pub struct Faces {
     colour: [u8; 4],
     /// The texels decoded while loading, which the first cube takes.
     decoded: Mutex<Option<Vec<u8>>>,
+    /// The floor of a headset's menu room, `block/moss_block` (Visor's `main_menu.floor`), as
+    /// width, height and RGBA texels; none when no layer has it.
+    pub floor: Option<(u32, u32, Vec<u8>)>,
 }
 
 impl Faces {
@@ -34,13 +37,15 @@ impl Faces {
     /// falls back to the grey placeholder that an installation without the
     /// imported panorama shows.
     pub fn load(root: &Path, defaults: &Path) -> Self {
-        Self::try_load(root, defaults).unwrap_or_else(|error| {
+        let mut faces = Self::try_load(root, defaults).unwrap_or_else(|error| {
             log::warn!(
                 "Horizon: no title panorama ({error}); prepare the game again in the launcher \
                  (or run horizon-prepare panorama)"
             );
             Self::colour([96, 110, 111, 255])
-        })
+        });
+        faces.floor = load_floor(root, defaults);
+        faces
     }
 
     /// A one-texel cube of one colour.
@@ -50,6 +55,7 @@ impl Faces {
             files: Vec::new(),
             colour,
             decoded: Mutex::new(None),
+            floor: None,
         }
     }
 
@@ -79,6 +85,7 @@ impl Faces {
             files,
             colour: [0; 4],
             decoded: Mutex::new(Some(texels)),
+            floor: None,
         })
     }
 
@@ -96,6 +103,17 @@ impl Faces {
             .or_else(|| decode_faces(&self.files).ok().map(|(_, texels)| texels))
             .unwrap_or_else(|| vec![0; (self.size * self.size * 4 * 6) as usize])
     }
+}
+
+/// `assets/minecraft/textures/block/moss_block.png` from the first layer that has it: the floor
+/// of the headset's menu room (`VRMenuFloor`).
+fn load_floor(root: &Path, defaults: &Path) -> Option<(u32, u32, Vec<u8>)> {
+    [root, defaults].into_iter().find_map(|layer| {
+        let file =
+            std::fs::read(layer.join("assets/minecraft/textures/block/moss_block.png")).ok()?;
+        let (w, h, data) = decode_bytes(&file).ok()?;
+        Some((w, h, data))
+    })
 }
 
 /// The faces' files decoded, side by side, into one array of six layers of
@@ -360,6 +378,11 @@ impl Panorama {
         }
     }
 
+    /// The menu room's floor texture, if the resources have one.
+    pub(super) fn floor(&self) -> Option<&(u32, u32, Vec<u8>)> {
+        self.faces.floor.as_ref()
+    }
+
     /// Ready a title screen frame: the cube, made if it is not on the GPU.
     pub(super) fn prepare(
         &mut self,
@@ -462,6 +485,7 @@ impl Rotation {
 #[cfg(test)]
 mod tests {
     use super::*;
+
     use std::{
         fs,
         sync::atomic::{AtomicU32, Ordering},

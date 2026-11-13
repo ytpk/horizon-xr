@@ -1854,6 +1854,8 @@ impl HudAtlas {
             edition.3 = pixels;
         }
         images.push(("horizon/white".into(), 4, 4, vec![255; 64]));
+        // Visor's own textures (the hotbar wheel, the movement icons, the warning, the headset).
+        images.extend(crate::visor_art::images());
         if full {
             Self::slots(&mut images, crate::trims::slot_size(root), mod_image);
             // MissingTextureAtlasSprite.generateMissingImage: 16x16, magenta
@@ -2413,6 +2415,27 @@ impl HudBatch {
             }
         }
         self.blends.retain(|(range, _)| !range.is_empty());
+    }
+    /// `GuiTexture(resource, u, v, w, h, tw, th).blit(x, y, dw, dh)`: the `[u, v, w, h]` texels of a
+    /// `tw x th` texture, stretched over `[x, y, dw, dh]`.
+    pub fn sprite_sub(
+        &mut self,
+        atlas: &HudAtlas,
+        name: &str,
+        [u, v, w, h]: [f32; 4],
+        [tw, th]: [f32; 2],
+        [x, y, dw, dh]: [f32; 4],
+        color: u32,
+    ) {
+        if let Some(mut r) = atlas.sprites.get(name).copied() {
+            let (du, dv) = (r.u1 - r.u0, r.v1 - r.v0);
+            let (u0, v0) = (r.u0, r.v0);
+            r.u0 = u0 + du * u / tw;
+            r.u1 = u0 + du * (u + w) / tw;
+            r.v0 = v0 + dv * v / th;
+            r.v1 = v0 + dv * (v + h) / th;
+            self.rect_uv(x, y, dw, dh, r, color);
+        }
     }
     /// `blit` of the top-left `w x h` texels of a `tw x th` texture.
     pub fn sprite_region(

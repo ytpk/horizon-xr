@@ -2164,6 +2164,7 @@ impl PackResources {
             return old.clone();
         }
         Arc::new(WorkerContext {
+            opaque_water: old.opaque_water,
             assets: old.assets.clone(),
             render: old.render.clone(),
             tables: old.tables.clone(),
@@ -2191,6 +2192,7 @@ impl PackResources {
                     .collect(),
             ),
             context: Arc::new(WorkerContext {
+                opaque_water: false,
                 assets: assets.clone(),
                 render: render.clone(),
                 tables,

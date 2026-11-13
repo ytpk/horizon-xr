@@ -6,7 +6,9 @@
 mod fluid;
 mod leaf_culling;
 mod lighting;
+mod merge;
 mod sides;
+mod vegetation;
 use crate::connected::{Pick, TileLayer};
 use crate::{
     assets::{Assets, RenderAssets},
@@ -26,8 +28,13 @@ use horizon_world::{
     fluid::{FluidKind, FluidState},
     registry::BlockStateId,
 };
+pub use merge::{
+    MERGED_STEP, Stats as MergeStats, aggressive_merging, merge_faces, merging, shrink_plants,
+    shrinking_plants, stats as merge_stats,
+};
 pub use sides::{Part, Sides, group_parts};
 use std::sync::Arc;
+pub use vegetation::plant_density;
 
 /// An entity, item and effect vertex (the entity pipelines), with a face
 /// normal for `entity.wgsl`'s directional light.
@@ -336,6 +343,12 @@ impl SectionMesh {
             + self.block_entities.capacity() * std::mem::size_of::<([i32; 3], u32)>()
             + self.lights.capacity() * std::mem::size_of::<([i32; 3], u32)>()
             + self.sprite_layers.capacity() * std::mem::size_of::<u16>()
+    }
+    /// Merges the solid quads that are equal block faces side by side (`merge`), before
+    /// `sort_solid`.
+    pub fn merge_solid(&mut self) {
+        let mut tints = Vec::new();
+        merge::merge(&mut self.solid, &mut tints, &self.translucent);
     }
     /// Sorts the solid quads by the side they face, for the renderer to
     /// leave out those facing away from the eye (`sides`).
@@ -1365,6 +1378,8 @@ pub struct Mesher<'a> {
     pub smooth_lighting: bool,
     /// The `cutoutLeaves` option (fancy graphics); off makes leaves opaque.
     pub cutout_leaves: bool,
+    /// Optional depth-writing water; workers capture this at job execution.
+    pub opaque_water: bool,
     /// Sprite layers a shader pack moves into the translucent pass, by layer.
     pub translucent_layers: &'a [bool],
     /// What the worker does with leaf faces inside a canopy.
@@ -1386,8 +1401,19 @@ impl Mesher<'_> {
         &mut self,
         region: &[[Option<&Chunk>; 3]; 3],
         sy: i32,
+        out: SectionMesh,
+        scratch: &mut MeshScratch,
+    ) -> SectionMesh {
+        self.mesh_density(region, sy, out, scratch, vegetation::density())
+    }
+
+    fn mesh_density(
+        &mut self,
+        region: &[[Option<&Chunk>; 3]; 3],
+        sy: i32,
         mut out: SectionMesh,
         scratch: &mut MeshScratch,
+        plant_density: u32,
     ) -> SectionMesh {
         out.clear();
         let center = region[1][1].expect("centre chunk");
@@ -1443,6 +1469,7 @@ impl Mesher<'_> {
                             self.nether_shading,
                             self.shader_pack_lighting,
                             self.separate_ao,
+                            self.opaque_water && self.translucent_layers.is_empty(),
                         );
                         fluid::tesselate(self.tables, shade, pad, water, &mut out, [x, y, z]);
                     }
@@ -1461,6 +1488,18 @@ impl Mesher<'_> {
                     let Some(first) = models.first() else {
                         continue;
                     };
+                    // Only complete crossed cutout models are thinned. Keep mixed models,
+                    // fluids, light sources and block entities, and shader-pack source meshes.
+                    if state.emission == 0
+                        && !state.block_entity
+                        && state.fluid.kind() == FluidKind::Empty
+                        && !vegetation::keep(world.x, world.z, plant_density)
+                        && models.iter().all(|m| {
+                            !m.faces.is_empty() && m.faces.iter().all(BakedFace::crossed_cutout)
+                        })
+                    {
+                        continue;
+                    }
                     let ao = self.smooth_lighting && state.emission == 0 && first.ambient_occlusion;
                     let origin = match offset(state, world.x, world.z) {
                         Some(o) => [
@@ -1663,6 +1702,18 @@ impl Mesher<'_> {
                 &mut push,
             )
         };
+        // A plant's crossed quad over the part of its sprite that draws (`shrink_plants`),
+        // where nothing varies over the quad (a cross has no ambient occlusion) and no
+        // connected texture cuts or covers it.
+        let shrunk = face.shrunk.as_deref().filter(|_| {
+            merge::shrinking_plants()
+                && matches!(pick, Pick::Keep)
+                && count == 0
+                && gray == [gray[0]; 4]
+                && coords == [coords[0]; 4]
+                && ao_factor == [ao_factor[0]; 4]
+        });
+        let positions = shrunk.map_or(&q.positions, |s| &s.positions);
         let vertices = |tint: Option<u32>, uv: [[f32; 2]; 4]| {
             std::array::from_fn::<_, 4, _>(|i| {
                 let g = gray[i] as u32;
@@ -1670,7 +1721,7 @@ impl Mesher<'_> {
                     Some(t) => [16, 8, 0].map(|shift| g * (t >> shift & 255) / 255),
                     None => [g; 3],
                 };
-                let p = q.positions[i];
+                let p = positions[i];
                 let color = if self.separate_ao {
                     let ao_byte = (ao_factor[i] * 255.0).round().clamp(0.0, 255.0) as u32;
                     ao_byte << 24 | (pack_rgb(rgb) & 0x00FF_FFFF)
@@ -1698,7 +1749,7 @@ impl Mesher<'_> {
             if state.pane && tiled {
                 standard()
             } else {
-                q.uv
+                shrunk.map_or(q.uv, |s| s.uv)
             },
         );
         // Opaque leaves (forceOpaque) and leaves a leaf-culling mode proved internal draw in the

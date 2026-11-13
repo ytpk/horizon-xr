@@ -138,9 +138,6 @@ impl CustomButton {
 pub struct Settings {
     pub touch: crate::android_controls::Settings,
     pub keypad: crate::keypad::Settings,
-    /// A VR headset's settings: Vivecraft's table (`vivecraft-client-config.json`). Shared with
-    /// the headset's side; an edit clones it (`Arc::make_mut`).
-    pub vr: std::sync::Arc<horizon_client_input::headset::VrSettings>,
     /// Degrees, 30..=110 (options.txt stores (fov - 70) / 40).
     pub fov: f32,
     /// Chunks, 2..=32.
@@ -246,6 +243,9 @@ pub struct Settings {
     pub video_modes: Vec<crate::window::VideoMode>,
     /// Controller settings (`horizon-controller.txt`, Horizon's own).
     pub controller: crate::gamepad::PadSettings,
+    /// A VR headset's settings: Vivecraft's table (`vivecraft-client-config.json`). Shared with
+    /// the headset's side; an edit clones it (`Arc::make_mut`).
+    pub vr: std::sync::Arc<horizon_client_input::headset::VrSettings>,
     /// Horizon's optional extras (`horizon-extras.txt`), all off by default.
     pub extras: crate::extras::Extras,
     /// The Horizon mods turned on (`horizon-mods.txt`), all off by default.
@@ -263,7 +263,6 @@ impl Default for Settings {
         Self {
             touch: crate::android_controls::Settings::load(),
             keypad: Default::default(),
-            vr: std::sync::Arc::new(horizon_client_input::headset::VrSettings::horizon()),
             fov: 70.0,
             render_distance: 12,
             simulation_distance: 12,
@@ -341,6 +340,7 @@ impl Default for Settings {
             startup_api: Default::default(),
             video_modes: Vec::new(),
             controller: Default::default(),
+            vr: std::sync::Arc::new(horizon_client_input::headset::VrSettings::horizon()),
             extras: Default::default(),
             mods: Default::default(),
             shader_packs: Vec::new(),
@@ -490,7 +490,6 @@ impl Settings {
         Self {
             touch: crate::android_controls::Settings::load(),
             keypad: Default::default(),
-            vr: std::sync::Arc::new(horizon_client_input::headset::VrSettings::horizon()),
             fov: f.int("fov") as f32,
             render_distance: f.int("renderDistance"),
             simulation_distance: f.int("simulationDistance"),
@@ -542,6 +541,7 @@ impl Settings {
             startup_api: Default::default(),
             video_modes: Vec::new(),
             controller: Default::default(),
+            vr: std::sync::Arc::new(horizon_client_input::headset::VrSettings::horizon()),
             extras: Default::default(),
             mods: Default::default(),
             shader_packs: Vec::new(),
@@ -922,6 +922,8 @@ pub enum Opt {
     PadGlyphs,
     PadMenuNav,
     PadKeyboard,
+    /// A headset's VR settings (`Settings::vr`, `vr_options`).
+    Vr(crate::vr_options::VrOpt),
     /// `options.modelPart.*`: one skin layer (index into `options_file::MODEL_PARTS`).
     ModelPart(usize),
     MainHand,

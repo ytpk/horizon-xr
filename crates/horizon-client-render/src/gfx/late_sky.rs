@@ -18,6 +18,17 @@ pub(super) struct LateSky {
 }
 
 impl LateSky {
+    /// Every pipeline, for the headset's multiview swap (`Renderer::swap_stereo_pipelines`).
+    pub fn pipelines_mut(&mut self) -> [&mut wgpu::RenderPipeline; 5] {
+        [
+            &mut self.sky,
+            &mut self.sunrise,
+            &mut self.celestial,
+            &mut self.stars,
+            &mut self.dark_disc,
+        ]
+    }
+
     /// `celestial`: the usual pipeline's descriptor. None where the device refuses one of them:
     /// the sky keeps its usual order.
     pub fn new(

@@ -189,11 +189,12 @@ impl FluidFlowWorld for FlowView<'_> {
     }
 }
 /// Emits one fluid cell at section-relative `[x, y, z]`.
-/// `(nether, shader_pack_lighting, separate_ao)`: the Nether's face shading, none when a shader pack
-/// lights the faces (`Mesher::shader_pack_lighting`), and whether to keep pure alpha for separate AO.
+/// `(nether, shader_pack_lighting, separate_ao, opaque_water)`: the Nether's face shading, none when a
+/// shader pack lights the faces (`Mesher::shader_pack_lighting`), whether to keep pure alpha for
+/// separate AO, and whether water goes to the depth-writing solid pass without alpha cutout.
 pub(super) fn tesselate(
     tables: &MeshTables,
-    (nether, shader_pack_lighting, separate_ao): (bool, bool, bool),
+    (nether, shader_pack_lighting, separate_ao, opaque_water): (bool, bool, bool, bool),
     pad: &Padded,
     water_color: u32,
     out: &mut SectionMesh,
@@ -319,7 +320,7 @@ pub(super) fn tesselate(
     } else {
         (tables.lava_still, tables.lava_flow, None)
     };
-    let target = if water {
+    let target = if water && !opaque_water {
         &mut out.translucent
     } else {
         &mut out.solid
@@ -338,6 +339,11 @@ pub(super) fn tesselate(
             color
         } else {
             fluid_face(color, face)
+        };
+        let layer = if water && opaque_water {
+            layer | super::OPAQUE_LAYER
+        } else {
+            layer
         };
         let vertex = |(pos, uv)| TerrainVertex::new(pos, uv, layer, color, light);
         target.extend(v.map(vertex));

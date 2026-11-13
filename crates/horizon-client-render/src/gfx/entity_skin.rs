@@ -239,7 +239,7 @@ impl EntitySkin {
             module: &module,
             entry_point: Some("skin"),
             compilation_options: Default::default(),
-            cache: None,
+            cache: crate::gfx::pipeline_cache::get(device),
         });
         let layout = pipeline.get_bind_group_layout(0);
         let internal = pollster::block_on(internal.pop());

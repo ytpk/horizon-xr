@@ -179,6 +179,25 @@ pub fn fill(x0: i32, y0: i32, x1: i32, y1: i32, color: u32) -> GuiDraw {
         color,
     }
 }
+/// A white frame round hotbar `slot` (0..8, or 9 for the off hand's, left
+/// of the bar when `right_handed`) of a `w` by `h` HUD: where a headset's
+/// hand points on it.
+pub fn slot_mark(w: i32, h: i32, slot: usize, right_handed: bool) -> Vec<GuiDraw> {
+    let center = w / 2;
+    let (x, y) = match slot {
+        9 if right_handed => (center - 91 - 26, h - 19),
+        9 => (center + 91 + 10, h - 19),
+        _ => (center - 91 + 3 + slot as i32 * 20, h - 19),
+    };
+    let (x0, y0, x1, y1) = (x - 2, y - 2, x + 18, y + 18);
+    let color = 0xE0FF_FFFF;
+    vec![
+        fill(x0, y0, x1, y0 + 1, color),
+        fill(x0, y1 - 1, x1, y1, color),
+        fill(x0, y0 + 1, x0 + 1, y1 - 1, color),
+        fill(x1 - 1, y0 + 1, x1, y1 - 1, color),
+    ]
+}
 /// `graphics.text`: dropped when fully transparent.
 fn text(out: &mut Vec<GuiDraw>, text: Text, x: i32, y: i32, color: u32, shadow: bool) {
     if color >> 24 != 0 {

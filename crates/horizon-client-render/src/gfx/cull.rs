@@ -69,6 +69,18 @@ struct Params {
     stamp: u32,
     big: f32,
     pad: [u32; 2],
+    /// Each eye's view projection, which a stereo pass's boxes take (`recall`).
+    eyes: [[[f32; 4]; 4]; 2],
+}
+
+/// Recall: a result older than this many frames no longer hides its section. A section
+/// left out is tested every frame, and a result is back within `READBACKS` frames or so.
+const FRESH: u32 = 5;
+/// Whether a result of frame `tested` that did not see its section still hides it in frame
+/// `now` (recall): only a recent one does. A section that left the view and comes back is
+/// drawn until a new test says otherwise, and so is one never tested (`tested` 0).
+pub(super) fn still_hidden(seen: bool, tested: u32, now: u32) -> bool {
+    !seen && tested != 0 && now.wrapping_sub(tested) <= FRESH
 }
 
 /// One frame's results on their way back.
@@ -122,6 +134,18 @@ pub struct Cull {
     pipeline: wgpu::RenderPipeline,
     layout: wgpu::BindGroupLayout,
     group: Option<Group>,
+    /// The boxes in a stereo (multiview) pass, each layer through its eye (`recall`).
+    stereo_pipeline: Option<wgpu::RenderPipeline>,
+    eyes: Option<[glam::Mat4; 2]>,
+    /// Culling from results read back alone, in one pass (a headset's stereo pass, where
+    /// there is no indirect multi-draw for phase 2): the sections the last result did not
+    /// see are left out and tested every frame, the others drawn and tested in turn. A
+    /// section that comes into sight is drawn when its result is back, a few frames late.
+    /// Not on a Quest yet: its Adreno draws nothing at all through a fragment shader that
+    /// writes a storage buffer, so no box is ever seen there (`multiview::occlusion_recall`).
+    pub recall: bool,
+    /// Per resident slot: the frame of the last result read back for it (0: none).
+    tested: Vec<u32>,
     depth_test: DepthTest,
     depth_layout: Option<wgpu::BindGroupLayout>,
     depth_group: Option<DepthGroup>,
@@ -208,8 +232,26 @@ impl Cull {
             ))
         .then_some(depth_test)
     }
-    /// `color` is the world pass's colour format.
-    pub fn new(device: &wgpu::Device, color: wgpu::TextureFormat, depth_test: DepthTest) -> Self {
+    /// Whether the device can cull from results read back (`recall`): the boxes' fragments
+    /// write their results after a forced early depth test. No indirect draw is needed.
+    pub fn recall_supported(adapter: &wgpu::Adapter, device: &wgpu::Device) -> bool {
+        adapter.get_info().backend == wgpu::Backend::Vulkan
+            && device
+                .features()
+                .contains(wgpu::Features::SHADER_EARLY_DEPTH_TEST | wgpu::Features::MULTIVIEW)
+            && adapter.get_downlevel_capabilities().flags.contains(
+                wgpu::DownlevelFlags::VERTEX_STORAGE
+                    | wgpu::DownlevelFlags::FRAGMENT_WRITABLE_STORAGE,
+            )
+    }
+    /// `color` is the world pass's colour format; `recall`: it culls a stereo pass from
+    /// read back results.
+    pub fn new(
+        device: &wgpu::Device,
+        color: wgpu::TextureFormat,
+        depth_test: DepthTest,
+        recall: bool,
+    ) -> Self {
         let entry = |binding, visibility, ty| wgpu::BindGroupLayoutEntry {
             binding,
             visibility,
@@ -308,9 +350,49 @@ impl Cull {
                 targets,
             }),
             multiview_mask: None,
-            cache: None,
+            cache: crate::gfx::pipeline_cache::get(device),
+        });
+        let stereo_pipeline = recall.then(|| {
+            let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("Section culling (stereo)"),
+                source: wgpu::ShaderSource::Wgsl(stereo_source().into()),
+            });
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("Section culling (stereo)"),
+                layout: Some(&pipeline_layout),
+                vertex: wgpu::VertexState {
+                    module: &module,
+                    entry_point: Some("vs_box"),
+                    compilation_options: Default::default(),
+                    buffers: &[],
+                },
+                primitive: wgpu::PrimitiveState {
+                    cull_mode: Some(wgpu::Face::Back),
+                    ..Default::default()
+                },
+                depth_stencil: Some(wgpu::DepthStencilState {
+                    format: wgpu::TextureFormat::Depth32Float,
+                    depth_write_enabled: Some(false),
+                    depth_compare: Some(wgpu::CompareFunction::GreaterEqual),
+                    stencil: Default::default(),
+                    bias: Default::default(),
+                }),
+                multisample: Default::default(),
+                fragment: Some(wgpu::FragmentState {
+                    module: &module,
+                    entry_point: Some("fs_box_early"),
+                    compilation_options: Default::default(),
+                    targets: &color_target,
+                }),
+                multiview_mask: super::multiview::MASK,
+                cache: crate::gfx::pipeline_cache::get(device),
+            })
         });
         Self {
+            stereo_pipeline,
+            eyes: None,
+            recall,
+            tested: Vec::new(),
             pipeline,
             layout,
             group: None,
@@ -377,6 +459,13 @@ impl Cull {
                 }
                 let share = indices as f32 / r.total.max(1) as f32;
                 self.hidden = ([hidden, results.len()], share);
+                for &slot in r.slots.iter().filter(|_| self.recall) {
+                    let slot = slot as usize;
+                    if slot >= self.tested.len() {
+                        self.tested.resize(slot + 1, 0);
+                    }
+                    self.tested[slot] = r.stamp;
+                }
                 for (&slot, &result) in r.slots.iter().zip(&results) {
                     let slot = slot as usize;
                     if slot >= self.seen.len() {
@@ -402,11 +491,47 @@ impl Cull {
         self.seen.get(slot as usize).copied().unwrap_or(false)
     }
 
+    /// Recall: whether the frame leaves out the section in resident `slot`, which a recent
+    /// result did not see.
+    pub fn left_out(&self, slot: u32) -> bool {
+        let slot = slot as usize;
+        still_hidden(
+            self.seen.get(slot).copied().unwrap_or(true),
+            self.tested.get(slot).copied().unwrap_or(0),
+            self.stamp,
+        )
+    }
+
+    /// Recall: a section the frame leaves out (`left_out`), of about `indices` solid
+    /// indices: tested every frame, so it is drawn again soon after it comes into sight.
+    pub fn hidden_test(&mut self, index: usize, slot: u32, indices: u32) {
+        self.total += u64::from(indices);
+        self.push([index as u32, 0, 0, 0], slot, indices);
+    }
+
+    /// Recall: a section the frame draws: tested in turn, and at once while no recent
+    /// result tells whether it is in sight.
+    pub fn recall_drawn(&mut self, index: usize, slot: u32, indices: u32) {
+        self.total += u64::from(indices);
+        let known = self
+            .tested
+            .get(slot as usize)
+            .is_some_and(|&t| t != 0 && self.stamp.wrapping_sub(t) <= RETEST + FRESH);
+        if indices > 0 && (self.probe || !known || slot.wrapping_add(self.stamp) % RETEST == 0) {
+            self.push([index as u32, 0, 0, 0], slot, indices);
+        }
+    }
+
+    /// The eyes' view projections for a stereo pass's boxes (`recall`), or none.
+    pub fn set_eyes(&mut self, eyes: Option<[glam::Mat4; 2]>) {
+        self.eyes = eyes;
+    }
+
     /// A section phase 1 draws, `index` in the visible list, with `indices`
     /// solid indices: tested in turn.
     pub fn drawn(&mut self, index: usize, slot: u32, indices: u32) {
         self.total += u64::from(indices);
-        if indices > 0 && (self.probe || slot.wrapping_add(self.stamp).is_multiple_of(RETEST)) {
+        if indices > 0 && (self.probe || slot.wrapping_add(self.stamp) % RETEST == 0) {
             self.push([index as u32, 0, 0, 0], slot, indices);
         }
     }
@@ -480,6 +605,10 @@ impl Cull {
             stamp: self.stamp,
             big: BIG,
             pad: [0; 2],
+            eyes: self
+                .eyes
+                .unwrap_or([glam::Mat4::IDENTITY; 2])
+                .map(|eye| eye.to_cols_array_2d()),
         };
         uploads.buffer(encoder, &self.params, 0, bytemuck::bytes_of(&params));
         if !self
@@ -500,9 +629,17 @@ impl Cull {
         if self.depth_test != DepthTest::Early || self.test_data.is_empty() {
             return;
         }
+        let boxes = self.test_data.len() as u32;
+        // A stereo pass's boxes go through each eye's own view, in one draw without instances.
+        if let (Some(stereo), Some(_)) = (&self.stereo_pipeline, self.eyes) {
+            pass.set_pipeline(stereo);
+            pass.set_bind_group(0, group, &[]);
+            pass.draw(0..36 * boxes, 0..1);
+            return;
+        }
         pass.set_pipeline(&self.pipeline);
         pass.set_bind_group(0, group, &[]);
-        pass.draw(0..36, 0..self.test_data.len() as u32);
+        pass.draw(0..36, 0..boxes);
     }
 
     /// Before the world pass (`InShader`): the binding of the depth the
@@ -652,6 +789,34 @@ fn source(depth_test: DepthTest) -> String {
         DepthTest::Early => format!("{common}{EARLY_TEST}"),
         DepthTest::InShader => common.to_owned(),
     }
+}
+
+/// The early test's shader for a stereo (multiview) pass: each layer's boxes through its
+/// eye's view projection, from the parameters (a headset on Vulkan alone draws it).
+fn stereo_source() -> String {
+    let source = source(DepthTest::Early);
+    let replaced = |source: String, from: &str, to: &str| {
+        assert!(source.contains(from), "cull.wgsl lost `{from}`");
+        source.replace(from, to)
+    };
+    let source = replaced(
+        source,
+        "    big: f32,\n}",
+        "    big: f32,\n    eyes: array<mat4x4<f32>, 2>,\n}",
+    );
+    // No instances: one draw of every box's 36 vertices. Adreno's multiview draws gave the
+    // boxes nothing to cover when each was an instance (no fragment ran, on any of them).
+    let source = replaced(
+        source,
+        "fn vs_box(@builtin(vertex_index) v: u32, @builtin(instance_index) t: u32) -> Box {",
+        "fn vs_box(@builtin(view_index) view: u32, @builtin(vertex_index) vertex: u32) -> Box {\n    let t = vertex / 36u;\n    let v = vertex % 36u;",
+    );
+    let source = replaced(
+        source,
+        "    let origin = origins[tests[t].x].xyz;\n",
+        "    let origin = origins[tests[t].x].xyz;\n    var eye_view_proj = params.eyes[0];\n    if view == 1u { eye_view_proj = params.eyes[1]; }\n",
+    );
+    replaced(source, "globals.view_proj", "eye_view_proj")
 }
 
 #[cfg(test)]

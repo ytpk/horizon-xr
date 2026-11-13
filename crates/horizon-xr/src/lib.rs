@@ -38,6 +38,7 @@ mod panel;
 mod permission;
 mod platform;
 mod screen_grab;
+mod spacewarp;
 mod tracking;
 
 use actions::Controls;
@@ -134,6 +135,7 @@ struct Session {
     /// asked before, Quest keeps the system's 120 Hz), and the rate asked.
     tuned: bool,
     rate: Option<f32>,
+    spacewarp: spacewarp::SpaceWarp,
     /// Snap and smooth turning, after `MCVR.processBindings`.
     turning: Turning,
     /// The eyes' hidden areas (`XR_KHR_visibility_mask`) and whether the runtime said they changed
@@ -261,6 +263,7 @@ impl Quest {
         } else {
             extensions.khr_vulkan_enable = true;
         }
+        extensions.fb_space_warp = available.fb_space_warp;
         extensions.fb_display_refresh_rate = available.fb_display_refresh_rate;
         extensions.fb_composition_layer_settings = available.fb_composition_layer_settings;
         horizon_client_input::headset_display::update(|info| {
@@ -536,6 +539,7 @@ impl Quest {
             last_time: None,
             tuned: false,
             rate: None,
+            spacewarp: spacewarp::SpaceWarp::new(&self.instance, self.system, &formats),
             turning: Turning::default(),
             hidden: None,
             hidden_stale: true,
@@ -624,43 +628,6 @@ impl Session {
         }
         if !failed {
             log::info!("Horizon XR: CPU and GPU performance level {level:?} set");
-        }
-    }
-}
-
-impl Session {
-    /// Asks for the refresh rate the settings name (`HORIZON_XR_HZ`
-    /// overrides it), the nearest the headset offers, when it changed.
-    fn ask_refresh_rate(&mut self, instance: &xr::Instance) {
-        if instance.exts().fb_display_refresh_rate.is_none() {
-            return;
-        }
-        let wanted = std::env::var("HORIZON_XR_HZ")
-            .ok()
-            .and_then(|s| s.parse::<f32>().ok())
-            .unwrap_or_else(|| input::settings().float("horizonRefreshRate"));
-        if self.rate == Some(wanted) {
-            return;
-        }
-        self.rate = Some(wanted);
-        let session = &self.session;
-        let rates = session
-            .enumerate_display_refresh_rates()
-            .unwrap_or_default();
-        let current = session.get_display_refresh_rate().ok();
-        horizon_client_input::headset_display::update(|info| {
-            info.rates = rates.clone();
-            info.current_hz = current;
-        });
-        log::info!(
-            "Horizon XR: {}",
-            platform::rate_report(&rates, current, wanted)
-        );
-        if let Some(rate) = platform::nearest_rate(&rates, wanted) {
-            match session.request_display_refresh_rate(rate) {
-                Ok(()) => log::info!("Horizon XR: refresh rate {rate} Hz asked for"),
-                Err(e) => log::warn!("Horizon XR: refresh rate {rate} Hz: {e}"),
-            }
         }
     }
 }
@@ -768,8 +735,12 @@ impl Chain {
         foveation: Option<&foveation::Foveation>,
         layers: u32,
     ) -> Result<Self, String> {
-        let mut usage = xr::SwapchainUsageFlags::COLOR_ATTACHMENT
-            | xr::SwapchainUsageFlags::SAMPLED
+        let depth = wgpu_format.is_depth_stencil_format();
+        let mut usage = (if depth {
+            xr::SwapchainUsageFlags::DEPTH_STENCIL_ATTACHMENT
+        } else {
+            xr::SwapchainUsageFlags::COLOR_ATTACHMENT
+        }) | xr::SwapchainUsageFlags::SAMPLED
             | xr::SwapchainUsageFlags::TRANSFER_SRC
             | xr::SwapchainUsageFlags::TRANSFER_DST;
         if is_srgb(format) {
@@ -833,8 +804,11 @@ impl Chain {
                     sample_count: 1,
                     dimension: wgpu::TextureDimension::D2,
                     format: wgpu_format,
-                    usage: wgpu::TextureUses::COLOR_TARGET
-                        | wgpu::TextureUses::COPY_SRC
+                    usage: (if depth {
+                        wgpu::TextureUses::DEPTH_STENCIL_WRITE
+                    } else {
+                        wgpu::TextureUses::COLOR_TARGET
+                    }) | wgpu::TextureUses::COPY_SRC
                         | wgpu::TextureUses::COPY_DST
                         | wgpu::TextureUses::RESOURCE,
                     memory_flags: wgpu::hal::MemoryFlags::empty(),
@@ -1938,6 +1912,13 @@ impl Headset for Quest {
             (dynres_wanted(), interval, menu, self.format)
         {
             let period = state.predicted_display_period.as_nanos() as f32 * 1e-9;
+            let period = if horizon_client_input::headset_display::snapshot()
+                .is_some_and(|i| i.spacewarp_active)
+            {
+                period.max(1.0 / spacewarp::cadence().render)
+            } else {
+                period
+            };
             let previous = s.dynres.clone();
             if s.retired_eyes.len() < 2
                 && let Some(scale) = s.dynres.frame(
@@ -2173,7 +2154,12 @@ impl Headset for Quest {
         diag::waited(2, waiting.elapsed());
         diag::app_start();
         match acquired {
-            Ok(targets) => targets,
+            Ok(targets) => {
+                if matches!(targets, Targets::Eyes(..)) && layers == Layers::World {
+                    s.spacewarp.begin(&s.session, device);
+                }
+                targets
+            }
             Err(e) => {
                 log::warn!("Horizon XR: {e}");
                 s.pending = Some(Pending::Empty { time });
@@ -2183,6 +2169,27 @@ impl Headset for Quest {
         }
     }
 
+    fn request_spacewarp(&mut self, enabled: bool) {
+        if let Some(s) = self.session.as_mut() {
+            s.spacewarp.requested = enabled;
+        }
+    }
+    fn spacewarp_targets(&self) -> Option<horizon_client_render::gfx::headset::SpaceWarpTargets> {
+        self.session.as_ref()?.spacewarp.targets()
+    }
+    fn spacewarp_rendered(&mut self, camera: glam::DVec3, yaw: f32, far: f32, history: bool) {
+        if let Some(s) = self.session.as_mut() {
+            s.spacewarp.rendered(
+                camera,
+                yaw,
+                far,
+                s.rest.unwrap_or(Vec3::ZERO),
+                input::world_scale(),
+                s.pose_epoch,
+                history,
+            );
+        }
+    }
     fn request_stereo_array(&mut self, enabled: bool) {
         if let Some(s) = self.session.as_mut() {
             s.request_stereo_array = enabled;
@@ -2224,6 +2231,7 @@ impl Headset for Quest {
             Pending::Eyes { .. } => 2,
             Pending::Menu { .. } => 3,
         });
+        let warp = s.spacewarp.finish(s.discard_world);
         let result = match pending {
             Pending::Empty { time } => s.stream.end(time, self.blend, &[]),
             Pending::Eyes {
@@ -2282,6 +2290,16 @@ impl Headset for Quest {
                                 s.eyes[1].sub_image()
                             }),
                     ];
+                    let [left, right] = projection_views;
+                    let projection_views = [(0, left), (1, right)].map(|(eye, view)| {
+                        let Some(warp) = &warp else {
+                            return view;
+                        };
+                        let mut raw = view.into_raw();
+                        raw.next = std::ptr::from_ref(&warp[eye]).cast();
+                        // Safety: the same view; the auxiliary structs and chains outlive xrEndFrame.
+                        unsafe { xr::CompositionLayerProjectionView::from_raw(raw) }
+                    });
                     let layer = xr::CompositionLayerProjection::new()
                         .space(&s.space)
                         .views(&projection_views);
@@ -2515,6 +2533,9 @@ impl Headset for Quest {
             }
         };
         if let Err(e) = result {
+            if warp.is_some() {
+                s.spacewarp.disable(&e.to_string());
+            }
             log::warn!("Horizon XR: ending a frame: {e}");
         }
     }

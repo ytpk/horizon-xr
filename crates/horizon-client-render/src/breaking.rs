@@ -119,6 +119,7 @@ mod tests {
                 opaque: true,
                 translucent: false,
                 fusion: None,
+                shrunk: None,
                 quad: ModelQuad {
                     positions: [
                         [0.0, 0.5, 0.0],

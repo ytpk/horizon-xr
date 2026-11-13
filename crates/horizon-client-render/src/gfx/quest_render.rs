@@ -44,10 +44,10 @@ impl Renderer {
     /// leaves the original renderer intact. Calling again restores mono handles.
     pub(super) fn swap_stereo_pipelines(&mut self) -> bool {
         let mut slots = vec![
-            &mut self.solid.plain,
-            &mut self.solid_opaque.plain,
-            &mut self.solid_cutout.plain,
-            &mut self.fluid_pipeline,
+            &mut self.solid,
+            &mut self.solid_opaque,
+            &mut self.solid_cutout,
+            &mut self.solid_mirror,
             &mut self.translucent,
             &mut self.translucent_mark,
             &mut self.sky,
@@ -57,7 +57,6 @@ impl Renderer {
             &mut self.depth_reset,
             &mut self.lines,
             &mut self.lines_secondary,
-            &mut self.debug_lines_opaque,
             &mut self.debug_lines,
             &mut self.debug_lines_on_top,
             &mut self.entity_pipeline,
@@ -77,19 +76,21 @@ impl Renderer {
             &mut self.stars.pipeline,
             &mut self.weather.pipeline,
         ];
-        if let Some(lean) = &mut self.lean_cutout {
-            slots.push(lean);
+        if let Some(paths) = &mut self.solid_paths {
+            slots.extend(paths.pipelines_mut());
+        }
+        if let Some(sky) = &mut self.late_sky {
+            slots.extend(sky.pipelines_mut());
         }
         slots.extend(self.screen_pipelines.iter_mut());
         if let Some(pipelines) = &mut self.screen_world_pipelines {
             slots.extend(pipelines.iter_mut());
         }
-        slots.extend(self.terrain_model_pipelines.iter_mut());
         if let Some(flat) = &mut self.flat {
             slots.extend([
-                &mut flat.solid.plain,
-                &mut flat.solid_opaque.plain,
-                &mut flat.solid_cutout.plain,
+                &mut flat.solid,
+                &mut flat.solid_opaque,
+                &mut flat.solid_cutout,
                 &mut flat.solid_mirror,
                 &mut flat.translucent,
                 &mut flat.translucent_mark,
@@ -151,26 +152,14 @@ impl Renderer {
         if self.hdr.is_some() {
             return Some("HDR output");
         }
-        if !self.custom_sky_draws.is_empty() {
-            return Some("a resource pack's custom sky");
-        }
-        if !frame.world_primitives.is_empty() {
-            return Some("world primitives this frame");
-        }
         if self.native.is_some() {
             return Some("a native shader pack");
         }
         if self.pack_post.is_some() {
             return Some("a pack's post effects");
         }
-        if self.core_lines.is_some() {
-            return Some("core shader lines");
-        }
         if self.improved_transparency {
             return Some("improved transparency");
-        }
-        if self.visbuf.is_some() {
-            return Some("the visibility buffer");
         }
         if self.world_post.scale != 1.0 {
             return Some("world resolution scale is not 1");
@@ -202,9 +191,6 @@ impl Renderer {
         if native_render::world_drawn_hooked() {
             return Some("a native mod hooks world drawing");
         }
-        if self.output.frame.format != self.config.format {
-            return Some("the output format differs from the swapchain's");
-        }
         None
     }
 
@@ -216,6 +202,9 @@ impl Renderer {
             return Err("the graphics device was lost".into());
         }
         self.water_eye_offsets = None;
+        // Gameplay asks skins_entities for every model: cache policy once per frame,
+        // avoiding headset/settings locks and environment reads in that hot path.
+        self.spacewarp_requested = spacewarp::requested();
         let timed = self.gpu_times.len();
         self.land_frame();
         vr_profile::refresh_often();
@@ -238,8 +227,14 @@ impl Renderer {
         if request_array {
             assert!(self.swap_stereo_pipelines());
         }
+        let request_spacewarp =
+            layers == headset::Layers::World && self.spacewarp_compatible(frame);
+        if !request_spacewarp && let Some(sw) = &mut self.spacewarp {
+            sw.stop();
+        }
         let targets = headset::with(|h| {
             h.request_stereo_array(request_array);
+            h.request_spacewarp(request_spacewarp);
             h.begin(&self.device, layers)
         })
         .unwrap_or(headset::Targets::Skip);
@@ -365,6 +360,16 @@ impl Renderer {
                 let eye_views = poses.map(|pose| View::eye(body_yaw, &pose, frame.depth_far));
                 self.water_eye_offsets =
                     Some(eye_views.map(|eye| eye.view.inverse().w_axis.truncate()));
+                let warp_targets = headset::with(|h| h.spacewarp_targets()).flatten();
+                if let Some(targets) = warp_targets.clone() {
+                    self.spacewarp
+                        .get_or_insert_with(|| {
+                            spacewarp::SpaceWarp::new(&self.device, &self.entity_atlas)
+                        })
+                        .prepare(&self.device, &self.queue, targets, eye_views, frame, size);
+                } else if let Some(sw) = &mut self.spacewarp {
+                    sw.stop();
+                }
                 let cull = headset::cull_view(body_yaw, &poses, frame.depth_far);
                 self.headset_cull = Some(cull);
                 let mut drawn = Ok(false);
@@ -465,6 +470,9 @@ impl Renderer {
                     self.eye_mask = masks
                         .as_ref()
                         .and_then(|m| vis_mask::EyeMask::new(&m[eye], pose.tangents));
+                    if let Some(sw) = &mut self.spacewarp {
+                        sw.eye = eye;
+                    }
                     let view = eye_views[eye];
                     self.headset_eye = Some((view, cull));
                     self.offscreen = Some(image.clone());
@@ -546,6 +554,43 @@ impl Renderer {
                 images.extend(hud.as_ref());
                 images.extend(overlays.iter());
                 images.extend(upload.as_ref().map(|u| &u.0));
+                if let Some(sw) = &self.spacewarp
+                    && sw.active()
+                    && sw.drawn == 3
+                    && matches!(drawn, Ok(true))
+                {
+                    headset::with(|h| {
+                        h.spacewarp_rendered(
+                            frame.camera,
+                            body_yaw,
+                            frame.depth_far,
+                            sw.history_valid,
+                        )
+                    });
+                }
+                if drawn.is_err() {
+                    headset::with(|h| h.discard_frame());
+                }
+                if let Some(targets) = &warp_targets {
+                    // These images were last written as attachments. Explicit barriers avoid
+                    // reloading both layers on a tiled Adreno just to restore runtime layouts.
+                    panels.transition_resources(
+                        std::iter::empty(),
+                        [
+                            wgpu::TextureTransition {
+                                texture: &targets.motion,
+                                selector: None,
+                                state: wgpu::TextureUses::COLOR_TARGET,
+                            },
+                            wgpu::TextureTransition {
+                                texture: &targets.depth,
+                                selector: None,
+                                state: wgpu::TextureUses::DEPTH_STENCIL_WRITE,
+                            },
+                        ]
+                        .into_iter(),
+                    );
+                }
                 let finish_started = Instant::now();
                 self.finish_headset_images_encoded(panels, &images, images.len());
                 vr_profile::record(vr_profile::Stage::Finish, finish_started.elapsed());
@@ -641,7 +686,6 @@ impl Renderer {
             self.hud.draw_range(
                 encoder,
                 &view,
-                None,
                 &self.depth,
                 hud,
                 size,

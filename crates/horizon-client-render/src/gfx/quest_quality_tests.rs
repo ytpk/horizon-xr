@@ -79,10 +79,8 @@ fn lightmap_selection_matches_known_texels_in_both_eyes() {
     });
     for nearest in [false, true] {
         for stereo in [false, true] {
-            let mut source = super::lightmap_shader(
-                include_str!("../hdr_light.wgsl").to_owned() + include_str!("../terrain.wgsl"),
-                nearest,
-            );
+            let mut source =
+                super::lightmap_shader(include_str!("../terrain.wgsl").to_owned(), nearest);
             source.push_str("\n@fragment fn fs_lightmap_test() -> @location(0) vec4<f32> { return sample_lightmap(2.25, 1.25); }\n");
             if stereo {
                 source = super::super::multiview::shader(&source);

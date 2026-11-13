@@ -48,31 +48,6 @@ pub(super) fn quest_switch(env: &str, setting: &str) -> bool {
     }
 }
 
-/// Whether the opaque solid pass without HDR output exports terrain.wgsl's `OpaqueWire` (3
-/// interpolant locations) instead of `TerrainWire` (5): a headset's Adreno shades each vertex
-/// about 2.5 times a frame (once per view, once for binning) and pays for every location. On
-/// a Quest 3S at 24 chunks it took 10% of the ALU per vertex and 0.9 ms of 21 off the frame.
-/// The picture is the same. Only there, and `HORIZON_QUEST_LEAN_OPAQUE=0` keeps `TerrainWire`.
-pub(super) fn lean_opaque(info: &wgpu::AdapterInfo) -> bool {
-    headset::installed()
-        && info.backend == wgpu::Backend::Vulkan
-        && info.vendor == 0x5143
-        && quest_switch("HORIZON_QUEST_LEAN_OPAQUE", "horizonLeanOpaque")
-}
-
-/// Whether the cutout solid pass without HDR output draws its lists that are not fading
-/// through terrain.wgsl's `vs_terrain_cutout_lean` and `fs_cutout_lean`: `OpaqueWire`'s 3
-/// interpolant locations instead of `TerrainWire`'s 5, and the cutout before any other work
-/// (as `lean_opaque`, for the same GPU). The fading lists keep `fs_solid`, in a group of their
-/// own after them. The picture is the same. `HORIZON_QUEST_LEAN_CUTOUT=0` turns it off.
-pub(super) fn lean_cutout(info: &wgpu::AdapterInfo) -> bool {
-    headset::installed()
-        && info.backend == wgpu::Backend::Vulkan
-        && info.vendor == 0x5143
-        && split_solid_gpu(info)
-        && quest_switch("HORIZON_QUEST_LEAN_CUTOUT", "horizonLeanCutout")
-}
-
 /// `HORIZON_QUEST_PLANT_DISTANCE=<blocks>`: on a headset's Adreno, sections whose centre is
 /// farther than this leave out their crossed cutout quads (`Quads::CutoutAligned`): short and
 /// tall grass, ferns, flowers, saplings. It changes the picture (the plants appear a section
@@ -183,7 +158,7 @@ mod tests {
 
     #[test]
     fn nearest_and_filtered_lightmaps_validate_in_mono_and_stereo() {
-        let source = include_str!("../hdr_light.wgsl").to_owned() + include_str!("../terrain.wgsl");
+        let source = include_str!("../terrain.wgsl").to_owned();
         for nearest in [false, true] {
             let source = lightmap_shader(source.clone(), nearest);
             for source in [source.clone(), super::super::multiview::shader(&source)] {

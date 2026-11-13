@@ -42,6 +42,9 @@ impl Pass {
         };
         Some(Self { sections, flat })
     }
+    fn pipelines_mut(&mut self) -> impl Iterator<Item = &mut wgpu::RenderPipeline> {
+        std::iter::once(&mut self.sections).chain(self.flat.as_mut())
+    }
     fn get(&self, flat: bool) -> Option<&wgpu::RenderPipeline> {
         if flat {
             self.flat.as_ref()
@@ -78,6 +81,18 @@ pub(super) struct SolidPaths {
     pub settled_on: bool,
 }
 
+impl SolidPaths {
+    /// Every pipeline, for the headset's multiview swap (`Renderer::swap_stereo_pipelines`).
+    pub fn pipelines_mut(&mut self) -> Vec<&mut wgpu::RenderPipeline> {
+        let mut out: Vec<&mut wgpu::RenderPipeline> = self.static_cutout.pipelines_mut().collect();
+        if let Some(settled) = &mut self.settled {
+            for pass in settled {
+                out.extend(pass.pipelines_mut());
+            }
+        }
+        out
+    }
+}
 impl SolidPaths {
     /// `flat_bindings`: the flat draws' bind group 1, where they exist.
     pub fn new(

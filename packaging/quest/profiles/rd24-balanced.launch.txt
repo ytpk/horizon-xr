@@ -1,11 +1,12 @@
+# Bnf: best of the supplied fixed-position RD24 measurements; no foveation/affinity.
 # Append to launch.txt after backing it up. See docs/quest-adreno-audit-2026-11-13.md.
-# Also enable horizonMultiview and horizonFoveatedMultiview in the saved VR settings.
+# Also enable horizonMultiview in the saved VR settings.
 # Keep the saved eye size; XR_SCALE=1.0 may be much larger than the current setting.
 --render-distance
 24
 HORIZON_XR_HZ=72
 HORIZON_XR_DYNRES=0
-HORIZON_XR_FOVEATION=medium
+HORIZON_XR_FOVEATION=off
 HORIZON_SPLIT_SOLID=1
 HORIZON_MULTI_DRAW=0
 HORIZON_QUEST_OCCLUSION=0
@@ -15,6 +16,6 @@ HORIZON_QUEST_PLANT_DISTANCE=48
 HORIZON_QUEST_SHRINK_PLANTS=1
 HORIZON_QUEST_SPLIT_STREAMS=0
 HORIZON_QUEST_NEAREST_LIGHTMAP=0
-HORIZON_PIN_BIG_CORES=1
-HORIZON_HYBRID_WORKERS=1
+HORIZON_PIN_BIG_CORES=0
+HORIZON_HYBRID_WORKERS=0
 HORIZON_VR_PROFILE=log

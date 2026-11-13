@@ -59,6 +59,26 @@ impl ViewSet {
         }
     }
 
+    /// One eye of a headset drawn in a pass of its own, culled with `cull`,
+    /// whose frustum holds both eyes' (`headset::cull_view`): the frame's
+    /// geometry is the same for both passes.
+    pub fn eye(view: View, cull: View) -> Self {
+        Self {
+            views: [view; MAX_VIEWS],
+            len: 1,
+            cull,
+        }
+    }
+
+    /// Both eyes of a headset, culled with `cull`.
+    pub fn stereo(left: View, right: View, cull: View) -> Self {
+        Self {
+            views: [left, right],
+            len: 2,
+            cull,
+        }
+    }
+
     /// The view the HUD, hand and screen-space effects follow.
     pub fn primary(&self) -> &View {
         &self.views[0]

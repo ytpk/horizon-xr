@@ -949,6 +949,7 @@ impl<G: ChunkGenerator> Jobs<G> {
                     blend_radius: settings.blend_radius,
                     smooth_lighting: settings.smooth_lighting,
                     cutout_leaves: settings.cutout_leaves,
+                    opaque_water: context.opaque_water,
                     translucent_layers: &settings.translucent_layers,
                     leaf_culling: settings.leaf_culling,
                     assets: &context.assets,
@@ -959,6 +960,9 @@ impl<G: ChunkGenerator> Jobs<G> {
                 };
                 let recycled = shared.meshes.lock().unwrap().take();
                 let mut mesh = mesher.mesh_reusing(&borrow(&region), sy, recycled, mesh_scratch);
+                if crate::mesher::merging() {
+                    mesh.merge_solid();
+                }
                 mesh.sort_solid();
                 *faces = Some((context.tables.clone(), mesher.visibility));
                 Done::Meshed(x, sy, z, mesh, seq)
@@ -967,12 +971,24 @@ impl<G: ChunkGenerator> Jobs<G> {
         Some(done)
     }
 }
+#[derive(Clone)]
 pub struct WorkerContext {
+    pub opaque_water: bool,
     pub assets: Arc<crate::assets::Assets>,
     pub render: Arc<crate::assets::RenderAssets>,
     pub tables: Arc<MeshTables>,
     pub biomes: Arc<crate::biome::Biomes>,
     pub light: Arc<LightTables>,
+}
+impl WorkerContext {
+    pub fn with_opaque_water(self: &Arc<Self>, enabled: bool) -> Arc<Self> {
+        if self.opaque_water == enabled {
+            return self.clone();
+        }
+        let mut context = (**self).clone();
+        context.opaque_water = enabled;
+        Arc::new(context)
+    }
 }
 impl Streaming {
     pub fn new<G: ChunkGenerator>(
@@ -1079,6 +1095,9 @@ impl Streaming {
     /// Shares generation resources, but gives distant work its own worker state.
     pub fn lod_source(&self) -> Arc<dyn LodSource> {
         self.saves.clone()
+    }
+    pub fn opaque_water(&self) -> bool {
+        self.shared.context.read().unwrap().opaque_water
     }
     /// Resource packs reloaded (`LevelRenderer.allChanged`): mesh with the new
     /// models and sprites, and rebuild every loaded section. Meshes in flight

@@ -280,6 +280,7 @@ fn main() -> Result<(), Error> {
     let visibility = models::load_visibility(&root, assets.registry)?;
     let biomes = Arc::new(Biomes::load(&root)?);
     let context = Arc::new(WorkerContext {
+        opaque_water: false,
         tables: Arc::new(MeshTables::new(&assets, &render, &facts, visibility)?),
         light: Arc::new(LightTables::load(&root, assets.registry, &facts)?),
         biomes: biomes.clone(),

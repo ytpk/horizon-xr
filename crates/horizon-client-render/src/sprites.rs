@@ -226,6 +226,30 @@ impl Sprites {
             })
         })
     }
+    /// The part of `layer`'s sprite a cutout quad can draw at full size, as
+    /// `[u0, v0, u1, v1]` in sprite UVs, on whole texels: the box of the texels that are not
+    /// fully clear, in any frame. `None` for a sprite with nothing to draw. The smaller mip
+    /// levels are not looked at: `MipmapGenerator` keeps a cutout's coverage by raising
+    /// alpha, so far away a texel may draw up to a screen pixel outside this box.
+    pub fn drawn_bounds(&self, layer: u32) -> Option<[f32; 4]> {
+        let (side, frames, _) = self.native.get(layer as usize)?;
+        let side = *side as usize;
+        let (mut low, mut high) = ([usize::MAX; 2], [0usize; 2]);
+        for frame in frames.iter() {
+            for (i, pixel) in frame.as_chunks::<4>().0.iter().enumerate() {
+                if pixel[3] == 0 {
+                    continue;
+                }
+                let at = [i % side, i / side];
+                for k in 0..2 {
+                    low[k] = low[k].min(at[k]);
+                    high[k] = high[k].max(at[k] + 1);
+                }
+            }
+        }
+        let uv = |texel: usize| texel as f32 / side as f32;
+        (low[0] < high[0]).then(|| [uv(low[0]), uv(low[1]), uv(high[0]), uv(high[1])])
+    }
     /// Lay every layer out at one size: the largest texture's (resource packs
     /// may ship 32x, 64x... textures, like vanilla's stitched atlas), rounded
     /// up to a power of two and limited to the texture budget (`set_texture_budget`). Smaller
@@ -262,8 +286,13 @@ impl Sprites {
         let mut resized = Vec::with_capacity(self.native.len());
         self.pixels.clear();
         for (from, frames, initial) in &self.native {
-            let frames: Arc<Vec<Vec<u8>>> =
-                Arc::new(frames.iter().map(|f| resample(f, *from, size)).collect());
+            // Native frames already match the atlas size: share the immutable
+            // buffers with animations rather than copying every frame again.
+            let frames: Arc<Vec<Vec<u8>>> = if *from == size {
+                Arc::clone(frames)
+            } else {
+                Arc::new(frames.iter().map(|f| resample(f, *from, size)).collect())
+            };
             self.pixels.extend_from_slice(&frames[*initial]);
             resized.push(frames);
         }
@@ -794,6 +823,73 @@ pub(crate) fn sprite_mipmap_limit(requested: u32, size: u32, minimum: u32, avail
 mod tests {
     use super::*;
     use std::fs::{self, File};
+    /// A 4 px sprite layer whose texels in `opaque` (column, row) are solid, the rest clear
+    /// but for `faint`, at alpha 1.
+    fn layer_of(sprites: &mut Sprites, frames: &[(&[(usize, usize)], &[(usize, usize)])]) -> u32 {
+        let frames = frames
+            .iter()
+            .map(|(opaque, faint)| {
+                let mut frame = vec![0u8; 4 * 4 * 4];
+                for &(x, y) in *opaque {
+                    frame[(y * 4 + x) * 4..][..4].copy_from_slice(&[90, 160, 60, 255]);
+                }
+                for &(x, y) in *faint {
+                    frame[(y * 4 + x) * 4..][..4].copy_from_slice(&[90, 160, 60, 1]);
+                }
+                frame
+            })
+            .collect();
+        sprites.native.push((4, Arc::new(frames), 0));
+        sprites.mips.push(crate::mipmap::Settings::default());
+        sprites.native.len() as u32 - 1
+    }
+    #[test]
+    fn drawn_bounds_box_every_texel_a_cutout_can_draw() {
+        let mut sprites = Sprites::default();
+        let right: Vec<_> = (0..4).flat_map(|y| [(2, y), (3, y)]).collect();
+        let half = layer_of(&mut sprites, &[(&right, &[])]);
+        assert_eq!(sprites.drawn_bounds(half), Some([0.5, 0.0, 1.0, 1.0]));
+        let one = layer_of(&mut sprites, &[(&[(1, 2)], &[])]);
+        assert_eq!(sprites.drawn_bounds(one), Some([0.25, 0.5, 0.5, 0.75]));
+        // A texel that is barely there still counts: the sampler blends it with its neighbours.
+        let faint = layer_of(&mut sprites, &[(&right, &[(0, 3)])]);
+        assert_eq!(sprites.drawn_bounds(faint), Some([0.0, 0.0, 1.0, 1.0]));
+        // An animation: every frame's texels.
+        let top: Vec<_> = (0..4).flat_map(|x| [(x, 0), (x, 1)]).collect();
+        let animated = layer_of(&mut sprites, &[(&right, &[]), (&top, &[])]);
+        assert_eq!(sprites.drawn_bounds(animated), Some([0.0, 0.0, 1.0, 1.0]));
+        let clear = layer_of(&mut sprites, &[(&[], &[])]);
+        assert_eq!(sprites.drawn_bounds(clear), None);
+    }
+    #[test]
+    fn native_frames_at_atlas_size_are_shared_without_resampling() {
+        let pixels = vec![
+            [10, 20, 30, 255].repeat((SPRITE_SIZE * SPRITE_SIZE) as usize),
+            [40, 50, 60, 255].repeat((SPRITE_SIZE * SPRITE_SIZE) as usize),
+        ];
+        let native = Arc::new(pixels.clone());
+        let smaller = Arc::new(vec![vec![12; 8 * 8 * 4], vec![34; 8 * 8 * 4]]);
+        let metadata = r#"{"frametime":2}"#;
+        let mut sprites = Sprites {
+            native: vec![
+                (SPRITE_SIZE, Arc::clone(&native), 1),
+                (8, Arc::clone(&smaller), 0),
+            ],
+            pbr: vec![[None, None], [None, None]],
+            animations: vec![
+                test_frames(0, pixels.clone(), metadata),
+                test_frames(1, smaller.as_ref().clone(), metadata),
+            ],
+            ..Default::default()
+        };
+        sprites.finish();
+        assert!(Arc::ptr_eq(&sprites.animations[0].frames, &native));
+        assert!(!Arc::ptr_eq(&sprites.animations[1].frames, &smaller));
+        assert_eq!(sprites.animations[0].pixels(1), pixels[1].as_slice());
+        let resized = resample(&smaller[0], 8, SPRITE_SIZE);
+        assert_eq!(sprites.animations[1].pixels(0), resized.as_slice());
+        assert_eq!(&sprites.pixels[..pixels[1].len()], pixels[1].as_slice());
+    }
     #[test]
     fn the_texture_budget_picks_the_largest_side_that_fits() {
         // 1300 layers: vanilla's count, about.

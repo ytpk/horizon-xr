@@ -211,6 +211,7 @@ impl Opt {
 
     pub(crate) fn caption(self) -> &'static str {
         match self {
+            Opt::Vr(o) => o.caption(),
             Opt::AndroidInputSelection => "Input device",
             Opt::TouchMode => "Control scheme",
             Opt::TouchCrosshairGestures => "Touch gestures",
@@ -436,6 +437,7 @@ impl Opt {
             Opt::PadMoveDeadzone => unit(s.controller.move_deadzone, 0.0, 0.5),
             Opt::PadLookDeadzone => unit(s.controller.look_deadzone, 0.0, 0.5),
             Opt::SprintWindow => unit(s.sprint_window as f32, 0.0, 10.0),
+            Opt::Vr(o) => o.slider(s).map_or(Kind::Cycle, Kind::Slider),
             _ => Kind::Cycle,
         }
     }
@@ -500,6 +502,7 @@ impl Opt {
             Opt::NotificationDisplayTime => Some(95),
             Opt::PadMoveDeadzone | Opt::PadLookDeadzone => Some(50),
             Opt::SprintWindow => Some(10),
+            Opt::Vr(o) => o.steps(),
             _ => None,
         }
     }
@@ -671,6 +674,7 @@ impl Opt {
         }
 
         match self {
+            Opt::Vr(o) => o.label(s),
             Opt::ChatDelay => tr("options.chat.delay_none"),
             Opt::FovEffects
             | Opt::DarknessPulsing
@@ -1101,6 +1105,7 @@ impl Opt {
             Opt::PadMoveDeadzone => s.controller.move_deadzone = step(0.0, 50.0) / 100.0,
             Opt::PadLookDeadzone => s.controller.look_deadzone = step(0.0, 50.0) / 100.0,
             Opt::SprintWindow => s.sprint_window = step(0.0, 10.0) as i32,
+            Opt::Vr(o) => o.set_slider(s, v),
             _ => {}
         }
         if self.affects_preset() {
@@ -1377,6 +1382,7 @@ impl Opt {
                     .unwrap_or(0) as u8;
                 s.controller.keyboard = all[usize::from(next(i, 3))];
             }
+            Opt::Vr(o) => o.cycle(s, back),
             _ => {}
         }
         if self.affects_preset() {
@@ -1764,10 +1770,19 @@ pub enum Page {
     HdrCalibration,
     /// Horizon's controller settings and button binds.
     Controller,
+    /// One page of a headset's VR options (`vr_options`, Vivecraft's screens); only while
+    /// one is installed. `Main` is the page Horizon's settings open.
+    Vr(horizon_vivecraft::pages::PageId),
     PadBinds,
     Extras,
     /// CreditsAndAttributionScreen.
     Credits,
+    /// The VR settings' About / Credits: Horizon, Vivecraft, Visor, the OpenXR loader.
+    VrCredits,
+    /// `GuiRadialConfiguration`: the actions of the radial menu's slots.
+    VrRadial,
+    /// `GuiQuickCommandEditor`: the 12 quick commands.
+    VrQuickCommands,
     /// Horizon Settings: every page Horizon adds, as a mod's settings
     /// screen hangs off vanilla's Options.
     Horizon,
@@ -1805,6 +1820,20 @@ enum Act {
     PadKey(&'static str),
     ResetPadKey(&'static str),
     ResetPadKeys,
+    /// The radial configuration: the main or the alternate set, the next action for a slot, the
+    /// sets back to the defaults.
+    VrRadialSet,
+    VrRadialSlot(usize),
+    VrRadialReset,
+    /// The quick command editor: edit command `.0`, the commands back to the defaults.
+    VrQuickSelect(usize),
+    VrQuickReset,
+    /// The VR options' Reset Origin: the headset's room origin goes back under the player.
+    VrResetOrigin,
+    /// A Visor settings preset (`horizon_visor::presets`) laid over the VR settings.
+    VrPreset(&'static str),
+    /// The VR options' Calibrate Height: the player's height from how they stand now.
+    VrCalibrateHeight,
     ToggleMod(usize),
     /// Pick `s.shader_packs[i]`, or turn it off when it is the pick (None: Off).
     PickShaderPack(Option<usize>),
@@ -2136,6 +2165,10 @@ pub struct OptionsUi {
     language_choice: Option<String>,
     language_search: ui::EditBox,
     pub(crate) settings_search: ui::EditBox,
+    /// The radial configuration shows the alternate set.
+    vr_radial_alt: bool,
+    /// The quick command whose text the box above the list edits.
+    vr_quick: Option<usize>,
     /// What the custom button on its page sends.
     custom_send: ui::EditBox,
     /// The custom button on its page came from the touch editor's Add, and goes back there.
@@ -2275,6 +2308,8 @@ impl Default for OptionsUi {
             language_choice: None,
             language_search: search,
             settings_search,
+            vr_radial_alt: false,
+            vr_quick: None,
             custom_send,
             back_to_editor: false,
             painter: Painter::default(),
@@ -2809,9 +2844,60 @@ impl OptionsUi {
         let label = format!("{}: {}", item.caption_text(), item.value(&s.extras));
         button(0.0, 0.0, 150.0, Text::literal(label), Act::Extra(item))
     }
+    /// The radial configuration's and the quick command editor's buttons.
+    fn vr_edit_act(&mut self, s: &mut Settings, act: &Act) {
+        use horizon_vivecraft::radial;
+        match act {
+            Act::VrRadialSet => self.vr_radial_alt = !self.vr_radial_alt,
+            Act::VrRadialSlot(i) => {
+                // A free slot, then Vivecraft's own bindings, then the game's.
+                let mut actions: Vec<&str> = radial::VIVECRAFT_ACTIONS.to_vec();
+                actions.extend(crate::keybinds::MAPPINGS.iter().map(|m| m.0));
+                let alt = self.vr_radial_alt;
+                let current = radial::items(&s.vr, alt)[*i].clone();
+                let next = radial::next(&current, &actions).to_string();
+                radial::set_item(std::sync::Arc::make_mut(&mut s.vr), alt, *i, &next);
+            }
+            Act::VrRadialReset => radial::reset(std::sync::Arc::make_mut(&mut s.vr)),
+            Act::VrPreset(id) => {
+                horizon_visor::presets::apply(id, std::sync::Arc::make_mut(&mut s.vr));
+            }
+            Act::VrQuickSelect(i) => {
+                self.vr_quick_commit(s);
+                self.vr_quick = Some(*i);
+                self.settings_search.max_length = 1000;
+                let command = radial::quick_commands(&s.vr)[*i].clone();
+                self.settings_search.set_value(&command);
+                self.settings_search.focused = true;
+                self.focus = Some(FocusId::Search);
+            }
+            Act::VrQuickReset => {
+                self.vr_quick = None;
+                self.settings_search.set_value("");
+                self.settings_search.focused = false;
+                radial::reset_quick_commands(std::sync::Arc::make_mut(&mut s.vr));
+            }
+            _ => {}
+        }
+    }
+    /// The text in the box goes into the quick command being edited.
+    fn vr_quick_commit(&mut self, s: &mut Settings) {
+        if let Some(i) = self.vr_quick.take() {
+            horizon_vivecraft::radial::set_quick_command(
+                std::sync::Arc::make_mut(&mut s.vr),
+                i,
+                &self.settings_search.value,
+            );
+            self.settings_search.set_value("");
+            self.settings_search.focused = false;
+        }
+    }
     fn settings_search_active(&self) -> bool {
         self.settings_search.focused
-            && matches!(self.page(), Page::Video | Page::Controls | Page::KeyBinds)
+            && matches!(
+                self.page(),
+                Page::Video | Page::Controls | Page::KeyBinds | Page::VrQuickCommands
+            )
     }
     /// Whether a text field shown now has the focus: the language and settings searches, the
     /// pack search, or Skin Customization's name.
@@ -3148,9 +3234,14 @@ impl OptionsUi {
         self.focus = None;
         self.focus_from_keyboard = false;
         self.can_change_value = false;
-        if matches!(page, Page::Video | Page::Controls | Page::KeyBinds) {
+        if matches!(
+            page,
+            Page::Video | Page::Controls | Page::KeyBinds | Page::VrQuickCommands
+        ) {
             self.settings_search.set_value("");
             self.settings_search.focused = false;
+            self.settings_search.max_length = 32;
+            self.vr_quick = None;
         }
         if page == Page::Language {
             self.language_choice = None;
@@ -3245,6 +3336,10 @@ impl OptionsUi {
             Page::Controller => "horizon.pages.controller",
             Page::PadBinds => "horizon.pages.controller_binds",
             Page::Extras => "horizon.pages.extras",
+            Page::Vr(id) => id.title(),
+            Page::VrCredits => "vivecraft.credits.title",
+            Page::VrRadial => "vivecraft.options.screen.radialmenu",
+            Page::VrQuickCommands => "vivecraft.options.screen.quickcommands",
             Page::Credits => "credits_and_attribution.screen.title",
             Page::Horizon => "horizon.pages.settings",
             Page::Agent => "horizon.pages.agent",
@@ -3974,6 +4069,202 @@ impl OptionsUi {
                 rows.extend(pairs(opts));
                 rows
             }
+            Page::Vr(id) => {
+                use horizon_vivecraft::pages::{Entry, entries};
+                let cell = |e: Entry| -> Option<Widget> {
+                    match e {
+                        Entry::Opt(key) => crate::vr_options::VrOpt::by_key(key)
+                            .map(|o| option_widget(s, Opt::Vr(o), 0.0, 0.0, 150.0)),
+                        Entry::NamedOpt(name) => crate::vr_options::VrOpt::by_name(name)
+                            .map(|o| option_widget(s, Opt::Vr(o), 0.0, 0.0, 150.0)),
+                        Entry::Page(p) => Some(button(
+                            0.0,
+                            0.0,
+                            150.0,
+                            tr(p.button()),
+                            Act::Push(Page::Vr(p)),
+                        )),
+                        Entry::ResetOrigin => Some(button(
+                            0.0,
+                            0.0,
+                            150.0,
+                            tr("vivecraft.options.RESET_ORIGIN"),
+                            Act::VrResetOrigin,
+                        )),
+                        Entry::CalibrateHeight => Some(button(
+                            0.0,
+                            0.0,
+                            150.0,
+                            tr("visor.options.vr_body.height.measure.button"),
+                            Act::VrCalibrateHeight,
+                        )),
+                        Entry::RadialConfig => Some(button(
+                            0.0,
+                            0.0,
+                            150.0,
+                            tr("vivecraft.options.screen.radialmenu.button"),
+                            Act::Push(Page::VrRadial),
+                        )),
+                        Entry::QuickCommands => Some(button(
+                            0.0,
+                            0.0,
+                            150.0,
+                            tr("vivecraft.options.screen.quickcommands.button"),
+                            Act::Push(Page::VrQuickCommands),
+                        )),
+                        Entry::Preset(preset) => horizon_visor::presets::by_id(preset)
+                            .map(|p| button(0.0, 0.0, 150.0, tr(p.name_key), Act::VrPreset(p.id))),
+                        Entry::Blank => None,
+                    }
+                };
+                let cells = entries(id, &s.vr, false);
+                if id == horizon_vivecraft::pages::PageId::World {
+                    // Visor's World settings are the rules of a world you host; they are read from
+                    // `server_settings.yml` when it starts.
+                    return vec![
+                        Row::Note(tr("visor.options.world.note.editable").plain()),
+                        Row::Note(tr("horizon.visor.world.note.file").plain()),
+                    ];
+                }
+                let mut rows: Vec<Row> = cells
+                    .chunks(2)
+                    .filter_map(|c| {
+                        let (a, b) = (cell(c[0]), c.get(1).copied().and_then(cell));
+                        match (a, b) {
+                            (Some(a), b) => Some(Row::Buttons(a, b)),
+                            (None, Some(b)) => Some(Row::Buttons(b, None)),
+                            (None, None) => None,
+                        }
+                    })
+                    .collect();
+                if id == horizon_vivecraft::pages::PageId::Main {
+                    // The credits of Visor and Vivecraft and the licenses their code comes under.
+                    rows.push(Row::Buttons(
+                        button(
+                            0.0,
+                            0.0,
+                            310.0,
+                            tr("vivecraft.credits.title"),
+                            Act::Push(Page::VrCredits),
+                        ),
+                        None,
+                    ));
+                }
+                rows
+            }
+            Page::VrRadial => {
+                use horizon_vivecraft::radial;
+                let alt = self.vr_radial_alt;
+                let items = radial::items(&s.vr, alt);
+                let count = (s.vr.int("vrRadialButtons").max(0) as usize).min(radial::SLOTS);
+                let slot = |i: usize| -> Option<Widget> {
+                    (i < count).then(|| {
+                        let name = &items[i];
+                        let label = if name.is_empty() {
+                            tr("vivecraft.gui.radialmenu.free")
+                        } else {
+                            tr(name)
+                        };
+                        button(
+                            0.0,
+                            0.0,
+                            150.0,
+                            Text::literal(format!("{}: ", i + 1)).append(label),
+                            Act::VrRadialSlot(i),
+                        )
+                    })
+                };
+                let set = if alt {
+                    "vivecraft.gui.radialmenu.mainset"
+                } else {
+                    "vivecraft.gui.radialmenu.alternateset"
+                };
+                let mut rows = vec![
+                    Row::Buttons(
+                        button(0.0, 0.0, 150.0, tr(set), Act::VrRadialSet),
+                        Some(button(
+                            0.0,
+                            0.0,
+                            150.0,
+                            tr("vivecraft.options.screen.radialsettings.button"),
+                            Act::Push(Page::Vr(horizon_vivecraft::pages::PageId::Radial)),
+                        )),
+                    ),
+                    Row::Buttons(
+                        option_widget(
+                            s,
+                            Opt::Vr(
+                                crate::vr_options::VrOpt::by_key("vrRadialButtons")
+                                    .expect("the radial button count option"),
+                            ),
+                            0.0,
+                            0.0,
+                            150.0,
+                        ),
+                        Some(button(
+                            0.0,
+                            0.0,
+                            150.0,
+                            tr("controls.reset"),
+                            Act::VrRadialReset,
+                        )),
+                    ),
+                ];
+                for pair in (0..count).step_by(2) {
+                    if let Some(a) = slot(pair) {
+                        rows.push(Row::Buttons(a, slot(pair + 1)));
+                    }
+                }
+                rows.push(Row::Note(tr("vivecraft.messages.radialmenubind.1").plain()));
+                if alt {
+                    rows.push(Row::Note(tr("vivecraft.messages.radialmenubind.2").plain()));
+                    rows.push(Row::Note(tr("vivecraft.messages.radialmenubind.3").plain()));
+                }
+                rows
+            }
+            Page::VrQuickCommands => {
+                let commands = horizon_vivecraft::radial::quick_commands(&s.vr);
+                let mut rows = vec![Row::Note(tr("vivecraft.gui.quickcommands.hint").plain())];
+                for pair in (0..commands.len()).step_by(2) {
+                    let cell = |i: usize| {
+                        let mut label = Text::literal(format!("{}: ", i + 1));
+                        if self.vr_quick == Some(i) {
+                            label.push(Text::literal(self.settings_search.value.clone()));
+                        } else {
+                            label.push(Text::literal(commands[i].clone()));
+                        }
+                        let mut w = button(0.0, 0.0, 150.0, label, Act::VrQuickSelect(i));
+                        if self.vr_quick == Some(i)
+                            && let WKind::Button { active, .. } = &mut w.kind
+                        {
+                            *active = false;
+                        }
+                        w
+                    };
+                    rows.push(Row::Buttons(
+                        cell(pair),
+                        commands.get(pair + 1).map(|_| cell(pair + 1)),
+                    ));
+                }
+                rows.push(Row::Buttons(
+                    button(0.0, 0.0, 150.0, tr("controls.reset"), Act::VrQuickReset),
+                    None,
+                ));
+                rows
+            }
+            Page::VrCredits => vec![
+                Row::Header("vivecraft.credits.horizon"),
+                Row::Note("https://github.com/horizon-rust/horizon".into()),
+                Row::Header("vivecraft.credits.vivecraft"),
+                Row::Note("https://github.com/Vivecraft/VivecraftMod".into()),
+                Row::Header("vivecraft.credits.lgpl.1"),
+                Row::Header("vivecraft.credits.lgpl.2"),
+                Row::Header("visor.credits.visor"),
+                Row::Header("visor.credits.mpl"),
+                Row::Note("https://github.com/VisorModStudio/Visor".into()),
+                Row::Header("vivecraft.credits.openxr"),
+                Row::Note("https://github.com/KhronosGroup/OpenXR-SDK".into()),
+            ],
             Page::Mouse => pairs(MOUSE_OPTIONS),
             Page::Chat => pairs(&[
                 Opt::ChatVisibility,
@@ -4434,7 +4725,10 @@ impl OptionsUi {
         let mut rows = ListRows::default();
         let page = self.page();
         let cx = (w / 2.0).floor();
-        if matches!(page, Page::Video | Page::Controls | Page::KeyBinds) {
+        if matches!(
+            page,
+            Page::Video | Page::Controls | Page::KeyBinds | Page::VrQuickCommands
+        ) {
             self.settings_search.x = cx - 100.0;
             self.settings_search.y = 17.0;
         }
@@ -5584,7 +5878,10 @@ impl OptionsUi {
             }
             self.language_search = search;
         }
-        if matches!(self.page(), Page::Video | Page::Controls | Page::KeyBinds) {
+        if matches!(
+            self.page(),
+            Page::Video | Page::Controls | Page::KeyBinds | Page::VrQuickCommands
+        ) {
             let mut search = self.settings_search.clone();
             if self.focus == Some(FocusId::Search) {
                 search.focused = true;
@@ -5771,7 +6068,12 @@ impl OptionsUi {
         if !right && self.painting() && self.painter.press(x, y, drag) {
             return events;
         }
-        if !drag && matches!(self.page(), Page::Video | Page::Controls | Page::KeyBinds) {
+        if !drag
+            && matches!(
+                self.page(),
+                Page::Video | Page::Controls | Page::KeyBinds | Page::VrQuickCommands
+            )
+        {
             let search = &mut self.settings_search;
             search.focused = ui::hovered((x, y), search.x, search.y, search.width, search.height);
             if search.focused {
@@ -6042,6 +6344,19 @@ impl OptionsUi {
                                 s.keys.reset_all();
                             }
                             events.push(Event::Changed);
+                        }
+                        Act::VrRadialSet
+                        | Act::VrRadialSlot(_)
+                        | Act::VrRadialReset
+                        | Act::VrPreset(_)
+                        | Act::VrQuickSelect(_)
+                        | Act::VrQuickReset => {
+                            self.vr_edit_act(s, &act);
+                            events.push(Event::Changed);
+                        }
+                        Act::VrResetOrigin => horizon_client_input::headset::request_reset_origin(),
+                        Act::VrCalibrateHeight => {
+                            horizon_client_input::headset::request_calibrate_height()
                         }
                         Act::PadKey(action) => self.selected_pad_action = Some(action),
                         Act::ResetPadKey(action) => {
@@ -6612,6 +6927,10 @@ impl OptionsUi {
             return events;
         }
         let page = self.stack.pop().unwrap_or(Page::Main);
+        if page == Page::VrQuickCommands {
+            self.vr_quick_commit(s);
+            events.push(Event::Changed);
+        }
         self.scroll = 0.0;
         self.scrollbar_drag_y = None;
         self.dragging = None;
@@ -7254,6 +7573,19 @@ impl OptionsUi {
                                 s.keys.reset_all();
                             }
                             events.push(Event::Changed);
+                        }
+                        Act::VrRadialSet
+                        | Act::VrRadialSlot(_)
+                        | Act::VrRadialReset
+                        | Act::VrPreset(_)
+                        | Act::VrQuickSelect(_)
+                        | Act::VrQuickReset => {
+                            self.vr_edit_act(s, &act);
+                            events.push(Event::Changed);
+                        }
+                        Act::VrResetOrigin => horizon_client_input::headset::request_reset_origin(),
+                        Act::VrCalibrateHeight => {
+                            horizon_client_input::headset::request_calibrate_height()
                         }
                         Act::PadKey(action) => self.selected_pad_action = Some(action),
                         Act::ResetPadKey(action) => {

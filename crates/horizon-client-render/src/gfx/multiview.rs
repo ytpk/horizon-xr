@@ -255,7 +255,7 @@ impl Targets {
             depth: make(
                 "Quest stereo depth",
                 wgpu::TextureFormat::Depth32Float,
-                wgpu::TextureUsages::RENDER_ATTACHMENT,
+                wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
             )
             .create_view(&Default::default()),
         }
@@ -295,7 +295,7 @@ mod tests {
             super::super::terrain_shader(),
             super::super::entity_shader(),
             super::super::static_entity_shader(),
-            include_str!("../hdr_light.wgsl").to_owned() + include_str!("stars.wgsl"),
+            include_str!("stars.wgsl").to_owned(),
         ] {
             let source = shader(&source);
             let module = naga::front::wgsl::parse_str(&source)

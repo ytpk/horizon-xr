@@ -82,6 +82,8 @@ impl FreeList {
 /// One vertex buffer of the arena; only the newest page grows.
 struct Page {
     buffer: wgpu::Buffer,
+    /// The second vertex stream, with split streams (`Arena::set_split`).
+    attributes: Option<wgpu::Buffer>,
     /// Capacity in vertices.
     capacity: u64,
     free: FreeList,
@@ -109,6 +111,8 @@ const SHRINK_MIN_BYTES: u64 = 64 << 20;
 pub struct Arena {
     pages: Vec<Option<Page>>,
     stride: u64,
+    split: bool,
+    scratch: std::sync::Mutex<(Vec<u8>, Vec<u8>)>,
     page_limit: u64,
     initial_capacity: u64,
     usage: wgpu::BufferUsages,
@@ -195,6 +199,8 @@ impl Arena {
         Self {
             pages: Vec::new(),
             stride,
+            split: false,
+            scratch: Default::default(),
             page_limit,
             initial_capacity: capacity,
             usage,
@@ -213,15 +219,23 @@ impl Arena {
         device: &wgpu::Device,
         capacity: u64,
         spill: bool,
-    ) -> Option<(wgpu::Buffer, bool)> {
+    ) -> Option<(wgpu::Buffer, Option<wgpu::Buffer>, bool)> {
         let usage = self.usage | wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::COPY_SRC;
+        let (split, physical_stride) = (self.split, self.physical_stride());
+        let make = |usage| {
+            let buffer = try_create(device, capacity * physical_stride, usage)?;
+            let attributes = if split {
+                Some(try_create(device, capacity * 8, usage)?)
+            } else {
+                None
+            };
+            Some((buffer, attributes))
+        };
         #[cfg(test)]
-        let local = (!self.video_memory_full)
-            .then(|| try_create(device, capacity * self.stride, usage))
-            .flatten();
+        let local = (!self.video_memory_full).then(|| make(usage)).flatten();
         #[cfg(not(test))]
-        let local = try_create(device, capacity * self.stride, usage);
-        let local = local.map(|buffer| (buffer, false));
+        let local = make(usage);
+        let local = local.map(|(buffer, attributes)| (buffer, attributes, false));
         local.or_else(|| {
             // Mappable buffers are placed in host-visible memory, which the
             // allocator takes from system memory once video memory is full.
@@ -232,19 +246,64 @@ impl Arena {
             {
                 return None;
             }
-            let buffer = try_create(
-                device,
-                capacity * self.stride,
-                usage | wgpu::BufferUsages::MAP_WRITE,
-            )?;
+            let (buffer, attributes) = make(usage | wgpu::BufferUsages::MAP_WRITE)?;
             if !std::mem::replace(&mut self.spilled, true) {
                 log::warn!(
                     "Horizon: video memory is full; more terrain is kept in system memory \
                      (lower the render distance if frames slow down)"
                 );
             }
-            Some((buffer, true))
+            Some((buffer, attributes, true))
         })
+    }
+    /// Splits each vertex into two streams (`vertex_streams`): the position and the rest.
+    /// Only for an empty arena of terrain vertices that no shader reads as storage.
+    pub fn set_split(&mut self, enabled: bool) {
+        assert!(self.pages.is_empty());
+        assert!(!enabled || self.stride == 24 && !self.usage.contains(wgpu::BufferUsages::STORAGE));
+        self.split = enabled;
+    }
+    pub fn split(&self) -> bool {
+        self.split
+    }
+    fn physical_stride(&self) -> u64 {
+        if self.split { 16 } else { self.stride }
+    }
+    /// The second stream of a page, up to its last range in use.
+    pub fn attribute_binding(&self, page: u32) -> Option<wgpu::BufferSlice<'_>> {
+        let p = self.pages[page as usize].as_ref()?;
+        let end = match p.free.0.last_key_value() {
+            Some((&start, &len)) if start + len == p.capacity => start,
+            _ => p.capacity,
+        };
+        Some(p.attributes.as_ref()?.slice(..end.max(GRAIN) * 8))
+    }
+    /// Records the upload of `bytes` (whole vertices) at `start`, into both streams when split.
+    pub fn upload(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        uploads: &mut super::upload::Uploads,
+        page: u32,
+        start: u64,
+        bytes: &[u8],
+    ) {
+        if let Some(attributes) = self.pages[page as usize]
+            .as_ref()
+            .unwrap()
+            .attributes
+            .as_ref()
+        {
+            let mut scratch = self
+                .scratch
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let (a, b) = &mut *scratch;
+            super::vertex_streams::split(bytes, a, b);
+            uploads.buffer(encoder, self.buffer(page), start * 16, a);
+            uploads.buffer(encoder, attributes, start * 8, b);
+        } else {
+            uploads.buffer(encoder, self.buffer(page), start * self.stride, bytes);
+        }
     }
     /// The rounded length a request of `vertices` occupies.
     pub fn span(vertices: u64) -> u64 {
@@ -268,7 +327,7 @@ impl Arena {
             _ => p.capacity,
         };
         // A page a draw names holds a range; wgpu refuses an empty slice.
-        p.buffer.slice(..end.max(GRAIN) * self.stride)
+        p.buffer.slice(..end.max(GRAIN) * self.physical_stride())
     }
     pub fn has_page(&self, page: u32) -> bool {
         self.pages.get(page as usize).is_some_and(Option::is_some)
@@ -330,7 +389,7 @@ impl Arena {
         .max(len)
         .min(self.page_limit);
         // A page just large enough when memory is short.
-        let ((buffer, host), capacity) = match self.create(device, capacity, true) {
+        let ((buffer, attributes, host), capacity) = match self.create(device, capacity, true) {
             Some(buffer) => (buffer, capacity),
             None if capacity > len => (self.create(device, len, true)?, len),
             None => return None,
@@ -338,6 +397,7 @@ impl Arena {
         let mut free = FreeList::new(capacity);
         let start = free.take(len).expect("a new page fits one section");
         let page = Page {
+            attributes,
             buffer,
             capacity,
             free,
@@ -448,11 +508,12 @@ impl Arena {
     /// nothing changes, when video memory has no room for it: in system memory it
     /// would slow every frame that draws it.
     pub fn open_page(&mut self, device: &wgpu::Device, capacity: u64) -> bool {
-        let Some((buffer, host)) = self.create(device, capacity, false) else {
+        let Some((buffer, attributes, host)) = self.create(device, capacity, false) else {
             return false;
         };
         let free = FreeList::new(capacity);
         self.pages.push(Some(Page {
+            attributes,
             buffer,
             capacity,
             free,
@@ -481,11 +542,26 @@ impl Arena {
         debug_assert_ne!(from.0, to.0);
         encoder.copy_buffer_to_buffer(
             self.buffer(from.0),
-            from.1 * self.stride,
+            from.1 * self.physical_stride(),
             self.buffer(to.0),
-            to.1 * self.stride,
-            vertices * self.stride,
+            to.1 * self.physical_stride(),
+            vertices * self.physical_stride(),
         );
+        if self.split {
+            let a = self.pages[from.0 as usize]
+                .as_ref()
+                .unwrap()
+                .attributes
+                .as_ref()
+                .unwrap();
+            let b = self.pages[to.0 as usize]
+                .as_ref()
+                .unwrap()
+                .attributes
+                .as_ref()
+                .unwrap();
+            encoder.copy_buffer_to_buffer(a, from.1 * 8, b, to.1 * 8, vertices * 8);
+        }
     }
     pub fn release(&mut self, page: u32, start: u64, vertices: u64) {
         let len = Self::span(vertices).min(self.page_limit);
@@ -547,12 +623,17 @@ impl Arena {
     ) -> bool {
         let capacity = capacity.next_multiple_of(GRAIN).min(self.page_limit);
         let spill = capacity * self.stride <= PAGE_BYTES;
-        let Some((buffer, host)) = self.create(device, capacity, spill) else {
+        let Some((buffer, attributes, host)) = self.create(device, capacity, spill) else {
             return false;
         };
+        let physical_stride = self.physical_stride();
         let old = self.pages[page].as_mut().expect("live arena page");
         // Copies recorded for the old buffer run before this one.
-        encoder.copy_buffer_to_buffer(&old.buffer, 0, &buffer, 0, old.capacity * self.stride);
+        encoder.copy_buffer_to_buffer(&old.buffer, 0, &buffer, 0, old.capacity * physical_stride);
+        if let (Some(from), Some(to)) = (&old.attributes, &attributes) {
+            encoder.copy_buffer_to_buffer(from, 0, to, 0, old.capacity * 8);
+        }
+        old.attributes = attributes;
         let previous = old.capacity;
         old.buffer = buffer;
         old.host = host;
@@ -571,6 +652,9 @@ impl Arena {
                 && let Some(p) = page.take()
             {
                 released.push(p.buffer);
+                if let Some(attributes) = p.attributes {
+                    released.push(attributes);
+                }
             }
         }
         if self.closing.is_some_and(|page| !self.has_page(page)) {
@@ -585,7 +669,11 @@ impl Arena {
     /// Drops every page; gives back their buffers, for a [`Graveyard`].
     pub fn clear(&mut self) -> Vec<wgpu::Buffer> {
         self.closing = None;
-        self.pages.drain(..).flatten().map(|p| p.buffer).collect()
+        self.pages
+            .drain(..)
+            .flatten()
+            .flat_map(|p| std::iter::once(p.buffer).chain(p.attributes))
+            .collect()
     }
 }
 
@@ -675,6 +763,65 @@ mod tests {
         expected[GRAVE_FRAMES - 1] = vec![1, 2];
         expected[GRAVE_FRAMES] = vec![3];
         assert_eq!(freed, expected);
+    }
+
+    #[test]
+    fn split_streams_survive_upload_growth_compaction_and_reclamation() {
+        let Some((device, queue)) = device() else {
+            return;
+        };
+        let mut arena = Arena::new(&device, 24, GRAIN, false);
+        arena.set_split(true);
+        arena.page_limit = 4 * GRAIN;
+        let mut uploads = super::super::upload::Uploads::new(&device);
+        let mut encoder = device.create_command_encoder(&Default::default());
+        let (page, start) = arena.alloc(&device, &mut encoder, GRAIN).unwrap();
+        let bytes: Vec<u8> = (0..GRAIN as usize * 24)
+            .map(|i| ((i * 37 + i / 13) & 255) as u8)
+            .collect();
+        arena.upload(&mut encoder, &mut uploads, page, start, &bytes);
+        // Grow after the upload was recorded: both streams must be copied in order.
+        let (same, _) = arena.alloc(&device, &mut encoder, GRAIN).unwrap();
+        assert_eq!(same, page);
+        let (other, dest) = arena.alloc(&device, &mut encoder, 4 * GRAIN).unwrap();
+        assert_ne!(other, page);
+        arena.copy(&mut encoder, (page, start), (other, dest), GRAIN);
+        uploads.finish(&encoder);
+        queue.submit([encoder.finish()]);
+        let (mut primary, mut secondary) = (Vec::new(), Vec::new());
+        super::super::vertex_streams::split(&bytes, &mut primary, &mut secondary);
+        for (expected, buffer, offset) in [
+            (&primary, arena.buffer(other), dest * 16),
+            (
+                &secondary,
+                arena.pages[other as usize]
+                    .as_ref()
+                    .unwrap()
+                    .attributes
+                    .as_ref()
+                    .unwrap(),
+                dest * 8,
+            ),
+        ] {
+            for i in [0, 4, 12, expected.len() - 4] {
+                assert_eq!(
+                    read(&device, &queue, buffer, offset + i as u64),
+                    u32::from_le_bytes(expected[i..i + 4].try_into().unwrap())
+                );
+            }
+        }
+        assert_eq!(arena.buffer(other).size(), 4 * GRAIN * 16);
+        assert_eq!(
+            arena.attribute_binding(other).unwrap().size(),
+            4 * GRAIN * 8
+        );
+        arena.release(other, dest, 4 * GRAIN);
+        assert_eq!(
+            arena.trim().len(),
+            2,
+            "retire both physical streams together"
+        );
+        assert_eq!(arena.clear().len(), 2);
     }
 
     fn device() -> Option<(wgpu::Device, wgpu::Queue)> {
@@ -1020,7 +1167,7 @@ mod tests {
                     targets: &[Some(wgpu::TextureFormat::Rgba8Unorm.into())],
                 }),
                 multiview_mask: None,
-                cache: None,
+                cache: crate::gfx::pipeline_cache::get(&device),
             })
         };
         let mut flat = flat::Flat::new(&device, &terrain_layout, 4 * GRAIN, 0, pipeline);
@@ -1405,6 +1552,7 @@ mod tests {
             let free = FreeList(BTreeMap::from([(used, capacity - used)]));
             let buffer = buffer.clone();
             arena.pages = vec![Some(Page {
+                attributes: None,
                 buffer,
                 capacity,
                 free,

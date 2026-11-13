@@ -1,14 +1,14 @@
 // RenderPipelines.STARS: positions only, coloured by the star brightness.
 struct Stars {
     // Projection * view * the sky's rotation (SkyRenderer.renderSunMoonAndStars).
-    clip_from_sky: mat4x4<f32>,
+    clip_from_sky: array<mat4x4<f32>, 2>,
     // starBrightness in every channel (RenderSystem.setShaderColor).
     color: vec4<f32>,
 }
 @group(0) @binding(0) var<uniform> stars: Stars;
 
 @vertex fn vs_stars(@location(0) position: vec3<f32>) -> @builtin(position) vec4<f32> {
-    return stars.clip_from_sky * vec4(position, 1.0);
+    return stars.clip_from_sky[0] * vec4(position, 1.0);
 }
 
 // The colour premultiplied, as the celestial blend (src alpha, one) would: the pipeline adds it.
@@ -16,7 +16,7 @@ struct Stars {
 // fully lifted wherever they show at all. Nothing else reads the frame's alpha.
 // At the far plane, for the sky drawn after solid terrain (gfx/late_sky.rs).
 @vertex fn vs_stars_late(@location(0) position: vec3<f32>) -> @builtin(position) vec4<f32> {
-    var clip = stars.clip_from_sky * vec4(position, 1.0);
+    var clip = stars.clip_from_sky[0] * vec4(position, 1.0);
     clip.z = 0.0;
     return clip;
 }

@@ -2,7 +2,7 @@
 use crate::weather::{Time, Vertex};
 
 pub(super) struct Weather {
-    pipeline: wgpu::RenderPipeline,
+    pub(super) pipeline: wgpu::RenderPipeline,
     /// The layouts of groups 0 (the entities') and 1 (the fall clock), for a native pack's
     /// weather pipeline.
     pub entity_layout: wgpu::BindGroupLayout,
@@ -19,6 +19,7 @@ impl Weather {
         format: wgpu::TextureFormat,
         entities: &wgpu::BindGroupLayout,
         shader: &wgpu::ShaderModule,
+        kept: &super::reuse::On<'_>,
     ) -> Self {
         let bindings = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("Weather time"),
@@ -40,7 +41,7 @@ impl Weather {
         });
         let attributes = wgpu::vertex_attr_array![0=>Float32x3,1=>Float32x2,2=>Float32x4,
             3=>Float32x4,4=>Uint32x4,5=>Unorm8x4,6=>Uint8x4,7=>Uint32];
-        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        let pipeline = kept.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("Weather"),
             layout: Some(&layout),
             vertex: wgpu::VertexState {
@@ -70,7 +71,7 @@ impl Weather {
                 })],
             }),
             multiview_mask: None,
-            cache: None,
+            cache: crate::gfx::pipeline_cache::get(device),
         });
         let uniform = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Weather time"),
@@ -304,7 +305,7 @@ pub(super) fn native_pipeline(
             })],
         }),
         multiview_mask: None,
-        cache: None,
+        cache: crate::gfx::pipeline_cache::get(device),
     });
     if let Some(e) = pollster::block_on(scope.pop()) {
         return Err(format!("{}: {e}", stage.file));
@@ -472,7 +473,7 @@ struct Case { animation: vec4<f32>, bases: vec4<u32>, time: vec4<f32>, uv: vec2<
             module: &shader,
             entry_point: Some("main"),
             compilation_options: Default::default(),
-            cache: None,
+            cache: crate::gfx::pipeline_cache::get(&device),
         });
         let input = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: None,

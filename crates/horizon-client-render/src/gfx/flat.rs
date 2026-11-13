@@ -171,12 +171,27 @@ pub fn wanted(adapter: &wgpu::Adapter, device: &wgpu::Device) -> bool {
     std::env::var("HORIZON_FLAT_DRAWS").as_deref() != Ok("0") && supported(adapter, device)
 }
 
+/// Flat draws are asked for in every frame: `HORIZON_FLAT_DRAWS=1`, or on a headset the VR
+/// setting `horizonFlatDraws` (Rendering page) while the variable is not `0`. Where indirect
+/// multi-draws are off (Quest's Adreno) this replaces one draw call per section by one per
+/// arena page, and leaves out the quads that face away from the eye.
+pub fn forced() -> bool {
+    match std::env::var("HORIZON_FLAT_DRAWS").as_deref() {
+        Ok("1") => true,
+        Ok(_) => false,
+        Err(_) => {
+            super::headset::installed()
+                && horizon_client_input::headset::settings().bool("horizonFlatDraws")
+        }
+    }
+}
+
 /// Whether frames without a shader pack's terrain draw flat: where the backend
 /// emulates multi-draw (Metal, past `MIN_SECTIONS`), on Intel Gen11/Gen12's Vulkan
 /// driver, on Adreno's Vulkan, or with `HORIZON_FLAT_DRAWS=1`. Elsewhere per-section
 /// draws stay.
 pub fn for_vanilla(info: &wgpu::AdapterInfo) -> bool {
-    std::env::var("HORIZON_FLAT_DRAWS").as_deref() == Ok("1")
+    forced()
         || info.backend == wgpu::Backend::Metal
         || is_broken_intel_vulkan(info)
         || is_powervr_vulkan(info)
@@ -419,7 +434,7 @@ impl Flat {
                 module: &module,
                 entry_point: Some(entry),
                 compilation_options: Default::default(),
-                cache: None,
+                cache: crate::gfx::pipeline_cache::get(device),
             })
         };
         let flatten = compute_pipeline(&compute_layout, "flatten");
@@ -1195,7 +1210,7 @@ mod tests {
                 module: &module,
                 entry_point: Some(entry),
                 compilation_options: Default::default(),
-                cache: None,
+                cache: crate::gfx::pipeline_cache::get(&device),
             })
         };
         let (flatten, flatten_seen) = (pipeline("flatten"), pipeline("flatten_seen"));

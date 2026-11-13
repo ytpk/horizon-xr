@@ -1049,6 +1049,8 @@ mod initial_history_tests {
             celestial: &[],
             stars: None,
             hand: &[],
+            hand_gui_quads: 0,
+            overlays: [None; horizon_client_input::headset::OVERLAYS],
             hand_fov_degrees: 70.0,
             screen: &[],
             pack: Default::default(),

@@ -63,6 +63,7 @@ fn columns_loaded_past_the_render_distance_mesh_when_they_come_in_range() {
     let facts = BlockFacts::load(&root, assets.registry).unwrap();
     let visibility = models::load_visibility(&root, assets.registry).unwrap();
     let context = Arc::new(WorkerContext {
+        opaque_water: false,
         tables: Arc::new(MeshTables::new(&assets, &render, &facts, visibility).unwrap()),
         light: Arc::new(LightTables::load(&root, assets.registry, &facts).unwrap()),
         biomes: Arc::new(Biomes::load(&root).unwrap()),
@@ -148,6 +149,7 @@ fn relit_columns_keep_every_mesh_current() {
     let facts = BlockFacts::load(&root, assets.registry).unwrap();
     let visibility = models::load_visibility(&root, assets.registry).unwrap();
     let context = Arc::new(WorkerContext {
+        opaque_water: false,
         tables: Arc::new(MeshTables::new(&assets, &render, &facts, visibility).unwrap()),
         light: Arc::new(LightTables::load(&root, assets.registry, &facts).unwrap()),
         biomes: Arc::new(Biomes::load(&root).unwrap()),
@@ -222,6 +224,7 @@ fn relit_columns_keep_every_mesh_current() {
             blend_radius: 2,
             smooth_lighting: true,
             cutout_leaves: true,
+            opaque_water: false,
             translucent_layers: &[],
             leaf_culling: LeafCullingMode::Off,
             assets: &context.assets,

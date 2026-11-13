@@ -661,6 +661,9 @@ impl H {
                 Some(i as f32 / (LOD_STEPS.len() - 1) as f32)
             }
             H::Workers => Some(g.workers as f32 / max_workers() as f32),
+            H::ResolutionScale if crate::gfx::headset::installed() => {
+                crate::vr_options::VrOpt::by_key("renderScaleFactor").and_then(|o| o.slider(s))
+            }
             H::ResolutionScale => Some((g.resolution_scale as f32 - 25.0) / 175.0),
             // Auto, then 10..480 by 10.
             H::HdrPaperWhite => Some(g.hdr_paper_white as f32 / 480.0),
@@ -744,6 +747,15 @@ impl H {
                 ),
                 n => labelled("Worker Threads", n),
             },
+            H::ResolutionScale if crate::gfx::headset::installed() => labelled(
+                "Resolution Scale",
+                format!(
+                    "{}%",
+                    (horizon_vivecraft::settings::render_scale(s.vr.float("renderScaleFactor"))
+                        * 100.0)
+                        .round() as u32
+                ),
+            ),
             H::ResolutionScale => labelled("Resolution Scale", format!("{}%", g.resolution_scale)),
             H::Antialiasing => labelled(
                 "Anti-aliasing",
@@ -807,6 +819,12 @@ impl H {
         }
     }
     fn set_slider(self, s: &mut Settings, v: f32) {
+        if matches!(self, H::ResolutionScale) && crate::gfx::headset::installed() {
+            if let Some(o) = crate::vr_options::VrOpt::by_key("renderScaleFactor") {
+                o.set_slider(s, v);
+            }
+            return;
+        }
         let g = &mut s.horizon;
         match self {
             H::ChunkUpdates => g.chunk_updates = (v * 64.0).round() as u32,
@@ -1464,6 +1482,10 @@ impl GraphicsUi {
             return;
         };
         s.horizon = b.horizon.clone();
+        if crate::gfx::headset::installed() {
+            std::sync::Arc::make_mut(&mut s.vr)
+                .set_float("renderScaleFactor", b.vr.float("renderScaleFactor"));
+        }
         s.render_distance = b.render_distance;
         s.simulation_distance = b.simulation_distance;
         s.gamma = b.gamma;

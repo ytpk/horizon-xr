@@ -44,7 +44,7 @@ pub fn star_triangles() -> Vec<[f32; 3]> {
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct Uniform {
-    clip_from_sky: [[f32; 4]; 4],
+    clip_from_sky: [[[f32; 4]; 4]; 2],
     color: [f32; 4],
 }
 
@@ -109,7 +109,7 @@ fn with_descriptor<R>(
 }
 
 pub(super) struct Stars {
-    pipeline: wgpu::RenderPipeline,
+    pub(super) pipeline: wgpu::RenderPipeline,
     layout: wgpu::PipelineLayout,
     shader: wgpu::ShaderModule,
     group: wgpu::BindGroup,
@@ -119,7 +119,11 @@ pub(super) struct Stars {
 }
 
 impl Stars {
-    pub(super) fn new(device: &wgpu::Device, format: wgpu::TextureFormat) -> Self {
+    pub(super) fn new(
+        device: &wgpu::Device,
+        format: wgpu::TextureFormat,
+        kept: &super::reuse::On<'_>,
+    ) -> Self {
         let triangles = star_triangles();
         let vertices = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("Stars vertex buffer"),
@@ -153,7 +157,7 @@ impl Stars {
                 resource: uniform.as_entire_binding(),
             }],
         });
-        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        let shader = kept.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Stars shader"),
             source: wgpu::ShaderSource::Wgsl(include_str!("stars.wgsl").into()),
         });
@@ -165,7 +169,7 @@ impl Stars {
         let pipeline = with_descriptor(
             (&pipeline_layout, &shader, format),
             ("Stars", "vs_stars", wgpu::CompareFunction::Always),
-            |descriptor| device.create_render_pipeline(descriptor),
+            |descriptor| kept.create_render_pipeline(descriptor),
         );
         Self {
             pipeline,
@@ -184,12 +188,12 @@ impl Stars {
         &self,
         uploads: &mut super::upload::Uploads,
         encoder: &mut wgpu::CommandEncoder,
-        clip_from_sky: Mat4,
+        clip_from_sky: [Mat4; 2],
         brightness: f32,
     ) {
         let b = brightness.clamp(0.0, 1.0);
         let uniform = Uniform {
-            clip_from_sky: clip_from_sky.to_cols_array_2d(),
+            clip_from_sky: clip_from_sky.map(|m| m.to_cols_array_2d()),
             color: [b; 4],
         };
         uploads.buffer(encoder, &self.uniform, 0, bytemuck::bytes_of(&uniform));

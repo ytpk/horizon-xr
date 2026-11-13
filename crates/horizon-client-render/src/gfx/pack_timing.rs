@@ -43,7 +43,15 @@ pub struct PassTiming {
     /// `mark`'s pipeline, for the target format it was made for.
     marker: Option<(wgpu::TextureFormat, wgpu::RenderPipeline)>,
     reports: usize,
+    /// The section being timed inside a pass (`section`), and whether the device can stamp inside
+    /// passes at all.
+    open: Option<u32>,
+    inside: bool,
 }
+
+/// A section's name starts with this: it lies inside a pass that is timed as a whole, so it is
+/// listed beside it and not after it.
+pub const NESTED: char = '\u{b7}';
 
 impl PassTiming {
     /// `None` when the device can't time passes.
@@ -81,6 +89,10 @@ impl PassTiming {
             log: Self::logging(),
             marker: None,
             reports: 0,
+            open: None,
+            inside: device
+                .features()
+                .contains(wgpu::Features::TIMESTAMP_QUERY_INSIDE_PASSES),
         })
     }
 
@@ -126,6 +138,26 @@ impl PassTiming {
         if matches!(self.stage, Stage::Idle) {
             self.names.clear();
             self.stage = Stage::Recording;
+        }
+        self.open = None;
+    }
+
+    /// Inside a render pass of a timed frame: ends the section running there (if any) and
+    /// starts one called `name`, so one pass's GPU time is split by what it draws (the world pass
+    /// into sky and solid chunks, entities, translucent chunks). Nothing on a device that
+    /// cannot stamp inside passes. Pass `None` to only end the running section.
+    pub fn section(&mut self, pass: &mut wgpu::RenderPass<'_>, name: Option<&str>) {
+        if !self.inside || !self.recording() {
+            return;
+        }
+        if let Some(i) = self.open.take() {
+            pass.write_timestamp(&self.queries, 2 * i + 1);
+        }
+        if let Some(name) = name
+            && let Some(i) = self.push(&format!("{NESTED} {name}"))
+        {
+            pass.write_timestamp(&self.queries, 2 * i);
+            self.open = Some(i);
         }
     }
 
@@ -224,7 +256,8 @@ impl PassTiming {
             .collect();
         drop(data);
         self.read.unmap();
-        let times = pass_times(&stamps, self.period_ns);
+        let nested: Vec<bool> = self.names.iter().map(|n| n.starts_with(NESTED)).collect();
+        let times = pass_times(&stamps, self.period_ns, &nested);
         for (name, ms) in self.names.iter().zip(times) {
             let Some(ms) = ms.filter(|_| !name.is_empty()) else {
                 continue;
@@ -311,15 +344,20 @@ fn compute_stamps(queries: &wgpu::QuerySet, i: u32) -> wgpu::ComputePassTimestam
 /// Each pass's time in milliseconds from its (beginning, end) timestamps, `None` for a pass
 /// the GPU left unstamped. Passes overlap on tiled GPUs (a pass begins before the one before it
 /// ends): a pass costs the time from the later of its beginning and the previous pass's end.
-fn pass_times(stamps: &[u64], period_ns: f32) -> Vec<Option<f32>> {
+fn pass_times(stamps: &[u64], period_ns: f32, nested: &[bool]) -> Vec<Option<f32>> {
     let mut previous_end = 0;
     stamps
         .as_chunks::<2>()
         .0
         .iter()
-        .map(|&[begin, end]| {
+        .enumerate()
+        .map(|(i, &[begin, end])| {
             if begin == 0 || end < begin {
                 return None;
+            }
+            // A section inside a pass costs what it spans, and leaves the passes' order alone.
+            if nested.get(i).copied().unwrap_or(false) {
+                return Some((end - begin) as f32 * period_ns / 1e6);
             }
             let from = begin.max(previous_end).min(end);
             previous_end = end;
@@ -336,6 +374,21 @@ mod tests {
     fn overlapping_passes_cost_from_the_previous_end() {
         // Pass 2 begins before pass 1 ends; pass 3 was never stamped.
         let stamps = [1_000_000, 3_000_000, 2_000_000, 5_000_000, 0, 0];
-        assert_eq!(pass_times(&stamps, 1.0), [Some(2.0), Some(2.0), None]);
+        assert_eq!(
+            pass_times(&stamps, 1.0, &[false; 3]),
+            [Some(2.0), Some(2.0), None]
+        );
+    }
+
+    #[test]
+    fn a_section_inside_a_pass_costs_its_own_span_and_does_not_move_the_next_pass() {
+        // Pass 1 spans 1..9 ms, its two sections 1..4 and 4..9; pass 2 spans 9..12.
+        let stamps = [
+            1_000_000, 9_000_000, 1_000_000, 4_000_000, 4_000_000, 9_000_000, 9_000_000, 12_000_000,
+        ];
+        assert_eq!(
+            pass_times(&stamps, 1.0, &[false, true, true, false]),
+            [Some(8.0), Some(3.0), Some(5.0), Some(3.0)]
+        );
     }
 }
