@@ -43,6 +43,20 @@ fn files(dir: &Path) -> Result<Vec<PathBuf>, String> {
 // research-lock pins both jars and every accepted client manifest (which pins its libraries).
 // artifacts::verify/client_libraries check those dependencies before any bundle is used.
 pub(crate) fn key(root: &Path) -> Result<String, String> {
+    // A folder that is not a source checkout (the Quest's app data) ships only the sources the
+    // preparer names, so the key cannot be derived: the bundle's own manifest holds it. `valid`
+    // still hashes every class against that manifest.
+    if !root
+        .join("crates/horizon-prepare/src/exporters.rs")
+        .is_file()
+    {
+        if let Some(key) = read_json(&root.join("exporters/manifest.json"))
+            .ok()
+            .and_then(|m| m.get("key").and_then(Value::as_str).map(str::to_owned))
+        {
+            return Ok(key);
+        }
+    }
     let mut hash = sha2::Sha256::new();
     hash.update(SETTINGS);
     // The launcher's bundled preparer may differ from the selected game's. Hash that
@@ -221,6 +235,37 @@ mod tests {
         assert!(!available(&root));
         fs::remove_file(&class).unwrap();
         assert!(!available(&root));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_root_without_a_checkout_uses_the_bundles_own_key() {
+        // The Quest's app data: the manifest, the classes and only some of the sources.
+        let root = std::env::temp_dir().join(format!("prepare-bundle-bare-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        mkdir(&root.join(PARITY)).unwrap();
+        write(
+            &root.join(PARITY).join("VanillaHeightmapOracle.java"),
+            b"one of many",
+        )
+        .unwrap();
+        write(&root.join("research-lock.json"), b"pins").unwrap();
+        let bundle = root.join("exporters");
+        let class = bundle.join("server/dev/horizonlab/parity/Helper.class");
+        mkdir(class.parent().unwrap()).unwrap();
+        write(&class, b"compiled").unwrap();
+        write_json(
+            &bundle.join("manifest.json"),
+            &Value::Object(vec![
+                ("key".into(), Value::Str("key-of-the-full-checkout".into())),
+                ("classes".into(), outputs(&bundle).unwrap()),
+            ]),
+        )
+        .unwrap();
+        assert_eq!(key(&root).unwrap(), "key-of-the-full-checkout");
+        assert!(available(&root));
+        write(&class, b"damaged").unwrap();
+        assert!(!available(&root), "every class is still hashed");
         fs::remove_dir_all(root).unwrap();
     }
 }
