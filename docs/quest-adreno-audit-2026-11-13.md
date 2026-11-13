@@ -230,7 +230,8 @@ CPU-стоимость aggressive выше, результат не перено
 `pr_ready.py --base origin/main --quick` также запущен. Общая проверка остаётся
 красной: проверка addresses находит существующие endpoints в неизменённых
 `options_ui.rs`, `game/quest_room.rs`, `horizon-quest-launcher/src/news.rs`, а
-workspace-default сборка упирается в отсутствующий Linux `alsa.pc`. Это не
+workspace-default сборка упирается в отсутствующий Linux `alsa.pc`; отдельные
+launcher checks блокирует отсутствующий `fontconfig.pc`. Это не
 заменено утверждением о пройденной сборке всего workspace с default features.
 
 Для воспроизведения:
