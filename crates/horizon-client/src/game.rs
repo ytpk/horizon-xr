@@ -22425,14 +22425,20 @@ fn before_loading(options: &Options, vanilla_root: &std::path::Path) -> Result<S
     // Bedrock's touch buttons, fetched from Mojang once (bedrock_touch.rs) where the resources
     // came without them (prepared on a computer, or no network then): drawn from the next start,
     // or this one's if they come before its GUI atlas.
+    // A headset's player has controllers, not touch buttons: nothing to fetch there.
+    let headset = horizon_client::gfx::headset::installed();
     #[cfg(target_os = "android")]
     if options.execution_role.is_client()
+        && !headset
         && vanilla_root.join("horizon-resources.json").is_file()
         && let Err(e) = horizon_client::android_control_assets::fetch(vanilla_root, |_, _| {})
     {
         log::warn!("Original Android control textures: {e}");
     }
-    if options.execution_role.is_client() && !horizon_client::bedrock_touch::present(vanilla_root) {
+    if options.execution_role.is_client()
+        && !headset
+        && !horizon_client::bedrock_touch::present(vanilla_root)
+    {
         let root = vanilla_root.to_path_buf();
         let _ = std::thread::Builder::new()
             .name("bedrock touch".into())
