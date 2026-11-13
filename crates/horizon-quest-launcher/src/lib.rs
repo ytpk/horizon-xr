@@ -142,6 +142,19 @@ pub struct Runtime<'a> {
     pub jre: &'a Path,
 }
 
+/// The runtime as the preparer's Java: `horizon-jvm` as `java`, the runtime's folder in the
+/// environment of every command it starts.
+fn supplied_runtime(runtime: &Runtime) -> horizon_prepare::java::Supplied {
+    horizon_prepare::java::Supplied {
+        java: runtime.launcher.to_path_buf(),
+        javac: runtime.launcher.with_file_name("javac"),
+        env: vec![(
+            "HORIZON_JVM_HOME".to_string(),
+            runtime.jre.to_string_lossy().into_owned(),
+        )],
+    }
+}
+
 /// Prepares the downloaded files into `output` with the bundled exporters and runtime.
 pub fn prepare(
     root: &Path,
@@ -158,12 +171,10 @@ pub fn prepare(
     let version = lock["minecraft"]["version"]
         .as_str()
         .ok_or("research-lock.json names no version")?;
-    // The preparer starts its JVMs from these, in this process's environment.
-    // SAFETY: set before the preparer's threads start; nothing else reads them concurrently.
-    unsafe {
-        std::env::set_var("HORIZON_JAVA_EXE", runtime.launcher);
-        std::env::set_var("HORIZON_JVM_HOME", runtime.jre);
-    }
+    // The preparer starts its JVMs from the supplied runtime (Starling's `java::supply`): the
+    // `horizon-jvm` program, which finds the bundled runtime through HORIZON_JVM_HOME. It has no
+    // javac; the exporters are precompiled. Without this the preparer finds no Java on a headset.
+    horizon_prepare::java::supply(supplied_runtime(runtime));
     let options = horizon_prepare::Options {
         root: root.to_path_buf(),
         import: true,
@@ -244,6 +255,31 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_quests_runtime_is_found_without_java_home_or_path() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = scratch("supplied");
+        let launcher = dir.join("libhorizon_jvm.so");
+        fs::write(
+            &launcher,
+            "#!/bin/sh\necho 'openjdk version \"25.0.5\" 2026-01-20' >&2\necho \"home=$HORIZON_JVM_HOME\" >&2\n",
+        )
+        .unwrap();
+        fs::set_permissions(&launcher, fs::Permissions::from_mode(0o755)).unwrap();
+        let jre = dir.join("jre");
+        let runtime = Runtime {
+            launcher: &launcher,
+            jre: &jre,
+        };
+        assert!(horizon_prepare::java::supply(supplied_runtime(&runtime)));
+        // No JAVA_HOME is consulted before it and the PATH names no Java: the supplied runtime
+        // answers `-version`, so it is accepted as Java 25 with no compiler.
+        let found = horizon_prepare::java::find_runtime(25, &[]).unwrap();
+        assert_eq!(found.java, launcher);
+        fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
