@@ -341,6 +341,22 @@ fn copy_indexed(
             return Err(format!("{name} is missing from the asset index"));
         }
     }
+    // A download of chosen languages (the Quest's) holds only those `lang` objects: the others
+    // are left out, not an error; the game falls back to `en_us` for them. Everything else
+    // stays all or nothing.
+    let mut absent = 0;
+    if label == "Language" {
+        let before = wanted.len();
+        wanted.retain(|(name, info)| {
+            *name == "pack.mcmeta"
+                || info
+                    .get("hash")
+                    .and_then(Value::as_str)
+                    .and_then(|hash| object_path(&assets.store, hash).ok())
+                    .is_none_or(|object| object.is_file())
+        });
+        absent = before - wanted.len();
+    }
     let mut total: u64 = 0;
     let mut copies = Vec::with_capacity(wanted.len());
     for (name, info) in &wanted {
@@ -393,6 +409,11 @@ fn copy_indexed(
         wanted.len(),
         total as f64 / 1e6
     ));
+    if absent > 0 {
+        log(&format!(
+            "{absent} languages were not downloaded and are left out"
+        ));
+    }
     Ok(assets.target.clone())
 }
 
@@ -574,6 +595,40 @@ mod tests {
         // Each entry point copies its own set: the sounds stay where they belong.
         assert!(!target.join("assets/minecraft/sounds.json").exists());
         assert_eq!(*lines.borrow(), ["Language assets ready: 2 files, 0.0 MB"]);
+    }
+
+    #[test]
+    fn languages_missing_from_the_store_are_left_out_not_an_error() {
+        // A store holding only the chosen languages (a download of `fr_fr` alone).
+        let f = Fixture::with_extras(
+            "some-languages",
+            &[],
+            &[
+                (
+                    "pack.mcmeta",
+                    b"{\"language\": {\"fr_fr\": {}, \"de_de\": {}}}",
+                ),
+                ("minecraft/lang/de_de.json", b"{\"german\": 1}"),
+            ],
+        );
+        let german = sha1_hex(b"{\"german\": 1}");
+        fs::remove_file(
+            f.minecraft
+                .join("assets/objects")
+                .join(&german[..2])
+                .join(&german),
+        )
+        .unwrap();
+        let lines = std::cell::RefCell::new(Vec::new());
+        let target = languages(&f.root, Some(&f.minecraft), &|l| {
+            lines.borrow_mut().push(l.to_string())
+        })
+        .unwrap();
+        assert!(target.join("assets/pack.mcmeta").is_file());
+        assert!(target.join("assets/minecraft/lang/fr_fr.json").is_file());
+        assert!(!target.join("assets/minecraft/lang/de_de.json").exists());
+        assert_eq!(lines.borrow().len(), 2);
+        assert!(lines.borrow()[1].starts_with("1 languages were not downloaded"));
     }
 
     /// `--assets-dir` (and `--version-json`) alone name the store: nothing comes from the
