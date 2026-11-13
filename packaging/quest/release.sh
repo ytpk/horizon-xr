@@ -100,6 +100,12 @@ else
     echo "SKIP_TESTS=1: tests were not run"
 fi
 
+step "Building the exporter bundle"
+# Always rebuilt: an old $out/assets/horizon-bundle.zip lacks exporters added since, and the
+# headset's prepare then fails. compile-exporters is cached by its sources' key, so it is quick.
+OUT=$out "$here/build_bundle.sh" || die "exporter bundle (needs the pinned jars imported: horizon-prepare --prepare)"
+[ -f "$out/assets/horizon-jre.zip" ] || OUT=$out "$here/build_jre.sh" || die "Java runtime"
+
 step "Building the APK"
 log=$dist/$name.build.log
 # Prismarine: leave the variable unset so horizon-account builds in its own default. NO_MSA:
