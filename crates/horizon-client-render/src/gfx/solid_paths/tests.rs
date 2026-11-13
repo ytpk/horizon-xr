@@ -723,15 +723,16 @@ fn lean_opaque_serves_frames_with_fades() {
 }
 
 /// The headset's multiview swap needs a stereo variant of every pipeline the Adreno paths build
-/// (they go through `try_create_render_pipeline`): without one the world never leaves the
-/// separate eye passes.
+/// (they go through `try_create_render_pipeline`) once the renderer is built (`Reuse::finish`
+/// lets go of what the build did not ask for: it dropped these variants): without one the world
+/// never leaves the separate eye passes. Solid paths, both lean settings, and the late sky.
 #[test]
 fn every_adreno_path_pipeline_has_a_multiview_variant() {
     let Some(gpu) = Gpu::open(true) else {
         eprintln!("no GPU adapter with MULTIVIEW: skipped");
         return;
     };
-    gpu.reuse.begin();
+    let generation = gpu.reuse.begin();
     let kept = gpu.reuse.stereo_for_test(&gpu.device);
     let source = terrain_source::terrain_shader(false);
     let shader = kept.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -752,12 +753,14 @@ fn every_adreno_path_pipeline_has_a_multiview_variant() {
             attributes: &instance_attributes,
         }),
     ];
+    let constants = [("SPRITE_ARRAYS", 1.0), ("SPRITE_SPLIT", 2048.0)];
     let terrain = TerrainModule {
         kept: &kept,
         shader: &shader,
         format: FORMAT,
-        constants: &[("SPRITE_ARRAYS", 1.0), ("SPRITE_SPLIT", 2048.0)],
+        constants: &constants,
     };
+    let mut built = Vec::new();
     for lean in [
         Lean::default(),
         Lean {
@@ -765,7 +768,7 @@ fn every_adreno_path_pipeline_has_a_multiview_variant() {
             cutout: true,
         },
     ] {
-        let mut paths = SolidPaths::new(
+        let paths = SolidPaths::new(
             &terrain,
             &gpu.bindings,
             &gpu.layout,
@@ -774,11 +777,79 @@ fn every_adreno_path_pipeline_has_a_multiview_variant() {
             lean,
         )
         .expect("the test GPU takes these pipelines");
+        built.push((lean, paths));
+    }
+    // The late sky, as `Renderer::new` builds it.
+    let sunrise_attributes = wgpu::vertex_attr_array![0=>Float32x4, 1=>Float32];
+    let sunrise_buffers = [Some(wgpu::VertexBufferLayout {
+        array_stride: 20,
+        step_mode: wgpu::VertexStepMode::Vertex,
+        attributes: &sunrise_attributes,
+    })];
+    let blend = wgpu::BlendState::ALPHA_BLENDING;
+    let entity = kept.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("Late sky entities"),
+        source: wgpu::ShaderSource::Wgsl(crate::gfx::entity_shader().into()),
+    });
+    let entity_attributes = wgpu::vertex_attr_array![0=>Float32x3,1=>Float32x2,2=>Uint32,3=>Unorm8x4,4=>Uint8x4,5=>Snorm8x4,6=>Float32x2];
+    let entity_buffers = [Some(wgpu::VertexBufferLayout {
+        array_stride: std::mem::size_of::<crate::mesher::Vertex>() as u64,
+        step_mode: wgpu::VertexStepMode::Vertex,
+        attributes: &entity_attributes,
+    })];
+    let targets = [Some(wgpu::ColorTargetState {
+        format: FORMAT,
+        blend: Some(blend),
+        write_mask: wgpu::ColorWrites::ALL,
+    })];
+    let celestial = wgpu::RenderPipelineDescriptor {
+        label: Some("Celestial bodies"),
+        layout: None,
+        vertex: wgpu::VertexState {
+            module: &entity,
+            entry_point: Some("vs_entity"),
+            compilation_options: Default::default(),
+            buffers: &entity_buffers,
+        },
+        primitive: Default::default(),
+        depth_stencil: Some(wgpu::DepthStencilState {
+            format: wgpu::TextureFormat::Depth32Float,
+            depth_write_enabled: Some(false),
+            depth_compare: Some(wgpu::CompareFunction::Always),
+            stencil: Default::default(),
+            bias: Default::default(),
+        }),
+        multisample: Default::default(),
+        fragment: Some(wgpu::FragmentState {
+            module: &entity,
+            entry_point: Some("fs_sky_celestial"),
+            compilation_options: Default::default(),
+            targets: &targets,
+        }),
+        multiview_mask: None,
+        cache: None,
+    };
+    let stars = crate::gfx::stars::Stars::new(&gpu.device, FORMAT, &kept);
+    let mut late = crate::gfx::late_sky::LateSky::new(
+        &terrain,
+        &gpu.layout,
+        (&sunrise_buffers, blend),
+        &celestial,
+        &stars,
+    )
+    .expect("the test GPU takes these pipelines");
+    gpu.reuse.finish(generation);
+    for (lean, paths) in &mut built {
         let all = paths.pipelines_mut();
         assert!(!all.is_empty());
         assert!(
             gpu.reuse.alternates(all.iter().map(|p| &**p)).is_some(),
-            "a pipeline of the Adreno paths has no multiview variant ({lean:?})"
+            "a pipeline of the solid paths has no multiview variant ({lean:?})"
         );
     }
+    let sky = late.pipelines_mut();
+    assert!(
+        gpu.reuse.alternates(sky.iter().map(|p| &**p)).is_some(),
+        "a pipeline of the late sky has no multiview variant"
+    );
 }

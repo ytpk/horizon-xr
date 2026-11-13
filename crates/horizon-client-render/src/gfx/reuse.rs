@@ -102,7 +102,9 @@ impl Reuse {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .retain(|k, _| shaders.contains(k));
-        let pipelines: Vec<_> = self
+        // The pipelines a device may refuse (`try_create_render_pipeline`, the Adreno paths'
+        // and the late sky) are kept apart, and their variants live as long as they do.
+        let mut pipelines: Vec<_> = self
             .render
             .map
             .lock()
@@ -110,6 +112,14 @@ impl Reuse {
             .values()
             .map(|(v, _)| v.clone())
             .collect();
+        pipelines.extend(
+            self.tried
+                .map
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .values()
+                .filter_map(|(v, _)| v.clone()),
+        );
         self.stereo_pipelines
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
@@ -263,6 +273,17 @@ impl On<'_> {
                         variants.insert(pipeline.clone(), variant.clone());
                         variants.insert(variant, pipeline.clone());
                     }
+                } else {
+                    // Said, not skipped: the pipeline keeps the world out of multiview.
+                    let lacking = match (vertex, descriptor.fragment.is_some(), fragment) {
+                        (None, true, None) => "vertex and fragment",
+                        (None, ..) => "vertex",
+                        _ => "fragment",
+                    };
+                    log::warn!(
+                        "Quest multiview: pipeline {:?} has no stereo copy of its {lacking} shader module",
+                        descriptor.label
+                    );
                 }
             }
         }
