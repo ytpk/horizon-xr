@@ -5,10 +5,9 @@
 //! (`versions/<v>/<v>.jar`, `libraries/…`, `assets/indexes|objects`) that horizon-prepare reads.
 use serde_json::Value;
 use sha1::{Digest, Sha1};
-use std::io::{Read, Write};
+use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 /// What `research-lock.json` pins about the game files.
@@ -88,14 +87,6 @@ pub struct Installed {
     pub server_jar: Option<PathBuf>,
 }
 
-/// One file to fetch: where from, where to, and what it must hash to.
-struct Item {
-    url: String,
-    path: PathBuf,
-    sha1: String,
-    size: u64,
-}
-
 /// One agent for every download of the run: its connections stay open and are used again, so
 /// the thousands of small asset files go over the download workers' few connections instead of
 /// a connection and a TLS handshake each, which a phone's network (and its router) does not
@@ -118,26 +109,6 @@ pub(crate) fn agent() -> ureq::Agent {
 pub(crate) fn sha1_hex(data: &[u8]) -> String {
     let digest = Sha1::digest(data);
     digest.iter().map(|b| format!("{b:02x}")).collect()
-}
-
-fn sha1_file(path: &Path) -> Option<String> {
-    let mut file = std::fs::File::open(path).ok()?;
-    let mut hasher = Sha1::new();
-    let mut buf = vec![0; 1 << 16];
-    loop {
-        let n = file.read(&mut buf).ok()?;
-        if n == 0 {
-            break;
-        }
-        hasher.update(&buf[..n]);
-    }
-    Some(
-        hasher
-            .finalize()
-            .iter()
-            .map(|b| format!("{b:02x}"))
-            .collect(),
-    )
 }
 
 /// How a try at a download failed: worth another (the network dropped for a moment, as a
@@ -174,76 +145,44 @@ pub(crate) fn retrying<T>(mut attempt: impl FnMut() -> Result<T, Failure>) -> Re
     attempt().map_err(|(Failure::Again(e) | Failure::Final(e))| e)
 }
 
-/// `url`'s body, which must hash to `sha1`; the error names the file, never more of the URL.
-fn fetch_checked(url: &str, sha1: &str, name: &str) -> Result<Vec<u8>, String> {
-    let body = retrying(|| {
-        let response = agent().get(url).call().map_err(|e| match e {
-            ureq::Error::Status(code, _) => {
-                if may_pass(code) {
-                    Failure::Again(format!(
-                        "Mojang's server refused {name} ({code}). Try again in a few minutes."
-                    ))
-                } else {
-                    Failure::Final(format!("Mojang's server refused {name} ({code})."))
-                }
-            }
-            ureq::Error::Transport(t) => Failure::Again(format!(
-                "Could not download {name} ({}). Check your internet connection.",
-                crate::transport_detail(&t)
-            )),
-        })?;
-        let mut body = Vec::new();
-        response
-            .into_reader()
-            .read_to_end(&mut body)
-            .map_err(|_| Failure::Again(format!("The download of {name} was cut off.")))?;
-        Ok(body)
-    })?;
-    match sha1_hex(&body) {
-        actual if actual == sha1 => Ok(body),
-        _ => Err(format!(
-            "{name} is not the file Mojang lists (its hash differs)."
-        )),
-    }
+/// The name a message gives a file: the last part of its URL, never more of it.
+fn file_name(url: &str) -> &str {
+    url.split(['?', '#'])
+        .next()
+        .and_then(|u| u.rsplit('/').next())
+        .unwrap_or("a file")
 }
 
-/// Write through a `.part` file, so a cut-off write never looks finished.
-fn write_file(path: &Path, data: &[u8]) -> Result<(), String> {
-    if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
-    }
-    let mut part = path.as_os_str().to_owned();
-    part.push(".part");
-    let part = PathBuf::from(part);
-    let mut file = std::fs::File::create(&part).map_err(|e| format!("{}: {e}", part.display()))?;
-    file.write_all(data)
-        .and_then(|()| file.sync_all())
-        .map_err(|e| format!("{}: {e}", part.display()))?;
-    drop(file);
-    std::fs::rename(&part, path).map_err(|e| format!("{}: {e}", path.display()))
-}
-
-/// A library applies on the device: Mojang's rules for the OS (a phone counts as Linux, as
-/// horizon-prepare reads it), and no natives classifiers (artifacts only).
-fn library_applies(library: &Value) -> bool {
-    let Some(rules) = library["rules"].as_array() else {
-        return true;
-    };
-    let mut allowed = false;
-    for rule in rules {
-        let matches = rule["os"]["name"]
-            .as_str()
-            .is_none_or(|name| name == "linux");
-        if matches {
-            allowed = rule["action"].as_str() == Some("allow");
+/// A fetch failure in the words the player reads.
+fn explain(e: horizon_fetch::Error) -> String {
+    use horizon_fetch::Error;
+    match e {
+        Error::Cancelled => "The download was cancelled.".into(),
+        Error::Status { url, status } if may_pass(status) => format!(
+            "Mojang's server refused {} ({status}). Try again in a few minutes.",
+            file_name(&url)
+        ),
+        Error::Status { url, status } => {
+            format!("Mojang's server refused {} ({status}).", file_name(&url))
         }
+        Error::BadHash { url, .. } | Error::BadSize { url, .. } => format!(
+            "{} is not the file Mojang lists (its hash differs).",
+            file_name(&url)
+        ),
+        Error::Network { url, .. } => format!(
+            "Could not download {}. Check your internet connection.",
+            file_name(&url)
+        ),
+        other => other.to_string(),
     }
-    allowed
 }
 
 /// Fetch the pinned version's files into `root`, in the official launcher's layout: what is
-/// there already with the right hash is kept, so an interrupted download resumes. The version
-/// JSON must be one Starling pins; every other file is checked against the hash it lists.
+/// there already with the right hash is kept, and a half-fetched file continues, so an
+/// interrupted download resumes. The version JSON must be one Starling pins; every other file is
+/// checked against the hash it lists. The planning and the transfers are horizon-fetch's, which
+/// the headset's launcher shares; this adds Starling's pins, the retry policy of a phone's
+/// network and its messages.
 pub fn download(
     sources: &Sources,
     pins: &Pins,
@@ -252,70 +191,113 @@ pub fn download(
     progress: &(dyn Fn(Progress) + Sync),
     cancelled: &(dyn Fn() -> bool + Sync),
 ) -> Result<Installed, String> {
+    use horizon_fetch::mojang::Selection;
+    use horizon_fetch::{Item, Options, fetch_all, mojang};
     let v = &pins.version;
     let version_dir = root.join("versions").join(v);
     let manifest_path = version_dir.join(format!("{v}.json"));
-    let manifest = match std::fs::read(&manifest_path) {
-        Ok(data) if pins.manifests.contains(&sha1_hex(&data)) => data,
-        _ => {
-            let sha1 = &pins.manifests[0];
-            let data = fetch_checked(
-                &format!("{}/v1/packages/{sha1}/{v}.json", sources.meta),
-                sha1,
-                &format!("the {v} version file"),
-            )?;
-            write_file(&manifest_path, &data)?;
-            data
-        }
+    let fetch_pins = horizon_fetch::Pins {
+        version: v.clone(),
+        client_sha1: pins.client_sha1.clone(),
+        manifests: pins.manifests.clone(),
     };
-    let json: Value = serde_json::from_slice(&manifest)
-        .map_err(|_| format!("The {v} version file is not valid JSON."))?;
-    let download = |key: &str, path: PathBuf, pinned: &str| -> Result<Item, String> {
-        let d = &json["downloads"][key];
-        let (Some(url), Some(sha1)) = (d["url"].as_str(), d["sha1"].as_str()) else {
-            return Err(format!("The {v} version file lists no {key} download."));
-        };
-        if sha1 != pinned {
+    let transport = horizon_fetch::Ureq::new(format!("starling/{}", env!("CARGO_PKG_VERSION")));
+    let options = Options {
+        jobs: 4,
+        retries: 4,
+        wait: FIRST_WAIT,
+        growing: true,
+        transient: may_pass,
+        ..Options::default()
+    };
+    let stop = AtomicBool::new(false);
+    let log = |_: String| {};
+    let whole = |url: &str| -> Result<Vec<u8>, String> {
+        use horizon_fetch::Transport;
+        let mut body = Vec::new();
+        transport
+            .open(url, 0)
+            .map_err(explain)?
+            .reader
+            .read_to_end(&mut body)
+            .map_err(|_| format!("The download of {} was cut off.", file_name(url)))?;
+        Ok(body)
+    };
+    // The version file, from piston-meta by the sha1 Starling pins, unless it is there.
+    if !fetch_pins.manifest_accepted(&manifest_path) {
+        let sha1 = &pins.manifests[0];
+        let url = format!("{}/v1/packages/{sha1}/{v}.json", sources.meta);
+        let data = retrying(|| {
+            whole(&url).map_err(|e| {
+                if e.contains("refused") && !e.contains("Try again") {
+                    Failure::Final(e)
+                } else {
+                    Failure::Again(e)
+                }
+            })
+        })?;
+        if &sha1_hex(&data) != sha1 {
             return Err(format!(
-                "The {v} version file lists another {key} jar than Starling pins."
+                "{} is not the file Mojang lists (its hash differs).",
+                file_name(&url)
             ));
         }
-        Ok(Item {
-            url: url.into(),
-            path,
-            sha1: sha1.into(),
-            size: d["size"].as_u64().unwrap_or(0),
-        })
+        horizon_fetch::write_file(&manifest_path, &data)?;
+    }
+    let json: Value =
+        serde_json::from_slice(&std::fs::read(&manifest_path).map_err(|e| e.to_string())?)
+            .map_err(|_| format!("The {v} version file is not valid JSON."))?;
+    let selection = Selection {
+        server_sha1: wanted.server.then_some(pins.server_sha1.as_str()),
+        strict_assets: true,
+        objects_base: sources.resources.clone(),
+        ..Selection::all("linux")
     };
-    let client_jar = version_dir.join(format!("{v}.jar"));
-    let mut items = vec![download("client", client_jar.clone(), &pins.client_sha1)?];
-    let server_jar = wanted
-        .server
-        .then(|| version_dir.join(format!("{v}-server.jar")));
-    if let Some(path) = &server_jar {
-        items.push(download("server", path.clone(), &pins.server_sha1)?);
+    let (mut items, _) = mojang::game_files(&fetch_pins, &json, root, &selection)?;
+    if !wanted.libraries {
+        items.retain(|i| !i.path.starts_with(root.join("libraries")));
     }
-    if wanted.libraries {
-        for library in json["libraries"].as_array().into_iter().flatten() {
-            let artifact = &library["downloads"]["artifact"];
-            let (Some(path), Some(url), Some(sha1)) = (
-                artifact["path"].as_str(),
-                artifact["url"].as_str(),
-                artifact["sha1"].as_str(),
-            ) else {
-                continue;
-            };
-            if !library_applies(library) || path.contains("..") {
-                continue;
-            }
-            items.push(Item {
-                url: url.into(),
-                path: root.join("libraries").join(path),
-                sha1: sha1.into(),
-                size: artifact["size"].as_u64().unwrap_or(0),
+    let listed = &json["downloads"]["server"]["sha1"];
+    if wanted.server && listed.as_str() != Some(pins.server_sha1.as_str()) {
+        return Err(format!(
+            "The {v} version file lists another server jar than Starling pins."
+        ));
+    }
+    if json["downloads"]["client"]["sha1"].as_str() != Some(pins.client_sha1.as_str()) {
+        return Err(format!(
+            "The {v} version file lists another client jar than Starling pins."
+        ));
+    }
+    let hooks = |progress_state: &horizon_fetch::Progress,
+                 items: &[Item],
+                 f: &mut dyn FnMut() -> Result<(), horizon_fetch::Error>| {
+        let total = items.len();
+        let bytes_total: u64 = items.iter().filter_map(|i| i.size).sum();
+        let done = AtomicBool::new(false);
+        let mut result = Ok(());
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                while !done.load(Ordering::Relaxed) {
+                    if cancelled() {
+                        stop.store(true, Ordering::Relaxed);
+                    }
+                    if let Some(s) = progress_state.snapshot() {
+                        progress(Progress {
+                            files: s.files_done,
+                            files_total: s.files_total,
+                            bytes: s.bytes_done,
+                            bytes_total: s.bytes_total,
+                        });
+                    }
+                    std::thread::sleep(Duration::from_millis(100));
+                }
             });
-        }
-    }
+            result = f();
+            done.store(true, Ordering::Relaxed);
+        });
+        (total, bytes_total, result)
+    };
+    let state = horizon_fetch::Progress::new();
     if wanted.assets {
         let index = &json["assetIndex"];
         let (Some(id), Some(url), Some(sha1)) = (
@@ -325,111 +307,58 @@ pub fn download(
         ) else {
             return Err(format!("The {v} version file lists no asset index."));
         };
-        let index_path = root.join("assets/indexes").join(format!("{id}.json"));
-        let data = match std::fs::read(&index_path) {
-            Ok(data) if sha1_hex(&data) == sha1 => data,
-            _ => {
-                let data = fetch_checked(url, sha1, "the asset index")?;
-                write_file(&index_path, &data)?;
-                data
-            }
+        let index_item = Item {
+            url: url.into(),
+            sha1: sha1.into(),
+            size: index["size"].as_u64(),
+            path: root.join("assets/indexes").join(format!("{id}.json")),
         };
-        let objects: Value =
-            serde_json::from_slice(&data).map_err(|_| "The asset index is not valid JSON.")?;
-        for object in objects["objects"]
-            .as_object()
-            .into_iter()
-            .flat_map(|o| o.values())
-        {
-            let Some(hash) = object["hash"]
-                .as_str()
-                .filter(|h| h.len() == 40 && h.bytes().all(|b| b.is_ascii_hexdigit()))
-            else {
-                continue;
-            };
-            items.push(Item {
-                url: format!("{}/{}/{hash}", sources.resources, &hash[..2]),
-                path: root.join("assets/objects").join(&hash[..2]).join(hash),
-                sha1: hash.into(),
-                size: object["size"].as_u64().unwrap_or(0),
-            });
-        }
-        items.sort_by(|a, b| a.path.cmp(&b.path));
-        items.dedup_by(|a, b| a.path == b.path);
-    }
-    fetch_all(items, progress, cancelled)?;
-    Ok(Installed {
-        root: root.to_path_buf(),
-        client_jar,
-        server_jar,
-    })
-}
-
-/// Every item, a few at a time; what is already there with its hash counts as done.
-fn fetch_all(
-    items: Vec<Item>,
-    progress: &(dyn Fn(Progress) + Sync),
-    cancelled: &(dyn Fn() -> bool + Sync),
-) -> Result<(), String> {
-    let total = Progress {
-        files_total: items.len(),
-        bytes_total: items.iter().map(|i| i.size).sum(),
-        ..Progress::default()
-    };
-    let (files, bytes) = (AtomicU64::new(0), AtomicU64::new(0));
-    let report = |size: u64| {
-        let files = files.fetch_add(1, Ordering::Relaxed) + 1;
-        let bytes = bytes.fetch_add(size, Ordering::Relaxed) + size;
-        progress(Progress {
-            files: files as usize,
-            bytes,
-            ..total
+        let (_, _, fetched) = hooks(&state, std::slice::from_ref(&index_item), &mut || {
+            fetch_all(
+                std::slice::from_ref(&index_item),
+                &options,
+                &transport,
+                &state,
+                &stop,
+                &log,
+            )
         });
-    };
-    progress(total);
-    let queue = Mutex::new(items);
-    let failed: Mutex<Option<String>> = Mutex::new(None);
-    let stop = AtomicBool::new(false);
-    std::thread::scope(|scope| {
-        for _ in 0..4 {
-            scope.spawn(|| {
-                loop {
-                    if stop.load(Ordering::Relaxed) || cancelled() {
-                        stop.store(true, Ordering::Relaxed);
-                        return;
-                    }
-                    let Some(item) = queue.lock().unwrap().pop() else {
-                        return;
-                    };
-                    let name = item
-                        .path
-                        .file_name()
-                        .map_or_else(String::new, |n| n.to_string_lossy().into_owned());
-                    let result = if sha1_file(&item.path).as_deref() == Some(item.sha1.as_str()) {
-                        Ok(())
-                    } else {
-                        fetch_checked(&item.url, &item.sha1, &name)
-                            .and_then(|data| write_file(&item.path, &data))
-                    };
-                    match result {
-                        Ok(()) => report(item.size),
-                        Err(e) => {
-                            failed.lock().unwrap().get_or_insert(e);
-                            stop.store(true, Ordering::Relaxed);
-                            return;
-                        }
-                    }
-                }
+        fetched.map_err(explain)?;
+        let mut objects: Value =
+            serde_json::from_slice(&std::fs::read(&index_item.path).map_err(|e| e.to_string())?)
+                .map_err(|_| "The asset index is not valid JSON.".to_string())?;
+        // A hash that is not one is never a path: left out, not an error.
+        if let Some(map) = objects["objects"].as_object_mut() {
+            map.retain(|_, o| {
+                o["hash"]
+                    .as_str()
+                    .is_some_and(|h| h.len() == 40 && h.bytes().all(|b| b.is_ascii_hexdigit()))
             });
         }
-    });
-    if let Some(e) = failed.into_inner().unwrap() {
-        return Err(e);
+        items.extend(mojang::objects(&objects, root, &selection)?);
     }
+    items.sort_by(|a, b| a.path.cmp(&b.path));
+    items.dedup_by(|a, b| a.path == b.path);
+    let (total, bytes_total, result) = hooks(&state, &items, &mut || {
+        fetch_all(&items, &options, &transport, &state, &stop, &log)
+    });
+    result.map_err(explain)?;
     if cancelled() {
         return Err("The download was cancelled.".into());
     }
-    Ok(())
+    progress(Progress {
+        files: total,
+        files_total: total,
+        bytes: bytes_total,
+        bytes_total,
+    });
+    Ok(Installed {
+        root: root.to_path_buf(),
+        client_jar: version_dir.join(format!("{v}.jar")),
+        server_jar: wanted
+            .server
+            .then(|| version_dir.join(format!("{v}-server.jar"))),
+    })
 }
 
 #[cfg(test)]

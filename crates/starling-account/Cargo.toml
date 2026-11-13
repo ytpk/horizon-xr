@@ -12,6 +12,7 @@ ureq = { version = "2", default-features = false, features = ["json", "tls"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha1 = "0.10"
+horizon-fetch = { path = "../horizon-fetch" }
 sha2 = "0.10"
 # The Java runtime that prepares the game files on a phone comes as a .tar.xz.
 lzma-rs = "0.3"

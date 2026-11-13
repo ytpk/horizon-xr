@@ -16,7 +16,7 @@ pub mod mojang;
 mod progress;
 mod transport;
 
-pub use engine::{fetch_all, fetch_each, free_space, Item, Options};
+pub use engine::{fetch_all, fetch_each, free_space, server_trouble, Item, Options};
 pub use progress::{Progress, Snapshot};
 pub use transport::{Bodies, Body, Transport, Ureq};
 

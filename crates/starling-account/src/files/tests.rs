@@ -2,9 +2,12 @@
 //! (no game data): the layout, the hash checks and resuming.
 use super::*;
 use std::collections::HashMap;
+use std::io::Write;
 use std::io::{BufRead, BufReader};
 use std::net::TcpListener;
 use std::sync::Arc;
+use std::sync::Mutex;
+use std::sync::atomic::AtomicU64;
 
 /// A one-thread HTTP/1.1 server answering GETs from `files` (path → body); it counts requests,
 /// and closes the next `drops` connections unanswered, as a network that drops.
@@ -241,4 +244,24 @@ fn starlings_pins_are_the_research_lock() {
         .map_or(0, Vec::len);
     assert_eq!(pins.manifests.len(), 1 + accepted);
     assert!(pins.client_sha1.len() == 40 && pins.server_sha1.len() == 40);
+}
+
+#[test]
+fn a_cancelled_download_says_so_and_keeps_what_it_has() {
+    let f = fake();
+    let root = std::env::temp_dir().join(format!("starling-files-cancel-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let err = download(&sources(&f), &f.pins, &root, ALL, &|_| {}, &|| true).unwrap_err();
+    assert_eq!(err, "The download was cancelled.");
+    // Without libraries or assets only the jars are fetched.
+    let few = Wanted {
+        server: false,
+        libraries: false,
+        assets: false,
+    };
+    let got = download(&sources(&f), &f.pins, &root, few, &|_| {}, &|| false).unwrap();
+    assert!(got.server_jar.is_none());
+    assert!(got.client_jar.is_file());
+    assert!(!root.join("libraries").exists() && !root.join("assets").exists());
+    let _ = std::fs::remove_dir_all(&root);
 }

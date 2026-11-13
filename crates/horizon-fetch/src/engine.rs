@@ -21,6 +21,13 @@ pub struct Options {
     pub jobs: usize,
     /// How many times a file whose connection fails is tried again, continuing where it stopped.
     pub retries: usize,
+    /// The wait before the first new try, and whether it doubles before each one after (a
+    /// phone's network that changes: Starling's downloads). The Quest waits a flat 200 ms.
+    pub wait: Duration,
+    pub growing: bool,
+    /// Whether a refusal with this status may pass with time and is tried again (the server's
+    /// own trouble, or its limit on a shared mobile address) instead of ending the file.
+    pub transient: fn(u16) -> bool,
     /// Free bytes that must remain after the download (the Quest keeps room for preparing).
     pub reserve: u64,
     /// Free bytes on the disk holding a path; `None` skips the check. A test injects a full disk.
@@ -32,10 +39,18 @@ impl Default for Options {
         Self {
             jobs: 4,
             retries: 2,
+            wait: Duration::from_millis(200),
+            growing: false,
+            transient: server_trouble,
             reserve: 0,
             free_space,
         }
     }
+}
+
+/// The refusals tried again unless `Options::transient` says more: the server's own trouble.
+pub fn server_trouble(status: u16) -> bool {
+    status >= 500
 }
 
 /// Free bytes for unprivileged writes on the filesystem holding `path` (its nearest existing
@@ -240,6 +255,7 @@ fn fetch_one(
     // A resumed file that fails its sha1 is fetched once more from the start.
     let mut from_scratch = false;
     let mut tries = options.retries + 1;
+    let mut wait = options.wait;
     while tries > 0 {
         tries -= 1;
         if cancel.load(Relaxed) {
@@ -256,7 +272,7 @@ fn fetch_one(
         };
         let body = match transport.open(&item.url, from) {
             Ok(body) => body,
-            Err(Error::Status { status, .. }) if status < 500 => {
+            Err(Error::Status { status, .. }) if !(options.transient)(status) => {
                 return Err(Error::Status {
                     url: item.url.clone(),
                     status,
@@ -264,7 +280,10 @@ fn fetch_one(
             }
             Err(e) => {
                 last = Some(e);
-                std::thread::sleep(Duration::from_millis(200));
+                std::thread::sleep(wait);
+                if options.growing {
+                    wait *= 2;
+                }
                 continue;
             }
         };

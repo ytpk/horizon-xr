@@ -260,6 +260,39 @@ fn a_403_stops_at_once_without_retries() {
 }
 
 #[test]
+fn a_refusal_the_caller_calls_transient_is_tried_again_and_then_reported() {
+    let body = data(100);
+    let mock = Mock::start(vec![(
+        "/limited",
+        Route {
+            status: Some(429),
+            ..Default::default()
+        },
+    )]);
+    let dir = scratch("429");
+    let items = [item(&mock, "/limited", &body, &dir)];
+    // A shared mobile address's limit: Starling's phone app waits and tries again.
+    let options = Options {
+        retries: 2,
+        wait: Duration::from_millis(1),
+        growing: true,
+        transient: |status| status == 429 || horizon_fetch::server_trouble(status),
+        ..Options::default()
+    };
+    let error = run(&items, &options, &NEVER).unwrap_err();
+    assert!(
+        matches!(
+            error,
+            Error::Network { .. } | Error::Status { status: 429, .. }
+        ),
+        "{error}"
+    );
+    assert_eq!(mock.asked().len(), 3, "one try and two more");
+    // The default policy keeps 4xx final (the 403 test above).
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
 fn a_full_disk_is_reported_before_any_request() {
     let body = data(10_000_000);
     let mock = Mock::start(vec![(

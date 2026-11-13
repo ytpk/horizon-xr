@@ -1,5 +1,6 @@
 use crate::{Error, Fetch};
 use std::io::{Cursor, Read};
+use std::sync::OnceLock;
 use std::time::Duration;
 
 /// An open response body.
@@ -18,10 +19,14 @@ pub trait Transport: Sync {
 }
 
 /// Real downloads: `ureq` with rustls, a user agent, an optional proxy hook (the launcher's
-/// setting), and `Range` requests.
+/// setting), and `Range` requests. Without a proxy hook one agent serves every download, so its
+/// connections stay open and are used again: thousands of small asset files go over the few
+/// connections of the download workers instead of a connection and a TLS handshake each, which
+/// a phone's network (and its router) does not keep up with for long.
 pub struct Ureq {
     pub user_agent: String,
     pub proxy: Option<fn(ureq::AgentBuilder, &str) -> ureq::AgentBuilder>,
+    shared: OnceLock<ureq::Agent>,
 }
 
 impl Ureq {
@@ -29,22 +34,37 @@ impl Ureq {
         Self {
             user_agent: user_agent.into(),
             proxy: None,
+            shared: OnceLock::new(),
+        }
+    }
+
+    /// Requests that go through the proxy hook of the launcher.
+    pub fn with_proxy(mut self, proxy: fn(ureq::AgentBuilder, &str) -> ureq::AgentBuilder) -> Self {
+        self.proxy = Some(proxy);
+        self
+    }
+
+    fn builder(&self) -> ureq::AgentBuilder {
+        ureq::AgentBuilder::new()
+            .timeout_connect(Duration::from_secs(20))
+            // A silent connection is a stalled one: the next attempt resumes.
+            .timeout_read(Duration::from_secs(60))
+            // A connection kept for each download worker, and some to spare.
+            .max_idle_connections_per_host(8)
+            .user_agent(&self.user_agent)
+    }
+
+    fn agent(&self, url: &str) -> ureq::Agent {
+        match self.proxy {
+            Some(proxy) => proxy(self.builder(), url).build(),
+            None => self.shared.get_or_init(|| self.builder().build()).clone(),
         }
     }
 }
 
 impl Transport for Ureq {
     fn open(&self, url: &str, from: u64) -> Result<Body, Error> {
-        let builder = ureq::AgentBuilder::new()
-            .timeout_connect(Duration::from_secs(20))
-            // A silent connection is a stalled one: the next attempt resumes.
-            .timeout_read(Duration::from_secs(60))
-            .user_agent(&self.user_agent);
-        let builder = match self.proxy {
-            Some(proxy) => proxy(builder, url),
-            None => builder,
-        };
-        let mut request = builder.build().get(url);
+        let mut request = self.agent(url).get(url);
         if from > 0 {
             request = request.set("Range", &format!("bytes={from}-"));
         }
