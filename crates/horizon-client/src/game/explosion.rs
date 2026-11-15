@@ -1414,3 +1414,43 @@ mod tests {
         }
     }
 }
+
+impl Game<'_> {
+    /// Shared COLLIDER/no-fluid query used by Essentials' bow reticle.
+    pub(super) fn essentials_collider_hit(
+        &self,
+        start: glam::DVec3,
+        end: glam::DVec3,
+    ) -> Option<glam::DVec3> {
+        let mut rays = ColliderRays {
+            scene: SceneCollisions {
+                world: &self.world,
+                binding: self.collision,
+                subject: None,
+            },
+            context: CollisionContext::for_entity(
+                CollisionEntity {
+                    identity: EntityIdentity(0),
+                    y: start.y,
+                    descending: false,
+                    main_hand: Some(CollisionItem::EMPTY),
+                },
+                false,
+            ),
+        };
+        let to_vec = |v: glam::DVec3| Vec3::new(v.x, v.y, v.z);
+        let result = clip_world(
+            &mut rays,
+            to_vec(start),
+            to_vec(end),
+            RayBlockMode::Collider,
+            RayFluidMode::None,
+            4096,
+        )
+        .ok()?;
+        (!result.miss).then(|| {
+            let p = result.hit.location;
+            glam::DVec3::new(p.x, p.y, p.z)
+        })
+    }
+}

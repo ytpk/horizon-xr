@@ -111,7 +111,10 @@ impl Game<'_> {
             self.pad.headset.trackers.touching = [None, None];
             [false; 2]
         };
-        headset::set_triggers_captured([touching[0] || bow, touching[1]]);
+        headset::set_triggers_captured([
+            touching[0] || bow,
+            touching[1] || (bow && self.essentials_bow_wanted()),
+        ]);
         self.vr_swim();
     }
 

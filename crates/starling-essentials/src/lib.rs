@@ -2,10 +2,13 @@
 // Copyright (c) 2025-2026 Phoenix-Ra and VisorEssentials contributors.
 //! Native port of VisorEssentials, upstream 88ffec507449eb1a97ccbf495cd331a46c6d635b.
 //! Derived from RemoteOverlayRenderHelper.java; changed to camera-relative Rust geometry.
+pub mod bow;
+pub mod inventory;
+pub mod network;
 use glam::{Quat, Vec3};
 
 /// The placeholder contains no remote screen contents (as in Essentials).
-pub const PANEL_COLOR: u32 = 0x8C28_2D3C;
+pub const PANEL_COLOR: u32 = 0x8C3C_2D28;
 pub const TEXT_COLOR: u32 = 0x005C_6476;
 
 /// A remote player's menu indicator. Positions are relative to the viewing camera.

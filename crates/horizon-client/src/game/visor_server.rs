@@ -145,6 +145,9 @@ impl Game<'_> {
         for reply in &out.replies {
             host.hub.send_to(conn, &payload(reply));
         }
+        if hello {
+            self.essentials_server_hello(host, conn);
+        }
         for action in out.actions {
             self.visor_action(host, conn, uuid, action);
         }
@@ -621,6 +624,8 @@ impl Game<'_> {
             .collect();
         for uuid in gone {
             self.visor_server.server.remove(uuid);
+            self.essentials.tension.remove(&uuid);
+            self.essentials.registered.remove(&uuid);
             self.visor_server.swings.retain(|(u, _), _| *u != uuid);
         }
         self.visor_server

@@ -447,13 +447,18 @@ SOFTWARE.
 
 ## VisorEssentials (Starling modded fork)
 
-`crates/starling-essentials` and `crates/horizon-client/src/game/essentials.rs`
-port `RemoteOverlayRenderHelper.java` from
+`crates/starling-essentials`, `crates/horizon-client/src/game/essentials*.rs`,
+`crates/horizon-client-render/src/essentials_art.rs` and
+`crates/horizon-client-render/assets/essentials/` port code and include textures from
 [VisorModStudio/VisorEssentials](https://github.com/VisorModStudio/VisorEssentials/tree/88ffec507449eb1a97ccbf495cd331a46c6d635b).
 Copyright (c) 2025-2026 Phoenix-Ra and VisorEssentials contributors.
-Licensed under LGPL-3.0-only, as declared by upstream `stonecutter.properties.toml`. License
-texts are in `crates/starling-essentials/LICENSE-LGPL-3.0` and `LICENSE-GPL-3.0`.
-Changes: native Rust geometry, integration with the wgpu world renderer,
-interpolated remote player poses, localized label and a persistent feature toggle.
-The source revision and remaining port scope are recorded in `docs/modded.md`.
-These files retain their LGPL license; no upstream Java loader is bundled.
+Licensed under LGPL-3.0-only, as declared by upstream `stonecutter.properties.toml`.
+License texts are in `crates/starling-essentials/LICENSE-LGPL-3.0` and
+`crates/starling-essentials/LICENSE-GPL-3.0`.
+
+Changes: native Rust state machines and wire codec, inventory and container overlays
+connected to Starling's authoritative menu engine, controller input/keyboard routing,
+physical bow/client and server behavior, remote item poses, wgpu rendering, persistent
+settings and localization. The 22 PNGs are unchanged. The source revision, port scope
+and validation limits are recorded in `docs/modded.md`. The ported modules retain their
+LGPL license; no upstream Java loader is bundled.

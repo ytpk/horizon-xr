@@ -116,6 +116,11 @@ fn sprite(name: &str) -> String {
 impl Game<'_> {
     /// The book the open screen has, if any.
     pub(super) fn active_book(&self) -> Option<BookType> {
+        if self.essentials_ui.scope == super::essentials_inventory::Scope::Wrist
+            && !self.essentials_inventory_full()
+        {
+            return None;
+        }
         if self.screen != Screen::Inventory || self.station.is_some() {
             return None;
         }
@@ -133,7 +138,7 @@ impl Game<'_> {
             _ => None,
         }
     }
-    fn book_open(&self, book: BookType) -> bool {
+    pub(super) fn book_open(&self, book: BookType) -> bool {
         self.level.recipe_book.open[book.index()]
     }
     fn book_filtering(&self, book: BookType) -> bool {
@@ -142,6 +147,9 @@ impl Game<'_> {
     /// How far the open book pushes the menu to the right
     /// (`RecipeBookComponent.updateScreenPosition`).
     pub(super) fn recipe_book_shift(&self, width: f32) -> f32 {
+        if self.essentials_ui.scope != super::essentials_inventory::Scope::None {
+            return 0.0;
+        }
         match self.active_book() {
             Some(book) if self.book_open(book) && width >= NARROW => 77.0,
             _ => 0.0,
@@ -151,6 +159,9 @@ impl Game<'_> {
     /// visible in a window narrower than `NARROW`: the book covers the menu,
     /// so no slot is hovered or clicked.
     pub(super) fn book_covers_menu(&self, width: f32) -> bool {
+        if self.essentials_ui.scope != super::essentials_inventory::Scope::None {
+            return false;
+        }
         width < NARROW && self.active_book().is_some_and(|b| self.book_open(b))
     }
     /// Whether typed keys go to the search box.
@@ -578,6 +589,9 @@ impl Game<'_> {
     /// `RecipeBookComponent.getXOrigin` / `getYOrigin` (`widthTooNarrow`
     /// centres the book over the menu).
     fn book_origin(&self, batch: &HudBatch) -> (f32, f32) {
+        if let Some((_, y)) = self.essentials_inventory_origin() {
+            return ((self.essentials_ui.canvas[0] - WIDTH) * 0.5, y + 158.0);
+        }
         let offset = if batch.width < NARROW { 0.0 } else { 86.0 };
         (
             ((batch.width - WIDTH) / 2.0).floor() - offset,
@@ -586,6 +600,28 @@ impl Game<'_> {
     }
     /// The green book button's top-left corner.
     fn book_button_pos(&self, book: BookType, ox: f32, batch: &HudBatch) -> (f32, f32) {
+        if let Some((x, y)) = self.essentials_inventory_origin() {
+            return (
+                x + 188.0
+                    + if self.vr_server_settings().two_handed_vr {
+                        0.0
+                    } else {
+                        20.0
+                    },
+                y + 62.0,
+            );
+        }
+        if self.essentials_ui.scope == super::essentials_inventory::Scope::Container {
+            let (_, oy) = self.inventory_origin(batch);
+            return (
+                ox + if book == BookType::Crafting {
+                    5.0
+                } else {
+                    20.0
+                },
+                oy + 34.0,
+            );
+        }
         let mid = (batch.height / 2.0).floor();
         match book {
             BookType::Crafting if self.craft_size == 2 => (ox + 104.0, mid - 22.0),
@@ -608,7 +644,12 @@ impl Game<'_> {
     }
     fn batch_for_size(&self) -> Option<HudBatch> {
         let r = self.renderer.as_ref()?;
-        Some(HudBatch::new([r.config.width, r.config.height]))
+        let mut batch = HudBatch::new([r.config.width, r.config.height]);
+        if self.essentials_ui.scope != super::essentials_inventory::Scope::None {
+            batch.width = self.essentials_ui.canvas[0];
+            batch.height = self.essentials_ui.canvas[1];
+        }
+        Some(batch)
     }
 
     // ---- clicks ----

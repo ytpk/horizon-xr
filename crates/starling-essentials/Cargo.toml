@@ -11,3 +11,6 @@ glam = "0.30"
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+horizon-visor = { path = "../horizon-visor" }

@@ -884,6 +884,7 @@ pub(crate) fn vr_register_payload(preference: &str) -> Vec<u8> {
     let mut names: Vec<&str> = Vec::new();
     if preference != "VIVECRAFT" {
         names.push(horizon_visor::CHANNEL);
+        names.push("visor_essentials:channel");
     }
     if preference != "VISOR" {
         names.push(horizon_vivecraft::network::CHANNEL);
@@ -1407,7 +1408,7 @@ mod tests {
             cfg::Serverbound::decode(id, &body).unwrap(),
             cfg::Serverbound::CustomPayload(cfg::CustomPayload {
                 channel: horizon_vivecraft::network::REGISTER_CHANNEL.into(),
-                data: vr_register_payload("VISOR"),
+                data: b"visor:channel\0visor_essentials:channel".to_vec(),
             })
         );
 
@@ -1429,15 +1430,6 @@ mod tests {
             cfg::Serverbound::CustomPayload(cfg::CustomPayload {
                 channel: crate::content_identity::CHANNEL.into(),
                 data: expected.to_vec(),
-            })
-        );
-        // Flat clients register Visor to observe remote VR players, before configuration replies.
-        let (id, body) = server.recv().unwrap();
-        assert_eq!(
-            cfg::Serverbound::decode(id, &body).unwrap(),
-            cfg::Serverbound::CustomPayload(cfg::CustomPayload {
-                channel: horizon_vivecraft::network::REGISTER_CHANNEL.into(),
-                data: vr_register_payload("VISOR"),
             })
         );
         let (id, body) = server.recv().unwrap();

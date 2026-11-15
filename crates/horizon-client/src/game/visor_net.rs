@@ -141,6 +141,8 @@ impl Game<'_> {
     /// last server; a headset says its HANDSHAKE (Visor) and, when the player or the server
     /// does not take Visor, its VERSION (Vivecraft).
     pub(super) fn vr_login(&mut self) {
+        self.essentials_reset();
+        self.essentials_ui = Default::default();
         let preference = Preference::of(&headset::settings());
         self.visor.logged_in_with_headset = headset::active();
         self.visor.waited = 0;
@@ -156,6 +158,10 @@ impl Game<'_> {
                 self.vivecraft_reset(true);
             }
             Preference::Visor | Preference::Auto => {
+                self.send(S::CustomPayload(CustomPayload {
+                    channel: "minecraft:register".into(),
+                    data: starling_essentials::network::CHANNEL.as_bytes().to_vec(),
+                }));
                 self.vivecraft_reset(false);
                 self.visor.protocol = if preference == Preference::Auto {
                     Protocol::Auto
@@ -274,7 +280,8 @@ impl Game<'_> {
                 "FULL_BODY" => BodyType::FullBody,
                 _ => BodyType::HandsOnly,
             },
-            overlay_focused: self.screen != super::Screen::Playing,
+            overlay_focused: self.screen != super::Screen::Playing
+                || self.essentials_ui.focused != super::essentials_inventory::Scope::None,
             pose: data,
         }
     }
@@ -291,7 +298,7 @@ impl Game<'_> {
     }
 
     /// `XrRawPoseHandler.extractGunAngle` of the left controller.
-    fn visor_gun_angle(&self) -> f32 {
+    pub(super) fn visor_gun_angle(&self) -> f32 {
         let left = if headset::settings().left_handed() {
             headset::main_hand()
         } else {

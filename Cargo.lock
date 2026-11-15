@@ -1592,6 +1592,7 @@ dependencies = [
  "sha1",
  "sha2",
  "starling-account",
+ "starling-essentials",
  "unicode-bidi",
  "ureq",
  "wgpu",
@@ -4142,6 +4143,7 @@ name = "starling-essentials"
 version = "0.1.0"
 dependencies = [
  "glam",
+ "horizon-visor",
 ]
 
 [[package]]

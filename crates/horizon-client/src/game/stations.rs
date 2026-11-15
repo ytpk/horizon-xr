@@ -529,6 +529,11 @@ impl Game<'_> {
     /// `Component.translatable`: the selected language (which `lang` layers
     /// over `en_us`), the caller's English text last.
     pub(super) fn translate(&self, key: &str, fallback: &str) -> String {
+        if key == "container.inventory"
+            && self.essentials_ui.scope == super::essentials_inventory::Scope::Container
+        {
+            return String::new();
+        }
         horizon_client::lang::get_or(key, fallback)
     }
     fn brewing_open(&self) -> bool {

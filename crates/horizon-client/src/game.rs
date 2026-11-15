@@ -129,6 +129,8 @@ mod end;
 mod entity;
 mod entity_culling;
 mod essentials;
+mod essentials_bow;
+mod essentials_inventory;
 mod event_loop;
 mod events;
 mod execution_role;
@@ -3054,6 +3056,8 @@ struct Game<'a> {
     vivecraft: vivecraft_net::VivecraftNet,
     /// Visor's `visor:channel` and the choice of protocol (`game/visor_net.rs`).
     visor: visor_net::VisorNet,
+    essentials: essentials_bow::State,
+    essentials_ui: essentials_inventory::State,
     /// Visor's server half for the guests (`game/visor_server.rs`).
     visor_server: visor_server::VisorServerState,
     /// Vivecraft's server half for the guests (`game/vivecraft_server.rs`).
@@ -8265,6 +8269,9 @@ impl Game<'_> {
     /// `extractCarriedItem`: the carried stack at the cursor, showing what a
     /// quick craft drag over several slots leaves in hand.
     fn draw_carried(&mut self, batch: &mut HudBatch) {
+        if self.essentials_ui.scope != essentials_inventory::Scope::None {
+            return;
+        }
         let Some(mut stack) = self.carried.clone() else {
             return;
         };
@@ -8886,6 +8893,16 @@ impl Game<'_> {
         self.screen == Screen::Creative && !self.creative_screen.tab().inventory
     }
     fn inventory_origin(&self, batch: &HudBatch) -> (f32, f32) {
+        if let Some(origin) = self.essentials_inventory_origin() {
+            return origin;
+        }
+        if self.essentials_ui.scope == essentials_inventory::Scope::Container {
+            let w = self.native_screen_width().unwrap_or(176.0);
+            return (
+                (self.essentials_ui.canvas[0] - w) * 0.5,
+                (self.essentials_ui.canvas[1] - self.screen_height()) * 0.5,
+            );
+        }
         if self.screen == Screen::Creative {
             return Self::creative_origin(batch);
         }
@@ -8900,6 +8917,9 @@ impl Game<'_> {
     }
     /// 300.. are the open container's slots.
     fn slots(&self) -> Vec<usize> {
+        self.essentials_inventory_slots(self.ordinary_slots())
+    }
+    fn ordinary_slots(&self) -> Vec<usize> {
         if self.creative_inventory_open() {
             let mut v: Vec<usize> = Creative::inventory_slots().collect();
             if self.bedrock_items.is_some() {
@@ -9031,6 +9051,15 @@ impl Game<'_> {
     }
     /// InventoryMenu / CraftingMenu slot layouts.
     fn slot_position(&self, i: usize) -> (f32, f32) {
+        if self.essentials_ui.scope == essentials_inventory::Scope::Wrist
+            && let Some(p) = starling_essentials::inventory::slot(
+                i,
+                self.essentials_inventory_full(),
+                !self.vr_server_settings().two_handed_vr,
+            )
+        {
+            return p;
+        }
         if self.creative_inventory_open()
             && let Some(position) = Creative::inventory_slot_position(i).or_else(|| {
                 self.bedrock_items
@@ -9113,6 +9142,15 @@ impl Game<'_> {
     }
 
     fn slot_at(&self, batch: &HudBatch, x: f32, y: f32) -> Option<usize> {
+        if self.essentials_ui.scope == essentials_inventory::Scope::Wrist {
+            let (ox, oy) = self.essentials_inventory_origin()?;
+            return starling_essentials::inventory::hit(
+                x - ox,
+                y - oy,
+                self.essentials_inventory_full(),
+                !self.vr_server_settings().two_handed_vr,
+            );
+        }
         if self.book_covers_menu(batch.width) {
             return None;
         }
@@ -10256,7 +10294,9 @@ impl Game<'_> {
         if !right && self.sort_press() {
             return;
         }
-        if self.native_screen_press(right) {
+        if self.essentials_ui.scope != essentials_inventory::Scope::Wrist
+            && self.native_screen_press(right)
+        {
             self.inv_clicks.skip_release();
             return;
         }
@@ -10424,7 +10464,11 @@ impl Game<'_> {
         let Some(r) = self.renderer.as_ref() else {
             return (None, false);
         };
-        let batch = HudBatch::new([r.config.width, r.config.height]);
+        let mut batch = HudBatch::new([r.config.width, r.config.height]);
+        if self.essentials_ui.scope != essentials_inventory::Scope::None {
+            batch.width = self.essentials_ui.canvas[0];
+            batch.height = self.essentials_ui.canvas[1];
+        }
         (
             self.slot_at(&batch, self.cursor.0, self.cursor.1),
             self.clicked_outside(&batch),
@@ -10485,6 +10529,16 @@ impl Game<'_> {
     }
     /// The open container screen's window: its place and size.
     fn container_image(&self, batch: &HudBatch) -> horizon_client::container_screen::Image {
+        if let Some((left, top)) = self.essentials_inventory_origin() {
+            return horizon_client::container_screen::Image {
+                left: left as i32,
+                top: top as i32,
+                width: starling_essentials::inventory::width(
+                    !self.vr_server_settings().two_handed_vr,
+                ) as i32,
+                height: 156,
+            };
+        }
         let (ox, oy) = self.inventory_origin(batch);
         let (shift, width, height) = if self.screen == Screen::Creative {
             (0.0, Creative::WIDTH as i32, Creative::HEIGHT as i32)
@@ -10668,13 +10722,18 @@ impl Game<'_> {
         }
     }
     fn click_inventory(&mut self, right: bool) {
-        if self.mod_browser_press(right) || self.mount_click(right) {
+        if self.mod_browser_press(right)
+            || (self.essentials_ui.scope != essentials_inventory::Scope::Wrist
+                && self.mount_click(right))
+        {
             return;
         }
         if self.recipe_book_click(right) {
             return;
         }
-        if self.station_click(right) {
+        if self.essentials_ui.scope != essentials_inventory::Scope::Wrist
+            && self.station_click(right)
+        {
             return;
         }
         if self.remote.is_some() {
@@ -13937,8 +13996,14 @@ impl Game<'_> {
     }
     /// BowItem.releaseUsing: power from charge time, arrows at power * 3.
     fn release_bow(&mut self, stack: &ItemStack, ticks: u32) {
+        let uuid = horizon_client::lan::playerdata::ints_uuid(self.acting_player_uuid());
+        let tension = self.essentials.tension.remove(&uuid);
         let ammo = self.get_projectile(stack);
-        let mut charge = i32::try_from(ticks).unwrap_or(i32::MAX);
+        let mut charge = if tension.is_some() {
+            72000
+        } else {
+            i32::try_from(ticks).unwrap_or(i32::MAX)
+        };
         let mut canceled = false;
         self.native_arrow_loose(stack, ammo.is_some(), &mut charge, &mut canceled);
         let power = item_use::bow_release_power(ammo.is_some(), charge, canceled);
@@ -13951,7 +14016,32 @@ impl Game<'_> {
             return;
         };
         // BowItem.shootProjectile: shootFromRotation(power * 3, inaccuracy 1).
-        let p = Vec3::new(eye[0], eye[1] - 0.1, eye[2]);
+        let p = if tension.is_some() {
+            self.visor_server
+                .server
+                .vr_state(uuid)
+                .and_then(|v| {
+                    v.pose.map(|p| {
+                        if v.active_hand_main {
+                            p.main_hand.position
+                        } else {
+                            p.off_hand.position
+                        }
+                    })
+                })
+                .and_then(|offset| {
+                    self.player.as_ref().map(|pl| {
+                        Vec3::new(
+                            pl.position.x + f64::from(offset.x),
+                            pl.position.y + f64::from(offset.y),
+                            pl.position.z + f64::from(offset.z),
+                        )
+                    })
+                })
+                .unwrap_or(Vec3::new(eye[0], eye[1] - 0.1, eye[2]))
+        } else {
+            Vec3::new(eye[0], eye[1] - 0.1, eye[2])
+        };
         let ammo = ammo.stack;
         let (power_bonus, infinity) = self.bow_enchantments(&ammo.item);
         let effect = dispenser::tipped_effect(&ammo).or_else(|| {
@@ -13959,7 +14049,7 @@ impl Game<'_> {
         });
         let kind = horizon_client::projectiles::ProjectileKind::Arrow {
             base_damage: 2.0 + power_bonus,
-            critical: power >= 1.0,
+            critical: power >= 1.0 && tension.is_none_or(|t| t >= 0.99),
             effect,
         };
         let mut arrow = horizon_client::projectiles::Projectile::new(
@@ -13987,7 +14077,7 @@ impl Game<'_> {
         let (velocity, on_ground) = self.player.as_ref().map_or((Vec3::ZERO, true), |pl| {
             (self.known_player_movement(), pl.ground.on_ground)
         });
-        let speed = power * 3.0 * self.vr_draw_factor();
+        let speed = power * 3.0 * tension.unwrap_or_else(|| self.vr_draw_factor());
         arrow.shoot_from_rotation(
             &mut self.world.random,
             self.pitch,
@@ -14119,7 +14209,8 @@ impl Game<'_> {
         let mut items = self.visible_hand_items();
         // Standing, a bow is held in the off hand's controller and the main
         // one draws the string (Vivecraft's `BowTracker`).
-        let bow_in_off = vr_hands.is_some()
+        let bow_in_off = !self.visor_mechanics()
+            && vr_hands.is_some()
             && items[0]
                 .as_ref()
                 .is_some_and(|s| &*s.item == "minecraft:bow");
@@ -14132,6 +14223,11 @@ impl Game<'_> {
             if self.pad.headset.bow.notched() {
                 items[0] = Some(ItemStack::new("minecraft:arrow", 1));
             }
+        }
+        if self.essentials_bow_wanted()
+            && (self.essentials.bow.notched || self.essentials.bow.drawing)
+        {
+            items[1 - self.essentials.bow.holder] = None;
         }
         let off_hand_empty = items[1].is_none();
         for (i, (hand, item)) in Hand::BOTH.into_iter().zip(items).enumerate() {
@@ -14274,7 +14370,11 @@ impl Game<'_> {
                 hand
             };
             if controller.is_some()
-                && owner_hand == Hand::Main
+                && (if self.essentials_bow_wanted() {
+                    usize::from(owner_hand == Hand::Off) == self.essentials.bow.holder
+                } else {
+                    owner_hand == Hand::Main
+                })
                 && let Some(remaining) = self.headset_bow_remaining(owner.use_duration)
             {
                 owner.use_item_remaining_ticks = remaining;
@@ -16660,6 +16760,12 @@ impl Game<'_> {
     }
     /// A key press while a world is open (keyboard or control socket).
     fn key_pressed(&mut self, key: KeyCode) -> Result<()> {
+        if self.essentials_ui.container && matches!(key, KeyCode::Escape | KeyCode::KeyE) {
+            self.essentials_ui_close();
+            self.screen = Screen::Playing;
+            self.capture(true);
+            return Ok(());
+        }
         if self.sleeping.is_some()
             && self.screen == Screen::Playing
             && !matches!(
@@ -19661,6 +19767,8 @@ impl<'a> Game<'a> {
             native_net: Default::default(),
             vivecraft: Default::default(),
             visor: visor_net::VisorNet::new(),
+            essentials: Default::default(),
+            essentials_ui: Default::default(),
             visor_server: Default::default(),
             vivecraft_server: Default::default(),
             vr_aim: None,

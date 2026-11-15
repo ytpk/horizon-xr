@@ -2456,6 +2456,12 @@ impl Game<'_> {
             S::CustomPayload(p) if p.channel == horizon_vivecraft::network::CHANNEL => {
                 self.guest_vivecraft(host, conn, &p.data)
             }
+            S::CustomPayload(p) if p.channel == "minecraft:register" => {
+                self.essentials_register(host, conn, &p.data)
+            }
+            S::CustomPayload(p) if p.channel == starling_essentials::network::CHANNEL => {
+                self.guest_essentials(host, conn, &p.data)
+            }
             S::CustomPayload(p) if p.channel == horizon_visor::CHANNEL => {
                 self.guest_visor(host, conn, &p.data)
             }

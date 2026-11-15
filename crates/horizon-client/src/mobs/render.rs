@@ -2704,6 +2704,12 @@ fn visor_item_pose(m: &Mob, alpha: f32, off_hand: bool) -> Option<glam::Mat4> {
         }
     }
     let name = item.strip_prefix("minecraft:").unwrap_or(item);
+    if name == "bow" && crate::headset::essentials_bow_active() {
+        return Some(
+            glam::Mat4::from_rotation_z(-roll)
+                * starling_essentials::bow::item_pose(!off_hand, gun),
+        );
+    }
     let facts = ItemFacts {
         id: item,
         shield: name == "shield",

@@ -73,6 +73,8 @@ pub struct Joined {
     pub properties: Vec<horizon_protocol::packets::login::Property>,
     pub info: ClientInformation,
     pub brand: String,
+    /// Custom payload channels announced during configuration.
+    pub channels: std::collections::HashSet<String>,
     pub sender: PlayerSender,
     /// Smoothed keep-alive round trip in milliseconds.
     pub latency: Arc<AtomicI32>,

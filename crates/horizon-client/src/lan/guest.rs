@@ -95,6 +95,8 @@ pub struct Guest {
     pub latency: Arc<AtomicI32>,
     pub info: ClientInformation,
     pub brand: String,
+    /// Custom payload channels announced during configuration.
+    pub channels: std::collections::HashSet<String>,
     /// The chunk radius this client is sent.
     pub view_distance: i32,
     pub position: [f64; 3],
@@ -389,6 +391,7 @@ impl Guest {
             view_distance: (i32::from(j.info.view_distance)).clamp(2, view_distance),
             info: j.info,
             brand: j.brand,
+            channels: j.channels,
             position,
             previous_position: position,
             yaw: 0.0,
@@ -1440,6 +1443,7 @@ mod tests {
                 properties: Vec::new(),
                 info: ClientInformation::new(8),
                 brand: String::new(),
+                channels: Default::default(),
                 sender: PlayerSender::new(tx, Arc::new(std::sync::atomic::AtomicUsize::new(0))),
                 latency: Arc::new(AtomicI32::new(0)),
                 address: "127.0.0.1:1".parse().unwrap(),

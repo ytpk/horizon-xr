@@ -86,12 +86,16 @@ impl Game<'_> {
         &mut self,
         size: [u32; 2],
     ) -> [Option<HudBatch>; headset::OVERLAYS] {
+        let [inventory, container, dragged] = self.essentials_inventory_overlays(size);
         [
             self.hand_overlay(size, 0),
             self.chat_overlay(size),
             self.screen_handles_overlay(size),
             self.visor_keyboard_overlay(size),
             self.hand_overlay(size, 1),
+            inventory,
+            container,
+            dragged,
         ]
     }
 

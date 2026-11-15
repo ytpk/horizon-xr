@@ -47,6 +47,13 @@ impl Game<'_> {
 
     /// The bow drawn this far (0..1), while it is.
     pub(super) fn headset_bow_draw(&self) -> Option<f32> {
+        if self.essentials_bow_wanted() {
+            return self
+                .essentials
+                .bow
+                .drawing
+                .then_some(self.essentials.bow.draw);
+        }
         let bow = &self.pad.headset.bow;
         (bow.drawing && self.headset_holds_bow()).then_some(bow.draw)
     }
@@ -59,6 +66,12 @@ impl Game<'_> {
         id: winit::window::WindowId,
         playing: bool,
     ) -> bool {
+        if self.essentials_bow_wanted() || self.essentials.bow.drawing {
+            return self.essentials_bow_frame(playing);
+        }
+        if self.visor_mechanics() {
+            return false;
+        }
         let hands = headset::main_hand().zip(headset::off_hand());
         if hands.is_none() || !playing || !self.headset_holds_bow() {
             if self.pad.headset.bow.drawing {
@@ -154,6 +167,9 @@ impl Game<'_> {
     /// hand through the bow hand, its top toward the bow hand's up
     /// (Vivecraft's `BOW_ROOMSCALE_DRAWING`); `None` while it isn't.
     pub(super) fn headset_drawn_bow_frame(&self) -> Option<Mat4> {
+        if self.essentials_bow_wanted() {
+            return None;
+        }
         self.headset_bow_draw()?;
         let (arrow, bow) = headset::main_hand().zip(headset::off_hand())?;
         let body = headset::body_rotation(headset::body_yaw());

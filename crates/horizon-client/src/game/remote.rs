@@ -3535,6 +3535,9 @@ impl Game<'_> {
                 self.vivecraft_payload(&p.data);
             }
             // Visor's channel.
+            C::CustomPayload(p) if p.channel == starling_essentials::network::CHANNEL => {
+                self.essentials_payload(&p.data);
+            }
             C::CustomPayload(p) if p.channel == horizon_visor::CHANNEL => {
                 self.visor_payload(&p.data);
             }
@@ -4963,7 +4966,10 @@ impl Game<'_> {
                     self.book = None;
                     self.sign_edit = None;
                 }
-                if !self.remote_lectern_closed() && (self.screen == Screen::Inventory || dialog) {
+                if !self.remote_lectern_closed()
+                    && (self.screen == Screen::Inventory || self.essentials_ui.container || dialog)
+                {
+                    self.essentials_ui.container = false;
                     self.remote_close_local();
                     self.screen = Screen::Playing;
                     self.capture(true);
@@ -8740,7 +8746,7 @@ impl Game<'_> {
 
     /// MultiPlayerGameMode.useItem for `hand`, if it holds something: whether
     /// the click ends there, as far as this client can tell (`use_ends_click`).
-    fn remote_use_item(&mut self, hand: Hand) -> bool {
+    pub(super) fn remote_use_item(&mut self, hand: Hand) -> bool {
         let Some(held) = self.with_hand(hand, |g| g.held().cloned()) else {
             return false;
         };
@@ -9089,7 +9095,11 @@ impl Game<'_> {
         // different stack in the hand. The off hand keeps its item.
         let in_hand = slot == self.selected || slot == super::shield::OFFHAND_SLOT;
         // A mod's item: held until the button lets go, counted for the mod.
-        if self.mod_use_tick(slot, ticks, !self.right || !in_hand) {
+        if self.mod_use_tick(
+            slot,
+            ticks,
+            (!self.right && !self.essentials.bow.drawing) || !in_hand,
+        ) {
             return;
         }
         // updatingUsingItem runs here too: a use a mod's tick ran out stays
@@ -9260,6 +9270,7 @@ impl Game<'_> {
         let ready = r.loaded_sent
             && self.screen == Screen::Playing
             && self.sleeping.is_none()
+            && !self.essentials_ui.captured
             && !self.dialog_open();
         if stop || !ready {
             self.stop_remote_mining();
@@ -9271,7 +9282,10 @@ impl Game<'_> {
         }
         // MultiPlayerGameMode.tick syncs the carried slot before keybinds.
         self.remote_send_carried();
-        let (attack, use_item) = (self.left, self.right);
+        let (attack, use_item) = (
+            self.left && !self.essentials.bow.drawing,
+            self.right || self.essentials.bow.drawing,
+        );
         // A tick that clicks, attacks or uses acts with the slot its number
         // keys select (`ensureHasSentCarriedItem` before the packets).
         let acts = input.has_clicks() || attack || use_item;
@@ -9639,7 +9653,7 @@ impl Game<'_> {
     /// runs the client half of `Item.releaseUsing` (a Riptide launch moves the
     /// player itself). Vanilla reaches it both when the use key is let go and,
     /// in the same tick, when a keybind opens a screen.
-    fn release_remote_use(&mut self) {
+    pub(super) fn release_remote_use(&mut self) {
         self.send(S::PlayerAction(play::PlayerAction {
             action: 6,
             pos: [0; 3],

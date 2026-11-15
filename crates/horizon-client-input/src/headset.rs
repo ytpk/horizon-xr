@@ -27,7 +27,7 @@ pub struct HandPose {
 
 /// How many second panels the game can show beside the HUD: the hand's overlay (the hotbar wheel,
 /// the movement state), the chat, the handles of a screen, the keyboard and the off-hand wheel.
-pub const OVERLAYS: usize = 5;
+pub const OVERLAYS: usize = 8;
 /// The overlay slots.
 pub const OVERLAY_HAND: usize = 0;
 pub const OVERLAY_CHAT: usize = 1;
@@ -36,6 +36,9 @@ pub const OVERLAY_HANDLES: usize = 2;
 pub const OVERLAY_KEYBOARD: usize = 3;
 /// The off-hand hotbar wheel has its own panel so both grips can be held.
 pub const OVERLAY_OFFHAND: usize = 4;
+pub const OVERLAY_INVENTORY: usize = 5;
+pub const OVERLAY_CONTAINER: usize = 6;
+pub const OVERLAY_DRAGGED: usize = 7;
 
 /// The handles below a screen's panel and what is going on with them.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -794,4 +797,13 @@ mod tests {
         let (dy, dp) = turn_toward_head(0.0, [45.0, -10.0], 45.0, -10.0);
         assert!(dy.abs() < 1e-4 && dp.abs() < 1e-4);
     }
+}
+
+// VisorEssentials' server-gated bow pose, also used when drawing remote VR hands.
+static ESSENTIALS_BOW: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+pub fn set_essentials_bow_active(active: bool) {
+    ESSENTIALS_BOW.store(active, std::sync::atomic::Ordering::Relaxed);
+}
+pub fn essentials_bow_active() -> bool {
+    ESSENTIALS_BOW.load(std::sync::atomic::Ordering::Relaxed)
 }

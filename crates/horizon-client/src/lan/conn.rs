@@ -855,6 +855,7 @@ struct Parts {
     properties: Vec<login::Property>,
     info: ClientInformation,
     brand: String,
+    channels: std::collections::HashSet<String>,
 }
 
 fn login_and_configure(
@@ -940,10 +941,21 @@ fn login_and_configure(
     )?;
     let mut info = ClientInformation::new(10);
     let mut brand = String::from("vanilla");
+    let mut channels = std::collections::HashSet::new();
     let known_pack = loop {
         let (id, payload) = c.recv().map_err(e)?;
         match decode_config(id, &payload).map_err(e)? {
             cfg::Serverbound::ClientInformation(i) => info = i,
+            cfg::Serverbound::CustomPayload(p) if p.channel == "minecraft:register" => {
+                channels.extend(
+                    p.data
+                        .split(|b| *b == 0)
+                        .filter_map(|s| std::str::from_utf8(s).ok())
+                        .filter(|s| !s.is_empty())
+                        .map(str::to_owned),
+                );
+            }
+
             cfg::Serverbound::CustomPayload(p) if p.channel == "minecraft:brand" => {
                 brand = horizon_protocol::buf::Reader::new(&p.data)
                     .string(32767)
@@ -1029,6 +1041,16 @@ fn login_and_configure(
                 }
                 cfg::Serverbound::Pong(p) if p.id == 1 => break,
                 cfg::Serverbound::ClientInformation(i) => info = i,
+                cfg::Serverbound::CustomPayload(p) if p.channel == "minecraft:register" => {
+                    channels.extend(
+                        p.data
+                            .split(|b| *b == 0)
+                            .filter_map(|s| std::str::from_utf8(s).ok())
+                            .filter(|s| !s.is_empty())
+                            .map(str::to_owned),
+                    );
+                }
+
                 _ => {}
             }
         }
@@ -1065,6 +1087,16 @@ fn login_and_configure(
                 }
                 cfg::Serverbound::Pong(p) if p.id == 0 => break,
                 cfg::Serverbound::ClientInformation(i) => info = i,
+                cfg::Serverbound::CustomPayload(p) if p.channel == "minecraft:register" => {
+                    channels.extend(
+                        p.data
+                            .split(|b| *b == 0)
+                            .filter_map(|s| std::str::from_utf8(s).ok())
+                            .filter(|s| !s.is_empty())
+                            .map(str::to_owned),
+                    );
+                }
+
                 _ => {}
             }
         }
@@ -1105,6 +1137,16 @@ fn login_and_configure(
         match decode_config(id, &payload).map_err(e)? {
             cfg::Serverbound::FinishConfiguration(_) => break,
             cfg::Serverbound::ClientInformation(i) => info = i,
+            cfg::Serverbound::CustomPayload(p) if p.channel == "minecraft:register" => {
+                channels.extend(
+                    p.data
+                        .split(|b| *b == 0)
+                        .filter_map(|s| std::str::from_utf8(s).ok())
+                        .filter(|s| !s.is_empty())
+                        .map(str::to_owned),
+                );
+            }
+
             _ => {}
         }
     }
@@ -1114,6 +1156,7 @@ fn login_and_configure(
         properties,
         info,
         brand,
+        channels,
     }))
 }
 
@@ -1287,6 +1330,7 @@ fn play(c: Connection, shared: &Arc<Shared>, parts: Parts, address: std::net::So
         properties: parts.properties,
         info: parts.info,
         brand: parts.brand,
+        channels: parts.channels,
         sender,
         latency,
         address,
@@ -1655,6 +1699,94 @@ mod tests {
                 login::Clientbound::LoginFinished(p) => return p.profile,
                 other => panic!("unexpected login packet {other:?}"),
             }
+        }
+    }
+
+    #[test]
+    fn addon_channels_survive_login_configuration_into_the_joined_player() {
+        let config = crate::lan::NetConfig {
+            announce: false,
+            listen: false,
+            ..crate::lan::NetConfig::lan(0, "Essentials test".into(), 8)
+        };
+        let lan =
+            crate::lan::Lan::start_with(Arc::new(crate::lan::data::SyncData::empty()), config)
+                .unwrap();
+        let mut client = Connection::local(lan.connect_local().unwrap());
+        client
+            .send(
+                &handshake::Serverbound::Intention(handshake::Intention {
+                    protocol: horizon_protocol::PROTOCOL_VERSION,
+                    host: "127.0.0.1".into(),
+                    port: 0,
+                    intent: handshake::LOGIN,
+                })
+                .encode(),
+            )
+            .unwrap();
+        client
+            .send(
+                &login::Serverbound::Hello(login::ServerHello {
+                    name: "Essentials".into(),
+                    uuid: offline_uuid("Essentials"),
+                })
+                .encode(),
+            )
+            .unwrap();
+        loop {
+            let (id, body) = client.recv().unwrap();
+            match login::Clientbound::decode(id, &body).unwrap() {
+                login::Clientbound::Compression(p) => client.set_compression(p.threshold),
+                login::Clientbound::LoginFinished(_) => break,
+                p => panic!("unexpected login response: {p:?}"),
+            }
+        }
+        client
+            .send(&login::Serverbound::LoginAcknowledged(Empty).encode())
+            .unwrap();
+        client
+            .send(
+                &cfg::Serverbound::CustomPayload(cfg::CustomPayload {
+                    channel: "minecraft:register".into(),
+                    data: b"visor:channel\0visor_essentials:channel".to_vec(),
+                })
+                .encode(),
+            )
+            .unwrap();
+        loop {
+            let (id, body) = client.recv().unwrap();
+            match cfg::Clientbound::decode(id, &body).unwrap() {
+                cfg::Clientbound::SelectKnownPacks(p) => client
+                    .send(&cfg::Serverbound::SelectKnownPacks(p).encode())
+                    .unwrap(),
+                cfg::Clientbound::Ping(p) => {
+                    client.send(&cfg::Serverbound::Pong(p).encode()).unwrap()
+                }
+                cfg::Clientbound::FinishConfiguration(_) => {
+                    client
+                        .send(&cfg::Serverbound::FinishConfiguration(Empty).encode())
+                        .unwrap();
+                    break;
+                }
+                cfg::Clientbound::Disconnect(p) => panic!("configuration refused: {p:?}"),
+                _ => {}
+            }
+        }
+        let started = Instant::now();
+        loop {
+            for event in lan.poll() {
+                if let NetEvent::Joined(player) = event {
+                    assert!(player.channels.contains("visor:channel"));
+                    assert!(player.channels.contains("visor_essentials:channel"));
+                    assert_eq!(player.channels.len(), 2);
+                    return;
+                }
+            }
+            assert!(
+                started.elapsed() < Duration::from_secs(3),
+                "configuration never produced Joined"
+            );
+            std::thread::yield_now();
         }
     }
 

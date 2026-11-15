@@ -50,6 +50,7 @@ pub enum PageId {
     Visor,
     /// Horizon only: Quest rendering experiments, read when the game starts.
     Experiments,
+    Essentials,
     // The pages of Visor's VR settings (`VRSettingsCategory` and the sub-screens its categories
     // open), in its order: Presets, Rendering, VR Body, Controls, Movement, Immersion, GUI, World.
     Presets,
@@ -94,6 +95,7 @@ impl PageId {
             PageId::MenuWorld => "vivecraft.options.screen.menuworld",
             PageId::Visor => "horizon.visor.page",
             PageId::Experiments => "horizon.vr.experiments",
+            PageId::Essentials => "starling.essentials.settings",
             PageId::Presets => "visor.options.presets.button",
             PageId::VRendering => "visor.options.rendering.button",
             PageId::Effects => "visor.options.rendering.effects.button",
@@ -135,6 +137,7 @@ impl PageId {
             PageId::MenuWorld => "vivecraft.options.screen.menuworld.button",
             PageId::Visor => "horizon.visor.page.button",
             PageId::Experiments => "horizon.vr.experiments.button",
+            PageId::Essentials => "starling.essentials.settings",
             PageId::Presets => "visor.options.presets.button",
             PageId::VRendering => "visor.options.rendering.button",
             PageId::Effects => "visor.options.rendering.effects.button",
@@ -196,6 +199,7 @@ pub fn entries(page: PageId, s: &VrSettings, server_limited_teleport: bool) -> V
             Entry::Page(PageId::Immersion),
             Entry::Page(PageId::Gui),
             Entry::Page(PageId::World),
+            Entry::Page(PageId::Essentials),
         ],
         PageId::Presets => vec![
             Entry::Preset("defaults"),
@@ -326,11 +330,23 @@ pub fn entries(page: PageId, s: &VrSettings, server_limited_teleport: bool) -> V
         ],
         // The server rules of a world (`VRServerSettings`) have no page; a note says where they live.
         PageId::World => Vec::new(),
+        PageId::Essentials => vec![
+            Opt("essentialsInventoryAimedRotation"),
+            Opt("essentialsInventoryAnchor"),
+            Opt("essentialsInventoryRotationAnchor"),
+            Opt("essentialsBetterInventory"),
+            Opt("essentialsBetterBow"),
+            Opt("essentialsOverlayFocusVisualizer"),
+            Opt("essentialsInventoryScale"),
+            Opt("essentialsContainerScale"),
+        ],
         PageId::Visor => vec![
             Opt("horizonVrProtocol"),
             Opt("visorKeyboard"),
             Opt("visorKeyboardAutoLayout"),
             Opt("visorInBlockVignette"),
+            Opt("essentialsBetterBow"),
+            Opt("essentialsBetterInventory"),
             Opt("essentialsOverlayFocusVisualizer"),
             Opt("horizonRefreshRate"),
             Opt("horizonDynamicResolution"),
@@ -646,11 +662,15 @@ mod tests {
                 PageId::Immersion,
                 PageId::Gui,
                 PageId::World,
+                PageId::Essentials,
             ]
         );
         // None of Vivecraft's pages is reachable from it.
         for page in &pages {
-            assert!(page.title().starts_with("visor."), "{page:?}");
+            assert!(
+                page.title().starts_with("visor.") || *page == PageId::Essentials,
+                "{page:?}"
+            );
         }
     }
 }

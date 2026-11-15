@@ -1544,6 +1544,60 @@ pub const DEFS: &[Def] = &[
         default: "ENGLISH",
         range: None,
     },
+    Def {
+        key: "essentialsBetterBow",
+        kind: Kind::Bool,
+        default: "true",
+        range: None,
+    },
+    Def {
+        key: "essentialsBetterInventory",
+        kind: Kind::Bool,
+        default: "true",
+        range: None,
+    },
+    Def {
+        key: "essentialsInventoryScale",
+        kind: Kind::Float,
+        default: "0.5",
+        range: Some((0.1, 3.0, 0.05)),
+    },
+    Def {
+        key: "essentialsContainerScale",
+        kind: Kind::Float,
+        default: "1.0",
+        range: Some((0.1, 3.0, 0.05)),
+    },
+    Def {
+        key: "essentialsInventoryPosition",
+        kind: Kind::Vec3,
+        default: "-0.07,-0.081,0.2",
+        range: None,
+    },
+    Def {
+        key: "essentialsInventoryRotation",
+        kind: Kind::Vec3,
+        default: "0,90,180",
+        range: None,
+    },
+    Def {
+        key: "essentialsInventoryAnchor",
+        kind: Kind::Enum(&["NONE", "HMD", "MAIN_HAND", "OFFHAND"]),
+        default: "OFFHAND",
+        range: None,
+    },
+    Def {
+        key: "essentialsInventoryRotationAnchor",
+        kind: Kind::Enum(&["NONE", "HMD", "MAIN_HAND", "OFFHAND"]),
+        default: "OFFHAND",
+        range: None,
+    },
+    Def {
+        key: "essentialsInventoryAimedRotation",
+        kind: Kind::Bool,
+        default: "false",
+        range: None,
+    },
     // Starling modded: VisorEssentials' remote menu placeholder.
     Def {
         key: "essentialsOverlayFocusVisualizer",

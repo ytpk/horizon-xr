@@ -129,8 +129,13 @@ impl Game<'_> {
             log::error!("Headset: saving before quitting: {e}");
         }
         self.visor_late_login();
+        headset::set_essentials_bow_active(
+            self.essentials.supported && self.settings.vr.bool("essentialsBetterBow"),
+        );
         self.visor_update_two_handed();
         if !headset::active() {
+            self.essentials_bow_frame(false);
+            self.essentials_inventory_frame();
             self.vr_clear_room_tracking();
             return;
         }
@@ -139,10 +144,18 @@ impl Game<'_> {
         if headset::take_keyboard_toggle() {
             self.vr_keyboard_toggle();
         }
-        self.visor_keyboard_frame();
+        let essentials_keyboard = self.essentials_keyboard_frame();
+        if !essentials_keyboard {
+            self.visor_keyboard_frame();
+        }
         let effective = self.vivecraft_effective_settings();
         headset::set_settings(&effective);
         self.vr_update();
+        if self.essentials_inventory_frame() {
+            self.headset_game_menu_button();
+            headset::set_menu(false);
+            return;
+        }
         self.vr_teleport_frame();
         let menu = self.pad_in_menu();
         if menu {
@@ -231,7 +244,7 @@ impl Game<'_> {
         // Over the on-screen keyboard the pointer types (Vivecraft's keyboard).
         if menu {
             self.headset_auto_keyboard();
-        } else {
+        } else if !essentials_keyboard {
             self.visor_keyboard_no_screen();
         }
         let over_keys = at.is_some() && self.headset_keyboard(false);
@@ -555,6 +568,12 @@ impl Game<'_> {
     /// Standing, a bow being drawn aims from the main hand (the string)
     /// through the off hand (the bow), as Vivecraft's `BowTracker`.
     fn headset_bow_aim(&self) -> Option<[f32; 2]> {
+        if let Some(aim) = self.essentials_bow_angles() {
+            return Some(aim);
+        }
+        if self.essentials_bow_wanted() {
+            return None;
+        }
         if headset::settings().seated()
             || self.used_hand().is_none()
             || self.held().is_none_or(|s| &*s.item != "minecraft:bow")
@@ -779,7 +798,8 @@ impl Game<'_> {
         let off = self.pad_in_menu() || self.spectator() || self.pad.headset.vr.keyboard.showing();
         let main =
             off || (headset::settings().bool("vrTouchHotbar") && headset::hud_slot().is_some());
-        [main, off]
+        let gui = self.essentials_gui_hands();
+        [main || gui[0], off || gui[1]]
     }
 
     /// `VRArmHelper.renderMenuHand`: a gray box 18 cm long, 4 by 2.5 cm, back
@@ -863,6 +883,16 @@ impl Game<'_> {
                 .contains_key("minecraft:consumable")
         };
         let held = Held::of(&stack.item, block, food, map);
+        if held == Held::Bow && self.essentials_bow_wanted() {
+            return frame.at
+                * horizon_visor::item_pose::hand_base(
+                    headset::settings().float("playerModelArmsScale"),
+                )
+                * starling_essentials::bow::item_pose(
+                    frame.left == headset::settings().left_handed(),
+                    self.visor_gun_angle(),
+                );
+        }
         if held == Held::Bow
             && let Some(drawn) = self.headset_drawn_bow_frame()
         {
@@ -1017,6 +1047,9 @@ impl Game<'_> {
                     on_top.push(menu_pointer_line(camera, body, pose.aim, length));
                 }
             }
+            return;
+        }
+        if self.essentials_pointer_lines(camera, on_top) || self.essentials_bow_crosshair(camera) {
             return;
         }
         let context = CrosshairContext {

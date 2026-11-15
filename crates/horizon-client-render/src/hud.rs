@@ -1856,6 +1856,7 @@ impl HudAtlas {
         images.push(("horizon/white".into(), 4, 4, vec![255; 64]));
         // Visor's own textures (the hotbar wheel, the movement icons, the warning, the headset).
         images.extend(crate::visor_art::images());
+        images.extend(crate::essentials_art::images());
         if full {
             Self::slots(&mut images, crate::trims::slot_size(root), mod_image);
             // MissingTextureAtlasSprite.generateMissingImage: 16x16, magenta
