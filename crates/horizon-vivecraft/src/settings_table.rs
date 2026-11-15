@@ -1544,6 +1544,13 @@ pub const DEFS: &[Def] = &[
         default: "ENGLISH",
         range: None,
     },
+    // Starling modded: VisorEssentials' remote menu placeholder.
+    Def {
+        key: "essentialsOverlayFocusVisualizer",
+        kind: Kind::Bool,
+        default: "true",
+        range: None,
+    },
     // Horizon only, Visor: the view darkens near a solid block (`VRShaderInBlockVignette`),
     // through the comfort vignette's image.
     Def {

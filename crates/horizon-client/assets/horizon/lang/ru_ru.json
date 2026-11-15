@@ -1675,5 +1675,8 @@
   "horizon.quest.files.unavailable.title": "Ваши файлы здесь",
   "horizon.quest.files.unavailable.body": "В этом шлеме нет настройки доступа ко всем файлам. Ваши миры, паки, шейдеры и моды лежат в %s. Откройте эту папку с компьютера по USB.",
   "horizon.quest.files.unavailable.primary": "OK",
-  "horizon.quest.files.unavailable.other": "OK"
+  "horizon.quest.files.unavailable.other": "OK",
+  "starling.essentials.overlay": "МЕНЮ",
+  "starling.essentials.overlay_focus": "Essentials: индикатор меню игроков",
+  "starling.essentials.overlay_focus.tooltip": "Показывает небольшую панель перед другими игроками Visor, пока они используют меню. Содержимое их экрана не отображается."
 }

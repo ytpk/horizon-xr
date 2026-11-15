@@ -34,6 +34,7 @@ members = [
     # Vivecraft port (LGPL-3.0-or-later): protocol, server logic, settings, VR math.
     "crates/horizon-vivecraft",
     "crates/horizon-visor",
+    "crates/starling-essentials",
     "crates/horizon-theme",
     "crates/horizon-account",
     "crates/horizon-fetch",

@@ -97,6 +97,7 @@ pub const VISOR_PROFILE: &[(&str, &str)] = &[
     // `swing.speed_threshold = 3.0`, `in_block` vignette on.
     ("visorSwingSpeedThreshold", "3.0"),
     ("visorInBlockVignette", "true"),
+    ("essentialsOverlayFocusVisualizer", "true"),
 ];
 
 /// `VRSettings`' values; every key of [`DEFS`] has one.

@@ -1,5 +1,13 @@
 # Horizon: a map for agents
 
+## Starling modded fork
+
+On `starling-main-modded`, the fork owner authorizes porting VisorEssentials and
+subsequently selected mods, including their source and assets under their respective
+licenses. This overrides the upstream source-license allowlist for this work. Preserve
+copyright, license texts and source revision attribution. See `docs/modded.md`.
+
+
 Minecraft: Java Edition 26.3 rewritten in Rust (wgpu). Vanilla is the specification wherever it has the
 feature. Read [CONTRIBUTING.md](CONTRIBUTING.md) once; this page tells you where things are.
 Feature → files → harness for the most-changed areas: [docs/architecture.md](docs/architecture.md).

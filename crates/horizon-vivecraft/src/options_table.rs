@@ -1932,6 +1932,15 @@ pub const OPTS: &[OptInfo] = &[
         lang: "visor.options.gui.keyboard.auto_layout",
     },
     OptInfo {
+        key: "essentialsOverlayFocusVisualizer",
+        name: "ESSENTIALS_OVERLAY_FOCUS_VISUALIZER",
+        decimals: 0,
+        on: "options.on",
+        off: "options.off",
+        class: "",
+        lang: "starling.essentials.overlay_focus",
+    },
+    OptInfo {
         key: "visorInBlockVignette",
         name: "VISOR_IN_BLOCK_VIGNETTE",
         decimals: 0,

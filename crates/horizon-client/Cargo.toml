@@ -31,6 +31,7 @@ horizon-protocol = { path = "../horizon-protocol" }
 horizon-vivecraft = { path = "../horizon-vivecraft" }
 # Visor port (MPL-2.0): the visor:channel protocol on the client and the server.
 horizon-visor = { path = "../horizon-visor" }
+starling-essentials = { path = "../starling-essentials" }
 # server.properties, eula.txt and the user lists, shared with horizon-server.
 horizon-server-files = { path = "../horizon-server-files" }
 # The dedicated server's anticheat, off unless server.toml's [anticheat] turns it on (docs/anticheat.md).

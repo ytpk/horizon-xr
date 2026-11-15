@@ -444,3 +444,16 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ```
+
+## VisorEssentials (Starling modded fork)
+
+`crates/starling-essentials` and `crates/horizon-client/src/game/essentials.rs`
+port `RemoteOverlayRenderHelper.java` from
+[VisorModStudio/VisorEssentials](https://github.com/VisorModStudio/VisorEssentials/tree/88ffec507449eb1a97ccbf495cd331a46c6d635b).
+Copyright (c) 2025-2026 Phoenix-Ra and VisorEssentials contributors.
+Licensed under LGPL-3.0-only, as declared by upstream `stonecutter.properties.toml`. License
+texts are in `crates/starling-essentials/LICENSE-LGPL-3.0` and `LICENSE-GPL-3.0`.
+Changes: native Rust geometry, integration with the wgpu world renderer,
+interpolated remote player poses, localized label and a persistent feature toggle.
+The source revision and remaining port scope are recorded in `docs/modded.md`.
+These files retain their LGPL license; no upstream Java loader is bundled.

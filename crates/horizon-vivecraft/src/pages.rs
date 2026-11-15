@@ -331,6 +331,7 @@ pub fn entries(page: PageId, s: &VrSettings, server_limited_teleport: bool) -> V
             Opt("visorKeyboard"),
             Opt("visorKeyboardAutoLayout"),
             Opt("visorInBlockVignette"),
+            Opt("essentialsOverlayFocusVisualizer"),
             Opt("horizonRefreshRate"),
             Opt("horizonDynamicResolution"),
             Opt("horizonOpaqueWater"),

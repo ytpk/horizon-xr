@@ -2077,5 +2077,8 @@
   "horizon.quest.files.unavailable.title": "Your files are here",
   "horizon.quest.files.unavailable.body": "This headset has no setting to allow access to all files. Your worlds, packs, shaders and mods are in %s. Open that folder from a computer over USB.",
   "horizon.quest.files.unavailable.primary": "OK",
-  "horizon.quest.files.unavailable.other": "OK"
+  "horizon.quest.files.unavailable.other": "OK",
+  "starling.essentials.overlay": "MENU",
+  "starling.essentials.overlay_focus": "Essentials: Player Menu Indicator",
+  "starling.essentials.overlay_focus.tooltip": "Shows a small panel in front of other Visor players while they use a menu. Their screen contents stay private."
 }
